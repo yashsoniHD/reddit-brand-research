@@ -1,0 +1,216 @@
+"""Community discovery: the model proposes subreddits, the archive vets them.
+
+The user no longer picks communities, so something has to. A language model is good
+at "where on Reddit do people talk about this" and bad at knowing whether the
+community it just named actually exists, because models invent plausible-looking
+subreddits constantly. The two jobs are therefore split: one model call proposes
+and ranks candidates, then every name is normalised, deduped and checked against
+the archive before it can reach the fetch stage.
+
+Like the rest of the app above the data layer, nothing here imports `requests` or
+knows an endpoint: lookups go through `reddit_data.lookup_subreddit` and the model
+call goes through `analysis.chat_json`, so discovery inherits the same retry,
+model-fallback and error-message behaviour as the two main calls.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Callable, List, Optional
+
+import analysis
+import reddit_data
+
+logger = logging.getLogger(__name__)
+
+# ── Shape of the search ───────────────────────────────────────────────────────
+MIN_CANDIDATES = 8
+MAX_CANDIDATES = 12
+MAX_COMMUNITIES = 4
+MAX_REASON_WORDS = 15
+# Twelve candidates with a short reason each is roughly 600 tokens of JSON. The
+# ceiling is set well above that because the failure mode is asymmetric: spare
+# allowance costs nothing (only tokens actually emitted are billed), while coming up
+# a few tokens short truncates the JSON mid-object and fails the whole run.
+DISCOVERY_MAX_TOKENS = 4000
+
+# User-facing messages (complete sentences, no status codes, no URLs).
+_NOTHING_FOUND = (
+    "We could not find any Reddit communities for that. Try describing what you "
+    "are looking for in different words, or use plainer terms."
+)
+
+
+def _sanitize_candidates(raw) -> List[dict]:
+    """Trust nothing the model said: keep only names that could be real subreddits.
+
+    The model happily returns "r/RealSub", duplicates in different casing, prose in
+    the name field and markdown in the reason. `normalize_subreddit` is the same
+    gate a hand-typed name passes through, so anything it rejects is dropped rather
+    than guessed at.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+
+    candidates: List[dict] = []
+    seen = set()
+    for entry in raw.get("candidates") or []:
+        if isinstance(entry, str):
+            entry = {"name": entry, "reason": ""}
+        if not isinstance(entry, dict):
+            continue
+
+        try:
+            name = reddit_data.normalize_subreddit(entry.get("name"))
+        except ValueError:
+            logger.info("discovery dropped an unusable candidate name: %r", entry.get("name"))
+            continue
+        if name.lower() in seen:
+            continue
+
+        reason = analysis.strip_markdown(entry.get("reason"))
+        words = reason.split()
+        if len(words) > MAX_REASON_WORDS:
+            reason = " ".join(words[:MAX_REASON_WORDS])
+
+        seen.add(name.lower())
+        candidates.append({"name": name, "reason": reason})
+        if len(candidates) >= MAX_CANDIDATES:
+            break
+
+    return candidates
+
+
+def _discovery_prompt(query: str, profile: str) -> str:
+    profile_line = ""
+    if profile:
+        profile_line = "\nThe person asking describes themselves as: {}\n".format(profile)
+
+    return """You are a Reddit researcher. Someone wants content ideas about this:
+
+{query}
+{profile_line}
+Name the subreddits where people actually discuss this, ranked most relevant first.
+
+Return ONLY a JSON object with exactly this key:
+
+{{
+  "candidates": [{{"name": "...", "reason": "..."}}]
+}}
+
+Rules:
+- Give {min_candidates} to {max_candidates} candidates, best first. Only the first
+  few will be read, so rank carefully.
+- "name" is the bare community name only, with no "r/" prefix, no URL and no
+  spaces. Only name communities you are confident exist and are active.
+- Prefer communities where the topic is the point of the community, not large
+  general-interest subreddits where it comes up occasionally.
+- "reason" is at most {max_words} words, written for the person asking, saying what
+  they will find there. For example: "Freelancers swap pricing and client-management
+  advice here."
+- Do not include URLs, links, image syntax or markdown formatting in any string.
+- Never use an em dash or an en dash in any string you return. Use a comma or
+  start a new sentence instead.
+
+No markdown fences, no commentary. JSON only.""".format(
+        query=query,
+        profile_line=profile_line,
+        min_candidates=MIN_CANDIDATES,
+        max_candidates=MAX_CANDIDATES,
+        max_words=MAX_REASON_WORDS,
+    )
+
+
+def discover(
+    query: str,
+    profile: str = "",
+    *,
+    chat: Optional[Callable] = None,
+    lookup: Optional[Callable] = None,
+) -> dict:
+    """Pick the communities this run will read, or raise ValueError with a message.
+
+    Returns {"communities": [{"name", "reason", "subscribers", "checked"}],
+             "considered": [name, ...]} where `considered` is every candidate the
+    model proposed that survived name sanitisation, so the report can show the
+    search that was actually run rather than only its winners.
+
+    `chat` and `lookup` are injection points, exactly like the callables
+    `pipeline.run_report` takes, so tests and Streamlit caching can substitute
+    their own without this module importing either.
+    """
+    chat = chat or analysis.chat_json
+    lookup = lookup or reddit_data.lookup_subreddit
+
+    text = (query or "").strip()
+    if not text:
+        raise ValueError(_NOTHING_FOUND)
+
+    # Thinking off: naming the subreddits for a topic is recall and ranking, which the
+    # model either knows or does not, and deliberation does not improve it. It also
+    # keeps reasoning tokens from eating the output allowance this call is sized for.
+    raw, model = chat(
+        _discovery_prompt(text, (profile or "").strip()),
+        DISCOVERY_MAX_TOKENS,
+        "discovery",
+        thinking=False,
+    )
+    candidates = _sanitize_candidates(raw)
+    if not candidates:
+        logger.warning("discovery returned no usable candidates")
+        raise ValueError(_NOTHING_FOUND)
+    logger.info("discovery proposed %s candidates with %s", len(candidates), model)
+
+    communities: List[dict] = []
+    attempted = 0
+    unreachable = 0
+
+    # The model ranked these, so its order is kept: the first ones that pass are the
+    # ones that get read.
+    for candidate in candidates:
+        if len(communities) >= MAX_COMMUNITIES:
+            break
+        attempted += 1
+        try:
+            found = lookup(candidate["name"])
+        except RuntimeError as exc:
+            unreachable += 1
+            logger.warning("could not check r/%s: %s", candidate["name"], exc)
+            continue
+
+        if not found:
+            logger.info("discovery dropped r/%s: no such community", candidate["name"])
+            continue
+        if found.get("over18") or not found.get("public"):
+            logger.info("discovery dropped r/%s: private or over-18", candidate["name"])
+            continue
+
+        communities.append(
+            {
+                "name": found.get("name") or candidate["name"],
+                "reason": candidate["reason"],
+                "subscribers": int(found.get("subscribers") or 0),
+                "checked": True,
+            }
+        )
+
+    if not communities and attempted and unreachable == attempted:
+        # Fail OPEN, the same choice `validate_subreddit` makes: our own lookup being
+        # down is not a reason to tell the user their idea has no communities. The
+        # fetch stage will report anything that turns out not to exist.
+        logger.warning("community lookup unavailable for every candidate; trusting the model")
+        communities = [
+            {"name": candidate["name"], "reason": candidate["reason"], "subscribers": 0, "checked": False}
+            for candidate in candidates[:MAX_COMMUNITIES]
+        ]
+
+    if not communities:
+        raise ValueError(_NOTHING_FOUND)
+
+    logger.info(
+        "discovery selected %s of %s candidates: %s",
+        len(communities), len(candidates), ", ".join(c["name"] for c in communities),
+    )
+    return {
+        "communities": communities,
+        "considered": [candidate["name"] for candidate in candidates],
+    }
