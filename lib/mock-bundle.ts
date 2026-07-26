@@ -1,10 +1,10 @@
 /**
- * A fictional bundle v2, used only by the development demo loader.
+ * A fictional bundle v3, used only by the development demo loader.
  *
  * Nothing here is real: the communities are r/example* names, the posts are
  * invented, and every URL points at a reddit.com/r/example* path that does not
  * exist. Its job is to exercise every branch of the report UI (used and unused
- * communities, truncated samples, notices, ideas for both platforms, citations)
+ * communities, truncated samples, notices, every idea format, citations)
  * without a backend. Production only ever renders bundles from /api/*.
  */
 
@@ -223,7 +223,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "The three sentences that stop a pricing conversation from stalling",
     hook: "I lost four projects to the same eight seconds of silence.",
-    platform: "linkedin",
     format: "Text post",
     angle:
       "Open with the silence after you name a number, then give the exact three sentences that fill it: the range, what moves it up, what moves it down.",
@@ -235,7 +234,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "What 250 cold emails actually returned, in one chart",
     hook: "250 cold emails. One reply worth having. Here is what the same hours did instead.",
-    platform: "linkedin",
     format: "Carousel (PDF)",
     angle:
       "Put the two channels side by side across the same number of hours and let the gap do the arguing. End on the one case where cold outreach still works.",
@@ -247,7 +245,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Two revisions, written on page one",
     hook: "Unlimited revisions is not standard. It is just unpriced.",
-    platform: "linkedin",
     format: "Text post",
     angle:
       "Reframe unlimited revisions as a pricing problem rather than a trust problem, then show the exact clause wording.",
@@ -259,7 +256,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "The intake form that replaced half my discovery calls",
     hook: "I stopped taking calls with people who would not answer three questions by email.",
-    platform: "linkedin",
     format: "Long-form article",
     angle:
       "Walk through the three questions, what each one screens for, and the polite decline you send when the answers are wrong.",
@@ -271,7 +267,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Why your case studies feel like they are failing",
     hook: "Four likes. Two weeks later, a five figure DM.",
-    platform: "linkedin",
     format: "Text post",
     angle:
       "Separate engagement from intent, then argue that the case study is a sales document that happens to be posted publicly.",
@@ -283,7 +278,6 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "The losses folder",
     hook: "I wrote down why I lost twelve pitches. It was never the price.",
-    platform: "linkedin",
     format: "Poll",
     angle:
       "Ask people to guess the top reason pitches are lost, then reveal that the pattern in this sample was talking to the wrong person in the building.",
@@ -295,8 +289,7 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Show the rejected directions",
     hook: "The work you did not ship is the work that gets you hired.",
-    platform: "instagram",
-    format: "Carousel",
+    format: "Carousel (PDF)",
     angle:
       "Three rejected directions per slide, the chosen one last, with one line on why each was wrong for the brief.",
     rationale:
@@ -307,10 +300,9 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Fifteen billable hours out of forty",
     hook: "Fifteen hours of design. Twenty five hours of everything else. That is the job.",
-    platform: "instagram",
-    format: "Reel script",
+    format: "Video script",
     angle:
-      "Fast cuts through a real week with the hour count on screen, landing on the reassurance that this ratio is normal for studio owners.",
+      "Talk through a real week with the hour count on screen, landing on the reassurance that this ratio is normal for studio owners.",
     rationale:
       "A post asking whether this ratio was normal drew a strong consensus that it is, which is exactly the reassurance the audience is searching for.",
     addresses: "Feeling like you are running the studio badly",
@@ -319,10 +311,9 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "The screenshot folder that writes your content for you",
     hook: "Every project already contains ten posts. You are deleting nine of them.",
-    platform: "instagram",
-    format: "Story series",
+    format: "Long-form article",
     angle:
-      "One story per capture moment across a project timeline, ending with the folder structure as a saveable frame.",
+      "Walk a single project from kickoff to delivery, marking each moment worth capturing, and end with the folder structure itself.",
     rationale:
       "Turning finished work into content is a recognised gap in the sample and the folder habit was the only system anyone described.",
     addresses: "Finishing projects with nothing left to post",
@@ -331,10 +322,9 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Raised rates 40 percent, lost one client",
     hook: "The client I lost was the one eating half my week.",
-    platform: "instagram",
-    format: "Caption + image idea",
+    format: "Text post",
     angle:
-      "A single plain type image with the before and after rate, and a caption about which client actually left.",
+      "Open with the before and after rate, then spend the body on which client actually left and why that was the point.",
     rationale:
       "Two separate rate increase posts in the sample reported the same outcome, which makes the claim credible rather than boastful.",
     addresses: "Fear that raising rates empties the pipeline",
@@ -393,7 +383,7 @@ function sentimentPercentages(counts: Record<SentimentKey, number>): Record<Sent
 const COUNTS = sentimentCounts();
 
 export const MOCK_BUNDLE: Bundle = {
-  bundle_version: 2,
+  bundle_version: 3,
   generated_at: "2026-07-26 09:14 UTC",
   generated_ts: Math.floor(WINDOW_END / 1000),
   elapsed_seconds: 41.6,
@@ -404,8 +394,6 @@ export const MOCK_BUNDLE: Bundle = {
   inputs: {
     query: "How small design studios win clients without cold outreach",
     profile: "I run a two person branding studio for early stage software companies.",
-    platform: "both",
-    platform_label: "LinkedIn + Instagram",
     subreddits: [...SUBS],
     days: 14,
   },

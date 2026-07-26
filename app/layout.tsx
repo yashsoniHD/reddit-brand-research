@@ -5,7 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Reddit Content Ideas",
   description:
-    "Type what you are looking for. We find the Reddit communities, read them, and turn what people actually say into content ideas for LinkedIn and Instagram.",
+    "Type what you are looking for. We find the Reddit communities, read them, and turn what people actually say into content ideas with the hook written and a post you can publish.",
   icons: {
     icon: [{ url: "/logo.svg", type: "image/svg+xml" }],
     apple: [{ url: "/logo.svg", type: "image/svg+xml" }],

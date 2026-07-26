@@ -1,9 +1,15 @@
-import { BarList, type BarDatum } from "@/components/charts/bar-list";
-import { CitationList } from "@/components/report/citation-list";
+import { EvidencePills } from "@/components/report/evidence-pills";
 import { Section } from "@/components/report/section";
 import { shareText } from "@/lib/format";
 import type { Bundle } from "@/lib/types";
 
+/**
+ * Topic volume and the finding behind each one, in one block.
+ *
+ * The bar, the label, the value and the finding now live in a single row rather
+ * than in a chart followed by a duplicate list of expanders, which halves the
+ * vertical space and removes the repetition.
+ */
 export function Topics({ bundle }: { bundle: Bundle }) {
   const topics = bundle.analysis.topics ?? [];
   const lowData = bundle.sample.low_data;
@@ -11,7 +17,7 @@ export function Topics({ bundle }: { bundle: Bundle }) {
   if (topics.length === 0) {
     return (
       <Section title="Trending topics">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           No recurring topics were identified in this sample.
         </p>
       </Section>
@@ -20,61 +26,73 @@ export function Topics({ bundle }: { bundle: Bundle }) {
 
   // In a thin sample a percentage implies a precision the data does not have,
   // so the measure switches to plain item counts.
-  const data: BarDatum[] = topics.map((topic) => ({
-    key: String(topic.id),
-    label: topic.label,
-    value: lowData ? topic.count : topic.share,
-    valueLabel: lowData
-      ? `${topic.count} ${topic.count === 1 ? "item" : "items"}`
-      : `${shareText(topic.share)}%`,
-  }));
-
-  const ordered = [...topics].sort((a, b) =>
-    lowData ? b.count - a.count : b.share - a.share,
+  const measure = (share: number, count: number) => (lowData ? count : share);
+  const ordered = [...topics].sort(
+    (a, b) => measure(b.share, b.count) - measure(a.share, a.count),
   );
+  const max = Math.max(...ordered.map((topic) => measure(topic.share, topic.count)), 1);
 
   return (
-    <Section title="Trending topics">
-      <BarList
-        data={data}
-        caption={
-          lowData
-            ? "Items mentioning each topic, from per item classifications."
-            : "Share of the analysed conversation, from per item classifications."
-        }
-      />
+    <Section
+      title="Trending topics"
+      description={
+        lowData
+          ? "Items mentioning each topic, from per item classifications."
+          : "Share of the analysed conversation, from per item classifications."
+      }
+    >
+      <ul className="flex list-none flex-col gap-0 p-0">
+        {ordered.map((topic) => {
+          const value = measure(topic.share, topic.count);
+          const width = Math.max(1.5, (value / max) * 100);
+          const valueLabel = lowData
+            ? `${topic.count} ${topic.count === 1 ? "item" : "items"}`
+            : `${shareText(topic.share)}%`;
 
-      <div className="mt-6 flex flex-col gap-2">
-        {ordered.map((topic, position) => (
-          <details
-            key={String(topic.id)}
-            open={position < 2}
-            className="group rounded-xl border bg-card px-4 py-3"
-          >
-            <summary className="flex cursor-pointer list-none items-baseline justify-between gap-4 text-sm font-medium text-foreground marker:hidden">
-              <span>{topic.label}</span>
-              <span className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground">
-                {lowData
-                  ? `${topic.count} items`
-                  : `${shareText(topic.share)}% of the conversation`}
-              </span>
-            </summary>
-            <div className="mt-3">
+          return (
+            <li
+              key={String(topic.id)}
+              className="border-b border-border/60 py-3 last:border-b-0"
+            >
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-sm leading-snug font-medium text-foreground">
+                  {topic.label}
+                </span>
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {valueLabel}
+                </span>
+              </div>
+
+              {/* One series, so no legend: the section title names the measure,
+                  and every bar is directly labelled above it. */}
+              <div
+                className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full"
+                style={{ background: "var(--viz-track)" }}
+                role="img"
+                aria-label={`${topic.label}: ${valueLabel}`}
+              >
+                <div
+                  className="h-full rounded-r-[4px]"
+                  style={{ width: `${width}%`, background: "var(--viz-accent)" }}
+                />
+              </div>
+
               {topic.finding ? (
-                <p className="text-sm leading-relaxed text-foreground">{topic.finding}</p>
-              ) : null}
-              {topic.citations.length > 0 ? (
-                <>
-                  <p className="mt-3 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                    Evidence
-                  </p>
-                  <CitationList citations={topic.citations} />
-                </>
-              ) : null}
-            </div>
-          </details>
-        ))}
-      </div>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                  {topic.finding}{" "}
+                  <EvidencePills citations={topic.citations} label="Source" />
+                </p>
+              ) : (
+                <EvidencePills
+                  citations={topic.citations}
+                  label="Source"
+                  className="mt-2"
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </Section>
   );
 }

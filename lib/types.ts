@@ -1,5 +1,5 @@
 /**
- * Report bundle v2.
+ * Report bundle v3.
  *
  * Hand-derived from the Python engine so the two cannot drift silently:
  * field names and nesting come from `pipeline.run_report`, the numeric shapes
@@ -7,14 +7,17 @@
  * `reddit_data.fetch_comments`, and the idea/claim shapes from
  * `analysis.sanitize_synthesis`.
  *
+ * v3 removes the publishing-target concept from the product surface: inputs
+ * carry only {query, profile, days}, and an idea no longer names a target.
+ * Writing for a professional feed is a property of the prompts, not of the
+ * bundle or the UI.
+ *
  * The bundle is the single unit of state on this side too: it is what the
  * stream delivers, what history stores, and what every section renders.
  */
 
-export const BUNDLE_VERSION = 2;
+export const BUNDLE_VERSION = 3;
 
-export type PlatformKey = "linkedin" | "instagram" | "both";
-export type IdeaPlatform = "linkedin" | "instagram";
 export type SentimentKey = "pos" | "neu" | "neg";
 
 /** Posts, comments and analysed items all share this shape. */
@@ -61,8 +64,6 @@ export interface Discovery {
 export interface Inputs {
   query: string;
   profile: string;
-  platform: PlatformKey;
-  platform_label: string;
   /** Only the communities that actually contributed data. */
   subreddits: string[];
   days: number;
@@ -99,7 +100,6 @@ export interface ContentIdea {
   title: string;
   /** The literal opening line, written to stop the scroll. May be empty. */
   hook: string;
-  platform: IdeaPlatform;
   format: string;
   angle: string;
   rationale: string;
@@ -176,12 +176,11 @@ export interface Bundle {
   stats: Stats;
 }
 
-/* ── Request and stream contract (see Addendum 2, "API contract") ─────────── */
+/* ── Request and stream contract (Addendum 2, amended by Addendum 3) ──────── */
 
 export interface ReportRequest {
   query: string;
   profile: string;
-  platform: PlatformKey;
   days: number;
 }
 
@@ -195,23 +194,35 @@ export type SampleResponse =
   | { available: true; bundle: Bundle }
   | { available: false };
 
+/* ── Draft contract (Addendum 3 item 2) ───────────────────────────────────── */
+
+/** The idea fields the drafting call needs. Citations go over as excerpts. */
+export interface DraftIdea {
+  title: string;
+  hook: string;
+  format: string;
+  angle: string;
+  addresses: string;
+}
+
+export interface DraftRequest {
+  idea: DraftIdea;
+  /** Up to MAX_DRAFT_EVIDENCE source excerpts. */
+  evidence: string[];
+  query: string;
+  profile: string;
+}
+
+export type DraftResponse = { post: string } | { error: string };
+
+export const MAX_DRAFT_EVIDENCE = 6;
+
 /* ── Constants mirrored from the engine ───────────────────────────────────── */
 
 export const MIN_QUERY_CHARS = 10;
 export const MAX_QUERY_CHARS = 300;
 export const MAX_PROFILE_CHARS = 500;
 export const TIME_WINDOWS = [7, 14, 30] as const;
-
-export const PLATFORM_LABELS: Record<PlatformKey, string> = {
-  linkedin: "LinkedIn",
-  instagram: "Instagram",
-  both: "LinkedIn + Instagram",
-};
-
-export const IDEA_PLATFORM_LABELS: Record<IdeaPlatform, string> = {
-  linkedin: "LinkedIn",
-  instagram: "Instagram",
-};
 
 export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   pos: "Positive",
@@ -222,7 +233,7 @@ export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
 export const SENTIMENT_ORDER: SentimentKey[] = ["pos", "neu", "neg"];
 
 /** Narrow an unknown payload before anything renders it. */
-export function isBundleV2(value: unknown): value is Bundle {
+export function isBundleV3(value: unknown): value is Bundle {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<Bundle>;
   return (

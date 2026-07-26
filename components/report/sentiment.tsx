@@ -24,29 +24,27 @@ export function Sentiment({ bundle }: { bundle: Bundle }) {
     <Section title="Sentiment">
       {sample.low_data ? (
         // Percentages of nine items are theatre, so a thin sample gets counts.
-        <div className="grid gap-3 sm:grid-cols-3">
+        <ul className="flex list-none flex-wrap gap-x-6 gap-y-2 p-0 text-sm">
           {SENTIMENT_ORDER.map((key) => (
-            <div key={key} className="rounded-xl border bg-card p-4">
-              <p className="flex items-center gap-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                <span
-                  aria-hidden="true"
-                  className="size-2.5 rounded-full"
-                  style={{ background: COLOURS[key] }}
-                />
-                {SENTIMENT_LABELS[key]}
-              </p>
-              <p className="mt-1.5 text-xl font-semibold text-foreground">
+            <li key={key} className="flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className="size-2.5 rounded-full"
+                style={{ background: COLOURS[key] }}
+              />
+              <span className="text-foreground">{SENTIMENT_LABELS[key]}</span>
+              <span className="tabular-nums text-muted-foreground">
                 {counts[key] ?? 0}
-              </p>
-            </div>
+              </span>
+            </li>
           ))}
-        </div>
+        </ul>
       ) : (
         <StackedBar segments={segments} />
       )}
 
       <Note>
-        Classified per item by the model across {sample.posts_analysed} posts and{" "}
+        Classified per item across {sample.posts_analysed} posts and{" "}
         {sample.comments_analysed} comments. Percentages are computed from those
         classifications, not estimated.
       </Note>

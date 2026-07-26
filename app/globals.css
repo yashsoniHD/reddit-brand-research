@@ -31,6 +31,8 @@
   --color-card: var(--card);
   --color-brand: var(--brand);
   --color-brand-ink: var(--brand-ink);
+  /* The quiet plane the research zone sits on, one step off the page. */
+  --color-hush: var(--hush);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -49,16 +51,19 @@
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     monospace;
 
-  /* Page plane and card surface. Charts render on --card, which is the surface
-     every colour below was contrast-checked against. */
-  --background: #f8f8f6;
+  /* Three planes, not two: the page, the card that lifts off it, and a hush
+     plane for the research zone so it reads as secondary without going grey
+     and dead. Charts render on --card, the surface every colour below was
+     contrast-checked against. */
+  --background: #f7f7f5;
   --foreground: #0b0b0b;
   --card: #ffffff;
   --card-foreground: #0b0b0b;
+  --hush: #fbfbfa;
   --popover: #ffffff;
   --popover-foreground: #0b0b0b;
 
-  /* The one accent. --brand is the mark colour (bars, logo, rules);
+  /* The one accent. --brand is the mark colour (bars, rules, quote marks);
      --brand-ink is the darker step that carries text and solid buttons. */
   --brand: #2a78d6;
   --brand-ink: #1f5fab;
@@ -72,9 +77,14 @@
   --accent: #e9f0fb;
   --accent-foreground: #1f5fab;
   --destructive: #c0332f;
-  --border: rgba(11, 11, 11, 0.11);
+  --border: rgba(11, 11, 11, 0.1);
   --input: rgba(11, 11, 11, 0.16);
   --ring: #2a78d6;
+
+  /* Elevation. Two steps only, both barely there: the point is to separate
+     planes, not to decorate them. */
+  --lift-1: 0 1px 2px rgba(11, 11, 11, 0.05), 0 1px 1px rgba(11, 11, 11, 0.03);
+  --lift-2: 0 2px 4px rgba(11, 11, 11, 0.06), 0 8px 24px rgba(11, 11, 11, 0.06);
 
   /* Data marks. Sentiment is a diverging encoding: accent / neutral gray /
      critical red, validated for colour-vision deficiency on both surfaces. */
@@ -90,32 +100,42 @@
   :root {
     color-scheme: dark;
 
-    --background: #0d0d0d;
-    --foreground: #f4f4f1;
-    --card: #1a1a19;
-    --card-foreground: #f4f4f1;
-    --popover: #1a1a19;
-    --popover-foreground: #f4f4f1;
+    /* Dark mode is planes, not one flat black: the page recedes, cards are
+       lifted a real step above it, and the hush plane sits between the two. */
+    --background: #0b0b0c;
+    --foreground: #f2f2ef;
+    --card: #18181a;
+    --card-foreground: #f2f2ef;
+    --hush: #131315;
+    --popover: #18181a;
+    --popover-foreground: #f2f2ef;
 
     --brand: #3987e5;
     --brand-ink: #86b6ef;
 
     --primary: #2a78d6;
     --primary-foreground: #ffffff;
-    --secondary: #262625;
-    --secondary-foreground: #f4f4f1;
-    --muted: #232322;
-    --muted-foreground: #9d9b94;
+    --secondary: #26262a;
+    --secondary-foreground: #f2f2ef;
+    --muted: #202024;
+    --muted-foreground: #a3a19a;
     --accent: #16283f;
     --accent-foreground: #86b6ef;
     --destructive: #e66767;
-    --border: rgba(255, 255, 255, 0.12);
-    --input: rgba(255, 255, 255, 0.18);
+    --border: rgba(255, 255, 255, 0.1);
+    --input: rgba(255, 255, 255, 0.17);
     --ring: #3987e5;
 
+    /* A shadow does nothing on a dark plane, so elevation is carried by an
+       inset top highlight plus a deeper cast below. */
+    --lift-1: inset 0 1px 0 rgba(255, 255, 255, 0.045),
+      0 1px 2px rgba(0, 0, 0, 0.5);
+    --lift-2: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 2px 4px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
+
     --viz-accent: #3987e5;
-    --viz-track: #2c2c2a;
-    --viz-grid: #2c2c2a;
+    --viz-track: #2a2a2e;
+    --viz-grid: #2a2a2e;
     --viz-pos: #3987e5;
     --viz-neu: #898781;
     --viz-neg: #d03b3b;
@@ -144,6 +164,74 @@
   ::selection {
     background: var(--accent);
     color: var(--accent-foreground);
+  }
+}
+
+@layer components {
+  /* ── Surfaces ─────────────────────────────────────────────────────────── */
+  .surface {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--lift-1);
+  }
+  .surface-hush {
+    background: var(--hush);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+  }
+
+  /* ── Type scale ───────────────────────────────────────────────────────
+     Four sizes for the whole report, so no section can invent its own
+     hierarchy. h-zone titles the research zone; h-section titles a block
+     inside it; h-quiet is a label. */
+  .h-zone {
+    font-size: 1.0625rem;
+    line-height: 1.4;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .h-section {
+    font-size: 0.9375rem;
+    line-height: 1.45;
+    font-weight: 600;
+  }
+  .h-quiet {
+    font-size: 0.6875rem;
+    line-height: 1.4;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  /* ── Evidence pill ────────────────────────────────────────────────────
+     A citation is a footnote, not a headline. Numbered, superscript scale,
+     no underline anywhere. Sized to stay a comfortable hit target despite
+     the small type. */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.125rem;
+    height: 1.125rem;
+    padding-inline: 0.25rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-foreground);
+    font-size: 0.625rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    text-decoration: none;
+    vertical-align: 0.35em;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
+  }
+  .pill:hover {
+    background: var(--brand);
+    color: #ffffff;
   }
 }
 

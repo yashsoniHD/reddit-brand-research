@@ -10,22 +10,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  MAX_PROFILE_CHARS,
-  MAX_QUERY_CHARS,
-  PLATFORM_LABELS,
-  TIME_WINDOWS,
-  type PlatformKey,
-} from "@/lib/types";
+import { MAX_PROFILE_CHARS, MAX_QUERY_CHARS, TIME_WINDOWS } from "@/lib/types";
 
 export interface FormValues {
   query: string;
   profile: string;
-  platform: PlatformKey;
   days: number;
 }
-
-const PLATFORM_OPTIONS: PlatformKey[] = ["linkedin", "instagram", "both"];
 
 export function QueryForm({
   values,
@@ -45,7 +36,7 @@ export function QueryForm({
 
   return (
     <form
-      className="flex flex-col gap-5 rounded-2xl border bg-card p-6 shadow-[0_1px_2px_rgba(11,11,11,0.04)] sm:p-7"
+      className="surface flex flex-col gap-5 p-6 sm:p-7"
       onSubmit={(event) => {
         event.preventDefault();
         onSubmit();
@@ -92,56 +83,25 @@ export function QueryForm({
         />
       </div>
 
-      <div className="grid gap-5 sm:grid-cols-2">
-        <fieldset className="flex flex-col gap-2">
-          <legend className="mb-2 text-sm font-medium text-foreground">Platform</legend>
-          <div
-            className="inline-flex rounded-lg bg-secondary p-1"
-            role="radiogroup"
-            aria-label="Platform"
-          >
-            {PLATFORM_OPTIONS.map((option) => {
-              const active = values.platform === option;
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  onClick={() => set("platform", option)}
-                  className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                    active
-                      ? "bg-card text-foreground shadow-[0_1px_2px_rgba(11,11,11,0.08)]"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {option === "both" ? "Both" : PLATFORM_LABELS[option]}
-                </button>
-              );
-            })}
-          </div>
-        </fieldset>
-
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="days" className="text-sm font-medium">
-            Time window
-          </Label>
-          <Select
-            value={String(values.days)}
-            onValueChange={(value) => set("days", Number(value))}
-          >
-            <SelectTrigger id="days" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TIME_WINDOWS.map((days) => (
-                <SelectItem key={days} value={String(days)}>
-                  Last {days} days
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+      <div className="flex flex-col gap-2 sm:max-w-xs">
+        <Label htmlFor="days" className="text-sm font-medium">
+          Time window
+        </Label>
+        <Select
+          value={String(values.days)}
+          onValueChange={(value) => set("days", Number(value))}
+        >
+          <SelectTrigger id="days" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TIME_WINDOWS.map((days) => (
+              <SelectItem key={days} value={String(days)}>
+                Last {days} days
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">

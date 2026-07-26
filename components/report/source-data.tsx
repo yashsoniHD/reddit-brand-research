@@ -2,8 +2,6 @@
 
 import { useMemo, useState } from "react";
 
-import { ExternalLink } from "@/components/external-link";
-import { Section } from "@/components/report/section";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { truncate } from "@/lib/format";
 import type { Bundle, RedditItem } from "@/lib/types";
@@ -143,7 +141,18 @@ function SourceTable({
                   </td>
                 ))}
                 <td className="px-3 py-2 text-right align-top whitespace-nowrap">
-                  {item.url ? <ExternalLink href={item.url}>Open</ExternalLink> : null}
+                  {item.url ? (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open on Reddit: ${truncate(item.title || item.body, 80)}`}
+                      className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground"
+                      aria-label={`Open on Reddit: ${truncate(item.title || item.body, 80)}`}
+                    >
+                      <span aria-hidden="true">&nearr;</span>
+                    </a>
+                  ) : null}
                 </td>
               </tr>
             ))}
@@ -170,10 +179,11 @@ function SourceTable({
 
 export function SourceData({ bundle }: { bundle: Bundle }) {
   return (
-    <Section
-      title="Source data"
-      description="Every post and comment the report was built from. Sort any column, open any row on Reddit."
-    >
+    <div>
+      <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+        Every post and comment the report was built from. Sort any column, open any row
+        on Reddit.
+      </p>
       <Tabs defaultValue="posts">
         <TabsList>
           <TabsTrigger value="posts">Posts ({bundle.posts.length})</TabsTrigger>
@@ -194,6 +204,6 @@ export function SourceData({ bundle }: { bundle: Bundle }) {
           />
         </TabsContent>
       </Tabs>
-    </Section>
+    </div>
   );
 }

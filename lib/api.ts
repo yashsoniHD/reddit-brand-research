@@ -1,6 +1,8 @@
 import {
-  isBundleV2,
+  isBundleV3,
   type Bundle,
+  type DraftRequest,
+  type DraftResponse,
   type ReportRequest,
   type SampleResponse,
   type StreamLine,
@@ -97,7 +99,7 @@ export async function runReport(
       return;
     }
     if (parsed.type === "report") {
-      terminal = isBundleV2(parsed.bundle)
+      terminal = isBundleV3(parsed.bundle)
         ? { kind: "report", bundle: parsed.bundle }
         : {
             kind: "error",
@@ -141,18 +143,73 @@ export async function runReport(
   return { kind: "error", message: sawUnparseable ? UNREADABLE : STREAM_DIED };
 }
 
-/** GET /api/sample. Returns null when no v2 sample is available. */
+/** GET /api/sample. Returns null when no v3 sample is available. */
 export async function fetchSample(signal?: AbortSignal): Promise<Bundle | null> {
   try {
     const response = await fetch("/api/sample", { signal });
     if (!response.ok) return null;
     const payload = (await response.json()) as SampleResponse;
     if (!payload || payload.available !== true) return null;
-    if (!isBundleV2(payload.bundle)) return null;
+    if (!isBundleV3(payload.bundle)) return null;
     return { ...payload.bundle, is_sample: true };
   } catch {
     return null;
   }
+}
+
+/**
+ * POST /api/draft. Plain JSON, no streaming.
+ *
+ * Resolves rather than throws: the caller renders either a post or a sentence,
+ * and a drafting failure is an ordinary state of the dialog, not an exception.
+ */
+export type DraftOutcome =
+  | { kind: "post"; post: string }
+  | { kind: "error"; message: string }
+  | { kind: "aborted" };
+
+const DRAFT_FAILED =
+  "That post could not be written just now. Please try again in a moment.";
+
+export async function draftPost(
+  request: DraftRequest,
+  signal?: AbortSignal,
+): Promise<DraftOutcome> {
+  let response: Response;
+  try {
+    response = await fetch("/api/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal,
+    });
+  } catch (error) {
+    if (isAbort(error)) return { kind: "aborted" };
+    return {
+      kind: "error",
+      message: "Could not reach the writing service. Check your connection and try again.",
+    };
+  }
+
+  let payload: DraftResponse | null = null;
+  try {
+    payload = (await response.json()) as DraftResponse;
+  } catch {
+    payload = null;
+  }
+
+  // The engine puts a user-ready sentence in `error`, so prefer it over any
+  // status code we could invent a message for.
+  if (payload && "error" in payload && payload.error) {
+    return { kind: "error", message: String(payload.error) };
+  }
+  if (!response.ok) {
+    return { kind: "error", message: DRAFT_FAILED };
+  }
+  if (payload && "post" in payload && typeof payload.post === "string" && payload.post.trim()) {
+    return { kind: "post", post: payload.post };
+  }
+  return { kind: "error", message: DRAFT_FAILED };
 }
 
 export type ExportKind = "markdown" | "ideas-csv" | "posts-csv";

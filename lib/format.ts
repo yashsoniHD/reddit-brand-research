@@ -42,7 +42,7 @@ export function runLabel(bundle: Bundle): string {
   if (query.length > MAX_LABEL_QUERY_CHARS) {
     query = `${query.slice(0, MAX_LABEL_QUERY_CHARS - 1).trimEnd()}…`;
   }
-  return `${query} · ${inputs.platform_label ?? ""} · ${inputs.days ?? ""}d`;
+  return `${query} · ${inputs.days ?? ""}d`;
 }
 
 /** A stable identity for a bundle, used as a history key. */
@@ -52,7 +52,6 @@ export function bundleKey(bundle: Bundle): string {
     bundle.generated_ts ?? 0,
     bundle.generated_at ?? "",
     inputs.query ?? "",
-    inputs.platform ?? "",
     (inputs.subreddits ?? []).join(","),
     inputs.days ?? "",
   ].join("|");

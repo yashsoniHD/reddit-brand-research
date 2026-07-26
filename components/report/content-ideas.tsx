@@ -1,80 +1,143 @@
-import { InlineCitations } from "@/components/report/citation-list";
-import { Section } from "@/components/report/section";
-import { IDEA_PLATFORM_LABELS, type Bundle, type ContentIdea } from "@/lib/types";
+"use client";
 
-function Badge({ children, tone }: { children: React.ReactNode; tone: "accent" | "plain" }) {
-  const styles =
-    tone === "accent"
-      ? "bg-accent text-accent-foreground"
-      : "bg-secondary text-secondary-foreground";
+import { useCallback, useState } from "react";
+
+import { DraftDialog } from "@/components/report/draft-dialog";
+import { EvidencePills } from "@/components/report/evidence-pills";
+import type { Bundle, ContentIdea } from "@/lib/types";
+
+/**
+ * The product, and therefore the top of the report.
+ *
+ * The hook is the headline because the hook is the thing the user will actually
+ * publish; the title is a filing label and rides underneath it. The whole card
+ * is the button: clicking anywhere drafts the post.
+ */
+
+function IdeaCard({
+  idea,
+  index,
+  drafted,
+  onOpen,
+}: {
+  idea: ContentIdea;
+  index: number;
+  drafted: boolean;
+  onOpen: () => void;
+}) {
+  const headline = idea.hook || idea.title;
+
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${styles}`}
-    >
-      {children}
-    </span>
-  );
-}
+    <article className="group relative flex flex-col">
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={`Draft a post from: ${headline}`}
+        className="surface flex h-full cursor-pointer flex-col gap-3 p-5 text-left transition-[box-shadow,transform,border-color] duration-200 hover:-translate-y-0.5 hover:border-[var(--brand)]/40 hover:shadow-[var(--lift-2)] focus-visible:border-[var(--brand)]/40"
+      >
+        <span className="flex items-center justify-between gap-3">
+          <span className="h-quiet tabular-nums">
+            {String(index + 1).padStart(2, "0")}
+          </span>
+          {idea.format ? (
+            <span className="rounded-full bg-secondary px-2.5 py-0.5 text-[0.6875rem] font-medium text-secondary-foreground">
+              {idea.format}
+            </span>
+          ) : null}
+        </span>
 
-function IdeaCard({ idea }: { idea: ContentIdea }) {
-  const platformLabel =
-    IDEA_PLATFORM_LABELS[idea.platform] ?? String(idea.platform ?? "");
+        {/* The hook, quoted, in the largest type on the card. */}
+        <span className="relative block pt-1">
+          <span
+            aria-hidden="true"
+            className="absolute -top-1 -left-0.5 font-serif text-3xl leading-none text-[var(--brand)]/35 select-none"
+          >
+            &ldquo;
+          </span>
+          <span className="block pl-5 text-[1.0625rem] leading-snug font-semibold text-balance text-foreground">
+            {headline}
+          </span>
+        </span>
 
-  return (
-    <article className="flex flex-col gap-3 rounded-xl border bg-card p-5">
-      {idea.hook ? (
-        // The literal opening line they would publish, so it leads the card.
-        <p className="border-l-2 pl-4 text-base leading-snug font-medium text-foreground [border-color:var(--brand)]">
-          &ldquo;{idea.hook}&rdquo;
-        </p>
+        {idea.hook ? (
+          <span className="block text-xs leading-snug font-medium text-muted-foreground">
+            {idea.title}
+          </span>
+        ) : null}
+
+        {idea.angle ? (
+          <span className="block text-sm leading-relaxed text-muted-foreground">
+            {idea.angle}
+          </span>
+        ) : null}
+
+        <span className="mt-auto flex items-center justify-between gap-3 pt-2">
+          <span className="text-[0.8125rem] font-medium text-[var(--brand-ink)]">
+            {drafted ? "View draft" : "Draft this post"}
+            <span
+              aria-hidden="true"
+              className="ml-1 inline-block transition-transform duration-200 group-hover:translate-x-0.5"
+            >
+              &rarr;
+            </span>
+          </span>
+        </span>
+      </button>
+
+      {/* Outside the button: a link inside a button is not a valid target. */}
+      {idea.citations.length > 0 ? (
+        <span className="mt-2 flex items-center gap-1.5 pl-1">
+          <span className="text-[0.6875rem] text-muted-foreground">From</span>
+          <EvidencePills citations={idea.citations} label="Source" />
+        </span>
       ) : null}
-
-      <h3 className="text-sm leading-snug font-semibold text-foreground">{idea.title}</h3>
-
-      <div className="flex flex-wrap gap-2">
-        {platformLabel ? <Badge tone="accent">{platformLabel}</Badge> : null}
-        {idea.format ? <Badge tone="plain">{idea.format}</Badge> : null}
-      </div>
-
-      {idea.angle ? (
-        <p className="text-sm leading-relaxed text-foreground">{idea.angle}</p>
-      ) : null}
-
-      {idea.addresses ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          <span className="font-medium text-foreground">Addresses: </span>
-          {idea.addresses}
-        </p>
-      ) : null}
-
-      {idea.rationale ? (
-        <p className="text-xs leading-relaxed text-muted-foreground">{idea.rationale}</p>
-      ) : null}
-
-      <InlineCitations citations={idea.citations} />
     </article>
   );
 }
 
 export function ContentIdeas({ bundle }: { bundle: Bundle }) {
   const ideas = bundle.analysis.content_ideas ?? [];
+  const [open, setOpen] = useState<number | null>(null);
+  // Cached per rendered report: reopening a card must not re-bill the model.
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
+
+  const cache = useCallback(
+    (post: string) => {
+      setDrafts((current) => (open === null ? current : { ...current, [open]: post }));
+    },
+    [open],
+  );
+
+  if (ideas.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No content ideas were produced for this run.
+      </p>
+    );
+  }
 
   return (
-    <Section
-      title={`Content ideas for ${bundle.inputs.platform_label}`}
-      description="Each one opens with a hook you could publish as written, and cites the posts it came from."
-    >
-      {ideas.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No content ideas were produced for this run.
-        </p>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {ideas.map((idea, index) => (
-            <IdeaCard key={`${index}-${idea.title}`} idea={idea} />
-          ))}
-        </div>
-      )}
-    </Section>
+    <>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {ideas.map((idea, index) => (
+          <IdeaCard
+            key={`${index}-${idea.title}`}
+            idea={idea}
+            index={index}
+            drafted={drafts[index] !== undefined}
+            onOpen={() => setOpen(index)}
+          />
+        ))}
+      </div>
+
+      <DraftDialog
+        idea={open === null ? null : ideas[open]}
+        ideaKey={open === null ? null : `${bundle.generated_ts}-${open}`}
+        context={{ query: bundle.inputs.query, profile: bundle.inputs.profile }}
+        cached={open === null ? undefined : drafts[open]}
+        onCache={cache}
+        onClose={() => setOpen(null)}
+      />
+    </>
   );
 }

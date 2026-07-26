@@ -1,5 +1,5 @@
 import { bundleKey } from "./format";
-import { isBundleV2, type Bundle } from "./types";
+import { isBundleV3, type Bundle } from "./types";
 
 export const MAX_HISTORY = 8;
 
@@ -8,7 +8,7 @@ const STORAGE_KEY = "reddit-content-ideas:history";
  * Bumped whenever the stored shape changes. A mismatch discards the store
  * rather than feeding an old shape to renderers that assume the new one.
  */
-const STORE_VERSION = 2;
+const STORE_VERSION = 3;
 
 interface StoredHistory {
   version: number;
@@ -44,7 +44,7 @@ export function loadHistory(): Bundle[] {
     }
     // Every entry is re-validated: a bundle written by an older engine would
     // otherwise crash a section that assumes v2.
-    const bundles = parsed.bundles.filter(isBundleV2).slice(0, MAX_HISTORY);
+    const bundles = parsed.bundles.filter(isBundleV3).slice(0, MAX_HISTORY);
     if (bundles.length !== parsed.bundles.length) saveHistory(bundles);
     return bundles;
   } catch {

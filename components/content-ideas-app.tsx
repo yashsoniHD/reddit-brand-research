@@ -16,10 +16,8 @@ import {
   MAX_PROFILE_CHARS,
   MAX_QUERY_CHARS,
   MIN_QUERY_CHARS,
-  PLATFORM_LABELS,
   TIME_WINDOWS,
   type Bundle,
-  type PlatformKey,
 } from "@/lib/types";
 
 const IS_DEV = process.env.NODE_ENV === "development";
@@ -27,7 +25,6 @@ const IS_DEV = process.env.NODE_ENV === "development";
 const DEFAULT_VALUES: FormValues = {
   query: "",
   profile: "",
-  platform: "linkedin",
   days: 7,
 };
 
@@ -49,9 +46,6 @@ function validate(values: FormValues): string[] {
       `Shorten the description of you or your brand to ${MAX_PROFILE_CHARS} characters or fewer.`,
     );
   }
-  if (!(values.platform in PLATFORM_LABELS)) {
-    errors.push("Choose LinkedIn, Instagram or both.");
-  }
   if (!TIME_WINDOWS.includes(values.days as (typeof TIME_WINDOWS)[number])) {
     errors.push("Choose a time window of 7, 14 or 30 days.");
   }
@@ -64,17 +58,16 @@ function readQueryParams(): Partial<FormValues> {
   const next: Partial<FormValues> = {};
   const query = params.get("q");
   if (query) next.query = query.slice(0, MAX_QUERY_CHARS);
-  const platform = params.get("platform");
-  if (platform && platform in PLATFORM_LABELS) next.platform = platform as PlatformKey;
   const days = Number(params.get("days"));
   if (TIME_WINDOWS.includes(days as (typeof TIME_WINDOWS)[number])) next.days = days;
   return next;
 }
 
 function writeQueryParams(bundle: Bundle): void {
-  const params = new URLSearchParams(window.location.search);
+  // Built fresh rather than mutated, so a stale parameter from an older link
+  // cannot survive into a URL that describes a run it had no part in.
+  const params = new URLSearchParams();
   params.set("q", bundle.inputs.query);
-  params.set("platform", bundle.inputs.platform);
   params.set("days", String(bundle.inputs.days));
   window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
 }
@@ -112,17 +105,20 @@ export function ContentIdeasApp() {
   /** Every deliberate user action retires the messages from the previous one. */
   const clearMessages = useCallback(() => setErrors([]), []);
 
-  const show = useCallback((bundle: Bundle, remember: boolean) => {
-    clearMessages();
-    setReport(bundle);
-    if (remember) {
-      setHistory((current) => {
-        const next = addToHistory(current, bundle);
-        saveHistory(next);
-        return next;
-      });
-    }
-  }, [clearMessages]);
+  const show = useCallback(
+    (bundle: Bundle, remember: boolean) => {
+      clearMessages();
+      setReport(bundle);
+      if (remember) {
+        setHistory((current) => {
+          const next = addToHistory(current, bundle);
+          saveHistory(next);
+          return next;
+        });
+      }
+    },
+    [clearMessages],
+  );
 
   const onChange = useCallback(
     (next: FormValues) => {
@@ -149,7 +145,6 @@ export function ContentIdeasApp() {
       {
         query: values.query.trim(),
         profile: values.profile.trim(),
-        platform: values.platform,
         days: values.days,
       },
       {
@@ -216,8 +211,8 @@ export function ContentIdeasApp() {
 
   return (
     <>
-      <header className="border-b">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-3 sm:px-8">
+      <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3 sm:px-8">
           <span className="flex items-center gap-2 text-sm font-medium text-foreground">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/logo.svg" alt="" width={20} height={20} className="size-5" />
@@ -236,24 +231,26 @@ export function ContentIdeasApp() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-14 px-5 py-12 sm:px-8 sm:py-16">
-        <Hero />
+      <main className="mx-auto flex w-full max-w-6xl flex-col gap-16 px-5 py-14 sm:px-8 sm:py-20">
+        <div className="flex flex-col gap-10">
+          <Hero />
 
-        <div className="flex flex-col gap-4">
-          <ErrorBanner messages={errors} onDismiss={clearMessages} />
-          <QueryForm
-            values={values}
-            onChange={onChange}
-            onSubmit={() => void onSubmit()}
-            onCancel={onCancel}
-            running={running}
-          />
-          {running ? <RunProgress messages={progress} /> : null}
+          <div className="flex flex-col gap-4">
+            <ErrorBanner messages={errors} onDismiss={clearMessages} />
+            <QueryForm
+              values={values}
+              onChange={onChange}
+              onSubmit={() => void onSubmit()}
+              onCancel={onCancel}
+              running={running}
+            />
+            {running ? <RunProgress messages={progress} /> : null}
+          </div>
         </div>
 
         <HowItWorks />
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
           {sampleAvailable ? (
             <div>
               <button
@@ -290,14 +287,14 @@ export function ContentIdeasApp() {
           {report ? (
             <ReportView bundle={report} />
           ) : (
-            <section className="rounded-2xl border border-dashed px-6 py-12 text-center">
+            <section className="surface-hush border-dashed px-6 py-14 text-center">
               <p className="text-sm font-medium text-foreground">
-                Your report will appear here.
+                Your ideas will appear here.
               </p>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
-                Topics with evidence, the pain points and questions behind them, and
-                eight to twelve ideas you can publish, each with its opening line
-                already written.
+                Eight to twelve ideas with the opening line already written, each one
+                traceable to the posts it came from, and each one a click away from a
+                finished post.
               </p>
             </section>
           )}
@@ -305,7 +302,7 @@ export function ContentIdeasApp() {
       </main>
 
       <footer className="border-t">
-        <div className="mx-auto max-w-5xl px-5 py-6 text-xs leading-relaxed text-muted-foreground sm:px-8">
+        <div className="mx-auto max-w-6xl px-5 py-6 text-xs leading-relaxed text-muted-foreground sm:px-8">
           Reddit Content Ideas. Public Reddit data via the Arctic Shift archive. Not
           affiliated with Reddit.
         </div>

@@ -26,13 +26,11 @@ export function ActivityTrend({ bundle }: { bundle: Bundle }) {
 
   return (
     <Section title="Activity">
-      <div className="rounded-xl border bg-card p-5">
-        <ColumnChart
-          data={data}
-          valueName="posts"
-          caption="Posts per day across the requested window, from the posts we fetched."
-        />
-      </div>
+      <ColumnChart
+        data={data}
+        valueName="posts"
+        caption="Posts per day across the requested window, from the posts we fetched."
+      />
     </Section>
   );
 }
