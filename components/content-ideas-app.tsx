@@ -248,40 +248,44 @@ export function ContentIdeasApp() {
           </div>
         </div>
 
-        <HowItWorks />
+        {!report ? (
+          <>
+            <HowItWorks />
 
-        <div className="flex flex-col gap-3">
-          {sampleAvailable ? (
-            <div>
-              <button
-                type="button"
-                onClick={() => void onLoadSample()}
-                className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-secondary"
-              >
-                See a sample report
-              </button>
-              <p className="mt-2 text-xs text-muted-foreground">
-                A real run over real Reddit data, so you can see the output before
-                spending a minute on your own.
+            <div className="flex flex-col gap-3">
+              {sampleAvailable ? (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => void onLoadSample()}
+                    className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-secondary"
+                  >
+                    See a sample report
+                  </button>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    A real run over real Reddit data, so you can see the output before
+                    spending a minute on your own.
+                  </p>
+                </div>
+              ) : null}
+
+              {IS_DEV ? (
+                <button
+                  type="button"
+                  onClick={() => void onLoadDemo()}
+                  className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                >
+                  Load demo report (development only)
+                </button>
+              ) : null}
+
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Analyses public Reddit posts and comments via the Arctic Shift archive. No
+                Reddit login needed. Your search is never stored.
               </p>
             </div>
-          ) : null}
-
-          {IS_DEV ? (
-            <button
-              type="button"
-              onClick={() => void onLoadDemo()}
-              className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
-            >
-              Load demo report (development only)
-            </button>
-          ) : null}
-
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Analyses public Reddit posts and comments via the Arctic Shift archive. No
-            Reddit login needed. Your search is never stored.
-          </p>
-        </div>
+          </>
+        ) : null}
 
         <div ref={reportRef}>
           {report ? (
