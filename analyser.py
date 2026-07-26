@@ -1,7 +1,6 @@
 import json
 import os
-from google import genai
-from google.genai import types
+from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,13 +11,10 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        if not project:
-            raise ValueError(
-                "GOOGLE_CLOUD_PROJECT not set. Add it to your .env file."
-            )
-        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-        _client = genai.Client(vertexai=True, project=project, location=location)
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set. Add it to your .env file.")
+        _client = Groq(api_key=api_key)
     return _client
 
 
@@ -72,14 +68,12 @@ Rules:
 - Return ONLY valid JSON with no markdown fences, no commentary."""
 
     client = _get_client()
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    response = client.models.generate_content(
+    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    response = client.chat.completions.create(
         model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            response_mime_type="application/json",
-        ),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        response_format={"type": "json_object"},
     )
 
-    return json.loads(response.text)
+    return json.loads(response.choices[0].message.content)

@@ -62,7 +62,7 @@ if submitted:
         st.warning(f"No posts found in r/{subreddit} from the last {days} days.")
         st.stop()
 
-    with st.spinner(f"Analysing {len(posts)} posts with Gemini..."):
+    with st.spinner(f"Analysing {len(posts)} posts with Groq..."):
         try:
             analysis = analyse_posts(posts, subreddit, brand_name, brand_description)
         except ValueError as e:
@@ -132,4 +132,4 @@ if submitted:
             )
             st.divider()
 
-    st.caption("Powered by Reddit public data · Gemini on Vertex AI")
+    st.caption("Powered by Reddit public data · Groq")

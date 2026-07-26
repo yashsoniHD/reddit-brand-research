@@ -1,13 +1,13 @@
 # Reddit Brand Research
 
 A Streamlit app that researches any brand's target Reddit community: it fetches recent posts
-from a subreddit and uses Gemini (via Vertex AI) to surface trending topics, sentiment, pain
-points, common questions, and tailored content ideas.
+from a subreddit and uses Groq to surface trending topics, sentiment, pain points, common
+questions, and tailored content ideas.
 
 ## Features
 
 - Fetches recent posts from any public subreddit (configurable time window: 7/14/30 days)
-- Analyses posts with Gemini on Vertex AI to extract:
+- Analyses posts with Groq to extract:
   - Trending topics (with links back to source posts)
   - Community sentiment breakdown
   - Top pain points and questions being asked
@@ -16,21 +16,13 @@ points, common questions, and tailored content ideas.
 
 ## Setup
 
-### 1. Authenticate with Google Cloud
+### 1. Get a Groq API key
 
-```bash
-gcloud auth application-default login
-```
+Sign up and create an API key at https://console.groq.com/keys
 
-### 2. Enable the Vertex AI API on your project
+### 2. Configure environment variables
 
-```bash
-gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
-```
-
-### 3. Configure environment variables
-
-Copy `.env.example` to `.env` and fill in your project details:
+Copy `.env.example` to `.env` and fill in your key:
 
 ```bash
 cp .env.example .env
@@ -39,12 +31,11 @@ cp .env.example .env
 Then edit `.env`:
 
 ```
-GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=global
-GEMINI_MODEL=gemini-2.5-flash
+GROQ_API_KEY=your-groq-api-key
+GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
-### 4. Install dependencies
+### 3. Install dependencies
 
 ```bash
 python3 -m venv .venv
@@ -52,7 +43,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 5. Run the app
+### 4. Run the app
 
 ```bash
 streamlit run app.py
