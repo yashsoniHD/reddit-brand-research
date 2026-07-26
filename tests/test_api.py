@@ -22,7 +22,6 @@ client = TestClient(app)
 VALID_BODY = {
     "query": "ai automation ideas for freelancers",
     "profile": "",
-    "platform": "linkedin",
     "days": 7,
 }
 
@@ -35,11 +34,11 @@ class TestReportStreamHappyPath:
     def test_valid_input_streams_progress_then_a_terminal_report_line(self, monkeypatch):
         captured = {}
 
-        def fake_run_report(query, profile, platform, days, progress=None):
-            captured["args"] = (query, profile, platform, days)
+        def fake_run_report(query, profile, days, progress=None):
+            captured["args"] = (query, profile, days)
             progress("Finding communities talking about this...")
             progress("Found r/testsub - fetching posts...")
-            return {"bundle_version": 2, "inputs": {"query": query}, "sample": {}}
+            return {"bundle_version": 3, "inputs": {"query": query}, "sample": {}}
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
 
@@ -54,17 +53,17 @@ class TestReportStreamHappyPath:
         assert len(lines) == 3
         assert lines[2] == {
             "type": "report",
-            "bundle": {"bundle_version": 2, "inputs": {"query": VALID_BODY["query"]}, "sample": {}},
+            "bundle": {"bundle_version": 3, "inputs": {"query": VALID_BODY["query"]}, "sample": {}},
         }
         assert captured["args"] == (
-            VALID_BODY["query"], VALID_BODY["profile"], VALID_BODY["platform"], VALID_BODY["days"]
+            VALID_BODY["query"], VALID_BODY["profile"], VALID_BODY["days"]
         )
 
     def test_only_the_last_line_carries_the_bundle(self, monkeypatch):
-        def fake_run_report(query, profile, platform, days, progress=None):
+        def fake_run_report(query, profile, days, progress=None):
             for message in ("one", "two", "three"):
                 progress(message)
-            return {"bundle_version": 2}
+            return {"bundle_version": 3}
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
         lines = _lines(client.post("/api/report", json=VALID_BODY))
@@ -77,13 +76,13 @@ class TestReportStreamValidation:
         # the API is wired to the actual validation rules, not a stand-in for them.
         response = client.post(
             "/api/report",
-            json={"query": "short", "profile": "", "platform": "not-a-platform", "days": 3},
+            json={"query": "short", "profile": "", "days": 3},
         )
         assert response.status_code == 200
         lines = _lines(response)
         assert len(lines) == 1
         assert lines[0]["type"] == "invalid"
-        assert len(lines[0]["errors"]) == 3  # too-short query, bad platform, bad time window
+        assert len(lines[0]["errors"]) == 2  # too-short query, bad time window
         assert all(message[0].isupper() and message.endswith(".") for message in lines[0]["errors"])
 
     def test_empty_query_is_invalid(self):
@@ -110,7 +109,7 @@ class TestReportStreamValidation:
 
 class TestReportStreamErrors:
     def test_run_error_streams_progress_then_a_terminal_error_line(self, monkeypatch):
-        def fake_run_report(query, profile, platform, days, progress=None):
+        def fake_run_report(query, profile, days, progress=None):
             progress("Finding communities talking about this...")
             raise pipeline.RunError("We could not read anything usable from r/testsub.")
 
@@ -123,7 +122,7 @@ class TestReportStreamErrors:
         assert len(lines) == 2
 
     def test_value_error_from_the_engine_passes_its_message_through_verbatim(self, monkeypatch):
-        def fake_run_report(query, profile, platform, days, progress=None):
+        def fake_run_report(query, profile, days, progress=None):
             raise ValueError("The analysis service has reached its rate limit.")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
@@ -131,7 +130,7 @@ class TestReportStreamErrors:
         assert lines == [{"type": "error", "message": "The analysis service has reached its rate limit."}]
 
     def test_unexpected_exception_becomes_the_generic_message_not_a_leaked_traceback(self, monkeypatch):
-        def fake_run_report(query, profile, platform, days, progress=None):
+        def fake_run_report(query, profile, days, progress=None):
             raise RuntimeError("some internal detail nobody outside should see")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
@@ -141,20 +140,27 @@ class TestReportStreamErrors:
 
 
 class TestSampleEndpoint:
-    def test_available_when_the_file_is_a_v2_bundle(self, tmp_path, monkeypatch):
+    def test_available_when_the_file_is_a_v3_bundle(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
-        sample_path.write_text(json.dumps({"bundle_version": 2, "inputs": {"query": "x"}}))
+        sample_path.write_text(json.dumps({"bundle_version": 3, "inputs": {"query": "x"}}))
         monkeypatch.setattr(api_index, "SAMPLE_PATH", sample_path)
 
         response = client.get("/api/sample")
         assert response.status_code == 200
         body = response.json()
         assert body["available"] is True
-        assert body["bundle"]["bundle_version"] == 2
+        assert body["bundle"]["bundle_version"] == 3
 
     def test_unavailable_when_the_file_is_still_v1(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
         sample_path.write_text(json.dumps({"bundle_version": 1, "inputs": {}}))
+        monkeypatch.setattr(api_index, "SAMPLE_PATH", sample_path)
+
+        assert client.get("/api/sample").json() == {"available": False}
+
+    def test_unavailable_when_the_file_is_still_v2(self, tmp_path, monkeypatch):
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps({"bundle_version": 2, "inputs": {}}))
         monkeypatch.setattr(api_index, "SAMPLE_PATH", sample_path)
 
         assert client.get("/api/sample").json() == {"available": False}
@@ -178,7 +184,7 @@ class TestSampleEndpoint:
 
 class TestExportEndpoints:
     BUNDLE = {
-        "bundle_version": 2,
+        "bundle_version": 3,
         "inputs": {"query": "ai tools for founders"},
         "generated_at": "2026-07-26 10:00 UTC",
     }
@@ -249,9 +255,9 @@ class TestExportEndpoints:
         # No patching here: exercises the real report_export functions once, so this
         # file also proves the wiring works, not only that mocks can be swapped in.
         bundle = {
-            "bundle_version": 2,
-            "inputs": {"query": "ai tools for founders", "profile": "", "platform": "linkedin",
-                       "platform_label": "LinkedIn", "subreddits": ["testsub"], "days": 7},
+            "bundle_version": 3,
+            "inputs": {"query": "ai tools for founders", "profile": "",
+                       "subreddits": ["testsub"], "days": 7},
             "generated_at": "2026-07-26 10:00 UTC", "model_label": "test-model", "source": "Test archive",
             "discovery": {"communities": [], "considered": []},
             "notices": [], "posts": [], "comments": [], "items": [],
@@ -271,3 +277,145 @@ class TestExportEndpoints:
         response = client.post("/api/export/markdown", json={"bundle": bundle})
         assert response.status_code == 200
         assert "content-ideas-ai-tools-for-founders-2026-07-26" in response.headers["content-disposition"]
+
+
+class TestDraftEndpoint:
+    """POST /api/draft: one plain-JSON call, no streaming. This file adds no business
+    logic of its own, so these tests patch `api.index.analysis.draft_post` and check
+    only the adapter's shaping: status codes, {"post"}/{"error"} shape, and the
+    client-error/service-error split between 422 and 500."""
+
+    VALID_DRAFT_BODY = {
+        "idea": {
+            "title": "One system", "hook": "Stop juggling five apps.", "format": "Text post",
+            "angle": "Consolidate", "addresses": "Too many tools",
+        },
+        "evidence": ["We quoted 20 hours and delivered 65.", "Every retainer starts with a favour."],
+        "query": "ai automation ideas for freelancers",
+        "profile": "",
+    }
+
+    def test_happy_path_returns_the_post(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile):
+            captured["args"] = (idea, evidence, query, profile)
+            return {"post": "Stop juggling five apps.\n\nHere is why."}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+
+        response = client.post("/api/draft", json=self.VALID_DRAFT_BODY)
+
+        assert response.status_code == 200
+        assert response.json() == {"post": "Stop juggling five apps.\n\nHere is why."}
+        idea, evidence, query, profile = captured["args"]
+        assert idea["hook"] == "Stop juggling five apps."
+        assert evidence == self.VALID_DRAFT_BODY["evidence"]
+        assert query == self.VALID_DRAFT_BODY["query"]
+        assert profile == ""
+
+    def test_value_error_from_the_engine_becomes_a_500_with_the_verbatim_message(self, monkeypatch):
+        def fake_draft_post(idea, evidence, query, profile):
+            raise ValueError("We could not draft that post. Please try again.")
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        response = client.post("/api/draft", json=self.VALID_DRAFT_BODY)
+
+        assert response.status_code == 500
+        assert response.json() == {"error": "We could not draft that post. Please try again."}
+
+    def test_unexpected_exception_becomes_the_generic_draft_error(self, monkeypatch):
+        def fake_draft_post(idea, evidence, query, profile):
+            raise RuntimeError("some internal detail nobody outside should see")
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        response = client.post("/api/draft", json=self.VALID_DRAFT_BODY)
+
+        assert response.status_code == 500
+        assert response.json() == {"error": api_index.GENERIC_DRAFT_ERROR_MESSAGE}
+        assert "internal detail" not in response.text
+
+    def test_garbage_body_is_a_422_not_a_500(self):
+        response = client.post(
+            "/api/draft", content="not json at all", headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 422
+        assert "error" in response.json()
+
+    def test_non_object_body_is_a_422(self):
+        response = client.post("/api/draft", json=[1, 2, 3])
+        assert response.status_code == 422
+
+    def test_missing_idea_is_a_422(self):
+        body = {**self.VALID_DRAFT_BODY}
+        del body["idea"]
+        response = client.post("/api/draft", json=body)
+        assert response.status_code == 422
+        assert "error" in response.json()
+
+    def test_idea_that_is_not_a_dict_is_a_422(self, monkeypatch):
+        # Any draft_post call here would be a bug: a malformed idea must be rejected
+        # before the engine is ever reached.
+        def unexpected_call(*args, **kwargs):
+            raise AssertionError("draft_post should not be called for a malformed idea")
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", unexpected_call)
+        response = client.post("/api/draft", json={**self.VALID_DRAFT_BODY, "idea": "not a dict"})
+        assert response.status_code == 422
+
+    def test_evidence_that_is_not_a_list_is_a_422(self, monkeypatch):
+        def unexpected_call(*args, **kwargs):
+            raise AssertionError("draft_post should not be called for malformed evidence")
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", unexpected_call)
+        response = client.post("/api/draft", json={**self.VALID_DRAFT_BODY, "evidence": "not a list"})
+        assert response.status_code == 422
+
+    def test_missing_evidence_defaults_to_an_empty_list(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile):
+            captured["evidence"] = evidence
+            return {"post": "A post."}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        body = {**self.VALID_DRAFT_BODY}
+        del body["evidence"]
+        response = client.post("/api/draft", json=body)
+
+        assert response.status_code == 200
+        assert captured["evidence"] == []
+
+    def test_evidence_longer_than_six_is_truncated_before_reaching_the_engine(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile):
+            captured["evidence"] = evidence
+            return {"post": "A post."}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        body = {**self.VALID_DRAFT_BODY, "evidence": ["excerpt {}".format(i) for i in range(20)]}
+        client.post("/api/draft", json=body)
+
+        assert len(captured["evidence"]) == 6
+        assert captured["evidence"] == ["excerpt {}".format(i) for i in range(6)]
+
+    def test_idea_fields_are_coerced_to_strings(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile):
+            captured["idea"] = idea
+            return {"post": "A post."}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        body = {
+            **self.VALID_DRAFT_BODY,
+            "idea": {"title": 123, "hook": None, "format": "Text post", "angle": True, "addresses": "x"},
+        }
+        response = client.post("/api/draft", json=body)
+
+        assert response.status_code == 200
+        assert captured["idea"]["title"] == "123"
+        assert captured["idea"]["hook"] == ""
+        assert captured["idea"]["angle"] == "True"
+        assert all(isinstance(value, str) for value in captured["idea"].values())

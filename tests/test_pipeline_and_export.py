@@ -1,4 +1,4 @@
-"""Orchestration and exports (bundle v2), driven by fakes so no test touches the network."""
+"""Orchestration and exports (bundle v3), driven by fakes so no test touches the network."""
 
 import json
 import os
@@ -81,12 +81,12 @@ def fake_classify(posts, comments, subreddits):
                 {"i": index, "s": ["pos", "neu", "neg"][index % 3]}
                 for index in range(1, len(items) + 1)
             ],
-            "model": "llama-3.3-70b-versatile",
+            "model": "gemini-2.5-flash",
         },
     )
 
 
-def fake_synthesize(items, topics, query, profile, platform, subreddits, preview_chars=200):
+def fake_synthesize(items, topics, query, profile, subreddits, preview_chars=200):
     return {
         "executive_summary": "People are drowning in tools.",
         "topic_descriptions": {1: "Tasks fall through the cracks.", 2: "Switching costs bite."},
@@ -94,18 +94,18 @@ def fake_synthesize(items, topics, query, profile, platform, subreddits, preview
         "questions": [{"text": "How do I start?", "item_indices": [2]}],
         "content_ideas": [
             {
-                "title": "One system", "hook": "Stop juggling five apps.", "platform": "linkedin",
+                "title": "One system", "hook": "Stop juggling five apps.",
                 "format": "Text post", "angle": "Consolidate", "rationale": "It hurts",
                 "addresses": "Too many tools", "item_indices": [1],
             }
         ],
-        "model": "llama-3.3-70b-versatile",
+        "model": "gemini-2.5-flash",
     }
 
 
 def build_bundle(**overrides):
     kwargs = dict(
-        query=DEFAULT_QUERY, profile="", platform="linkedin", days=7,
+        query=DEFAULT_QUERY, profile="", days=7,
         discover=make_discover(["testsub"]),
         fetch_posts=fake_posts, fetch_comments=fake_comments,
         classify=fake_classify, synthesize=fake_synthesize,
@@ -117,58 +117,43 @@ def build_bundle(**overrides):
 # ── Input validation ──────────────────────────────────────────────────────────
 class TestValidateInputs:
     def test_accepts_good_input(self):
-        result = pipeline.validate_inputs(DEFAULT_QUERY, "I run a small design studio", "linkedin", 7)
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "I run a small design studio", 7)
         assert result["errors"] == []
         assert result["query"] == DEFAULT_QUERY
-        assert result["platform"] == "linkedin"
 
     def test_reports_every_problem_at_once(self):
-        result = pipeline.validate_inputs("", "p" * 600, "bogus", 99)
-        assert len(result["errors"]) == 4
+        result = pipeline.validate_inputs("", "p" * 600, 99)
+        assert len(result["errors"]) == 3
 
     def test_rejects_a_too_short_query(self):
-        assert pipeline.validate_inputs("short", "", "linkedin", 7)["errors"]
+        assert pipeline.validate_inputs("short", "", 7)["errors"]
 
     def test_rejects_an_overlong_query(self):
-        assert pipeline.validate_inputs("q" * 400, "", "linkedin", 7)["errors"]
+        assert pipeline.validate_inputs("q" * 400, "", 7)["errors"]
 
     def test_rejects_an_overlong_profile(self):
-        result = pipeline.validate_inputs(DEFAULT_QUERY, "p" * 600, "linkedin", 7)
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "p" * 600, 7)
         assert len(result["errors"]) == 1
 
-    def test_rejects_an_unknown_platform(self):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", "tiktok", 7)["errors"]
-
-    @pytest.mark.parametrize("platform", ["linkedin", "instagram", "both"])
-    def test_accepts_every_known_platform(self, platform):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", platform, 7)["errors"] == []
-
-    def test_platform_is_lowercased(self):
-        result = pipeline.validate_inputs(DEFAULT_QUERY, "", "LinkedIn", 7)
-        assert result["platform"] == "linkedin"
-
     def test_rejects_a_time_window_outside_the_allowed_set(self):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", "linkedin", 3)["errors"]
+        assert pipeline.validate_inputs(DEFAULT_QUERY, "", 3)["errors"]
 
     @pytest.mark.parametrize("days", [7, 14, 30])
     def test_accepts_every_allowed_time_window(self, days):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", "linkedin", days)["errors"] == []
+        assert pipeline.validate_inputs(DEFAULT_QUERY, "", days)["errors"] == []
 
     def test_every_error_is_a_full_sentence(self):
-        for message in pipeline.validate_inputs("", "", "", 3)["errors"]:
+        for message in pipeline.validate_inputs("", "", 3)["errors"]:
             assert message[0].isupper() and message.endswith(".")
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
 class TestRunReport:
-    def test_produces_a_complete_v2_bundle(self):
+    def test_produces_a_complete_v3_bundle(self):
         bundle = build_bundle()
-        assert bundle["bundle_version"] == 2
-        assert set(bundle["inputs"].keys()) == {
-            "query", "profile", "platform", "platform_label", "subreddits", "days"
-        }
+        assert bundle["bundle_version"] == 3
+        assert set(bundle["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
         assert bundle["inputs"]["subreddits"] == ["testsub"]
-        assert bundle["inputs"]["platform_label"] == "LinkedIn"
         assert "discovery" in bundle
         assert set(bundle["discovery"].keys()) == {"communities", "considered"}
         assert "brand_mentions" not in bundle["stats"]
@@ -179,10 +164,13 @@ class TestRunReport:
         assert bundle["stats"]["sentiment"]["classified"] == 6
         assert len(bundle["stats"]["trend"]) == 7
 
-    def test_content_ideas_carry_hook_and_platform(self):
+    def test_content_ideas_have_no_platform_field(self):
         idea = build_bundle()["analysis"]["content_ideas"][0]
         assert idea["hook"] == "Stop juggling five apps."
-        assert idea["platform"] == "linkedin"
+        assert set(idea.keys()) == {
+            "title", "hook", "format", "angle", "rationale", "addresses", "citations"
+        }
+        assert "platform" not in idea
 
     def test_discovery_communities_carry_reason_and_subscribers_and_used_flag(self):
         bundle = build_bundle(discover=make_discover(["testsub"], reasons={"testsub": "Freelancers swap tips"},
@@ -219,12 +207,12 @@ class TestRunReport:
         assert bundle["analysis"]["questions"][0]["citations"]
         assert bundle["analysis"]["content_ideas"][0]["citations"]
 
-    def test_progress_messages_report_discovery_and_platform(self):
+    def test_progress_messages_report_discovery_and_synthesis(self):
         messages = []
         build_bundle(progress=messages.append)
         assert any("Finding communities" in message for message in messages)
         assert any("testsub" in message for message in messages)
-        assert any("LinkedIn" in message for message in messages)
+        assert any("Writing your content ideas" in message for message in messages)
 
     def test_low_data_is_flagged(self):
         bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 2),
@@ -289,9 +277,7 @@ class TestRunReport:
     def test_run_label_is_human_readable(self):
         bundle = build_bundle(query="ai tools for freelancers")
         label = pipeline.run_label(bundle)
-        assert "ai tools for freelancers" in label
-        assert "LinkedIn" in label
-        assert "7d" in label
+        assert label == "ai tools for freelancers · 7d"
 
     def test_run_label_truncates_a_long_query(self):
         long_query = "how do i " + "really " * 20 + "grow an audience on social media"
@@ -308,11 +294,6 @@ class TestRunReport:
 
         assert build_bundle(classify=limited)["sample"]["capacity_limited"] is True
         assert build_bundle()["sample"]["capacity_limited"] is False
-
-    def test_platform_both_is_passed_through_to_inputs(self):
-        bundle = build_bundle(platform="both")
-        assert bundle["inputs"]["platform"] == "both"
-        assert bundle["inputs"]["platform_label"] == "LinkedIn + Instagram"
 
 
 class TestTopicFindingCoherence:
@@ -366,6 +347,11 @@ class TestExports:
         markdown = report_export.report_markdown(build_bundle())
         assert "brand" not in markdown.lower()
 
+    def test_no_platform_traces_in_the_markdown(self):
+        markdown = report_export.report_markdown(build_bundle())
+        assert "Platform" not in markdown
+        assert "LinkedIn + Instagram" not in markdown
+
     def test_communities_analysed_section_shows_reason_and_subscribers(self):
         bundle = build_bundle(
             discover=make_discover(["testsub"], reasons={"testsub": "Freelancers swap pricing advice"},
@@ -386,10 +372,11 @@ class TestExports:
         assert "r/emptysub" in markdown
         assert "no usable posts in this window" in markdown
 
-    def test_content_ideas_render_hook_and_platform(self):
+    def test_content_ideas_render_hook_but_no_platform_badge(self):
         markdown = report_export.report_markdown(build_bundle())
         assert "Stop juggling five apps." in markdown
-        assert "**Platform:** LinkedIn" in markdown
+        assert "**Format:** Text post" in markdown
+        assert "Platform" not in markdown
 
     def test_markdown_sentiment_percentages_sum_to_one_hundred(self):
         bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 30))
@@ -427,12 +414,11 @@ class TestExports:
         assert rows[0] == "subreddit,title,date,upvotes,comments,sentiment,url"
         assert len(rows) == 5
 
-    def test_ideas_csv_has_hook_and_platform_columns(self):
+    def test_ideas_csv_has_hook_but_no_platform_column(self):
         csv_text = report_export.ideas_csv(build_bundle())
         header = csv_text.strip().split("\n")[0]
-        assert header == "title,hook,platform,format,angle,addresses,rationale,evidence_urls"
+        assert header == "title,hook,format,angle,addresses,rationale,evidence_urls"
         assert "Stop juggling five apps." in csv_text
-        assert "linkedin" in csv_text
         assert "https://reddit.com/" in csv_text
 
     def test_comments_csv_flattens_newlines(self):
@@ -464,9 +450,9 @@ class TestExports:
 
 # ── The bundled sample ────────────────────────────────────────────────────────
 class TestSampleReport:
-    """Assertions here target bundle v2. Until `sample_report.json` is regenerated
+    """Assertions here target bundle v3. Until `sample_report.json` is regenerated
     with the new pipeline, every test in this class is skipped rather than failing
-    on a bundle shape that predates the pivot."""
+    on a bundle shape that predates this pass."""
 
     @pytest.fixture(scope="class")
     def sample(self):
@@ -475,26 +461,27 @@ class TestSampleReport:
 
     @pytest.fixture(autouse=True)
     def _skip_until_regenerated(self, sample):
-        if sample.get("bundle_version") != 2:
-            pytest.skip("sample_report.json not yet regenerated for bundle v2")
+        if sample.get("bundle_version") != 3:
+            pytest.skip("sample_report.json not yet regenerated for bundle v3")
 
     def test_sample_file_has_the_current_bundle_shape(self, sample):
         assert sample["bundle_version"] == pipeline.BUNDLE_VERSION
         for key in ["inputs", "discovery", "posts", "comments", "items", "analysis", "stats", "sample"]:
             assert key in sample
         assert "brand_mentions" not in sample["stats"]
+        assert set(sample["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
 
     def test_discovery_section_has_the_expected_shape(self, sample):
         assert "communities" in sample["discovery"] and "considered" in sample["discovery"]
         for community in sample["discovery"]["communities"]:
             assert {"name", "reason", "subscribers", "used"} <= set(community.keys())
 
-    def test_content_ideas_carry_hook_and_platform(self, sample):
+    def test_content_ideas_carry_a_hook_and_no_platform(self, sample):
         ideas = sample["analysis"]["content_ideas"]
         assert ideas
         for idea in ideas:
             assert idea.get("hook")
-            assert idea.get("platform") in ("linkedin", "instagram")
+            assert "platform" not in idea
 
     def test_sample_has_real_evidence(self, sample):
         assert sample["analysis"]["topics"]

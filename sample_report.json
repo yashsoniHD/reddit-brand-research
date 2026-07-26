@@ -1,17 +1,15 @@
 {
- "bundle_version": 2,
- "generated_at": "2026-07-26 11:57 UTC",
- "generated_ts": 1785067030,
- "elapsed_seconds": 111.8,
+ "bundle_version": 3,
+ "generated_at": "2026-07-26 14:11 UTC",
+ "generated_ts": 1785075064,
+ "elapsed_seconds": 111.2,
  "is_sample": true,
  "model": "gemini-2.5-flash",
  "model_label": "Gemini 2.5 Flash on Vertex AI",
  "source": "Arctic Shift archive",
  "inputs": {
   "query": "how to grow a personal brand and get clients on LinkedIn",
-  "profile": "I am a freelance marketer who posts daily on LinkedIn about growth and personal branding",
-  "platform": "linkedin",
-  "platform_label": "LinkedIn",
+  "profile": "I am a freelance marketer who posts daily about growth and personal branding",
   "subreddits": [
    "linkedin",
    "freelance",
@@ -24,25 +22,25 @@
   "communities": [
    {
     "name": "linkedin",
-    "reason": "Discussions about LinkedIn strategies, personal branding, and client acquisition are common here.",
+    "reason": "Directly about LinkedIn, find discussions on optimizing profiles and content for clients.",
     "subscribers": 74037,
     "used": true
    },
    {
     "name": "freelance",
-    "reason": "Freelancers share tips on getting clients, marketing themselves, and building their brand.",
+    "reason": "Freelancers discuss client acquisition, personal branding, and marketing strategies.",
     "subscribers": 580727,
     "used": true
    },
    {
     "name": "marketing",
-    "reason": "General marketing strategies, including personal branding and lead generation, are discussed.",
+    "reason": "General marketing strategies, including personal branding and lead generation.",
     "subscribers": 1763790,
     "used": true
    },
    {
     "name": "SocialMediaMarketing",
-    "reason": "Focuses on social media platforms, including LinkedIn, for branding and client outreach.",
+    "reason": "Focuses on social media, including LinkedIn, for brand building and client outreach.",
     "subscribers": 156140,
     "used": true
    }
@@ -53,16 +51,135 @@
    "marketing",
    "socialmediamarketing",
    "personalbranding",
-   "growthhacking",
-   "Entrepreneur",
    "smallbusiness",
+   "Entrepreneur",
    "digital_marketing",
    "contentmarketing",
-   "B2Bmarketing"
+   "growthhacking"
   ]
  },
  "notices": [],
  "posts": [
+  {
+   "kind": "post",
+   "id": "1v74nav",
+   "subreddit": "freelance",
+   "title": "I just made my first $100 online as a web developer. It finally feels real.",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v74nav/i_just_made_my_first_100_online_as_a_web/",
+   "created_utc": 1785074314,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v74bja",
+   "subreddit": "freelance",
+   "title": "What's a completely random skill you've picked up without meaning to?",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v74bja/whats_a_completely_random_skill_youve_picked_up/",
+   "created_utc": 1785073505,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73ojt",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Need Helppppp with Trial Reels!!!!!",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73ojt/need_helppppp_with_trial_reels/",
+   "created_utc": 1785071876,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73emk",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Want tips about AI maketing!",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73emk/want_tips_about_ai_maketing/",
+   "created_utc": 1785071168,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73c4o",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Looking for someone to design a FB Logo and Banner",
+   "body": "For my Waste Clearance company. UK Got sort of an Idea using Ai. My dad’s happy with using AI logos and shit but i think it defeats the purpose.",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/",
+   "created_utc": 1785070992,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73ax4",
+   "subreddit": "linkedin",
+   "title": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/linkedin/comments/1v73ax4/hibernated_my_linkedin_account_months_agonow_i/",
+   "created_utc": 1785070913,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72ucq",
+   "subreddit": "freelance",
+   "title": "Need Some peoples For easy Reddit comment and post work earn 50 to 100 dollar per week ( work from home )",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v72ucq/need_some_peoples_for_easy_reddit_comment_and/",
+   "created_utc": 1785069708,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72roy",
+   "subreddit": "SocialMediaMarketing",
+   "title": "🚀 [HIRING] Freelance Lead Generators (India, US & UK Agencies Welcome)",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v72roy/hiring_freelance_lead_generators_india_us_uk/",
+   "created_utc": 1785069510,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72jaz",
+   "subreddit": "freelance",
+   "title": "Any tips for starting freelancing?",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v72jaz/any_tips_for_starting_freelancing/",
+   "created_utc": 1785068863,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v71wn0",
+   "subreddit": "freelance",
+   "title": "[Hiring] Management & Strategy Consultant (Mercor)",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v71wn0/hiring_management_strategy_consultant_mercor/",
+   "created_utc": 1785067141,
+   "date": "2026-07-26"
+  },
   {
    "kind": "post",
    "id": "1v71rep",
@@ -1233,7 +1350,7 @@
    "subreddit": "freelance",
    "title": "roast my upwork account",
    "body": "",
-   "score": 1,
+   "score": 0,
    "comments": 0,
    "url": "https://reddit.com/r/freelance/comments/1v5v46k/roast_my_upwork_account/",
    "created_utc": 1784945068,
@@ -16337,18 +16454,6 @@
   },
   {
    "kind": "post",
-   "id": "1uwt1uc",
-   "subreddit": "SocialMediaMarketing",
-   "title": "YouTube scam sponsors",
-   "body": "I’ve been seeing so many sponsorships on YouTube about free cash. \n\nThey’re so convincing saying you actually get free money instantly. I’m so annoyed big YouTubers are scamming their audiences time.\n\nA.I. said those apps still your data. Why are famous YouTubers who I thought would never scam their audience do this? I want to comment on their videos but I fear they’ll report my channel.\n\nI thought only small YouTubers would take it as they probably need the money but YouTubers with over 10m promoting these scammers?? They make it seem like you actually free money instantly too.\n\nThese things really take advantage of your desperation for money so it’s really simple to steal your data",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1uwt1uc/youtube_scam_sponsors/",
-   "created_utc": 1784082648,
-   "date": "2026-07-15"
-  },
-  {
-   "kind": "post",
    "id": "1uwsxsq",
    "subreddit": "linkedin",
    "title": "Experts of LinkedIn. please rate my profile.",
@@ -16369,42 +16474,6 @@
    "comments": 0,
    "url": "https://reddit.com/r/linkedin/comments/1uwsh5o/i_took_your_advice_on_outreach_strategy_id_like/",
    "created_utc": 1784081040,
-   "date": "2026-07-15"
-  },
-  {
-   "kind": "post",
-   "id": "1uwsdsm",
-   "subreddit": "SocialMediaMarketing",
-   "title": "Large gap between Meta Link Clicks and Outbound Clicks",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1uwsdsm/large_gap_between_meta_link_clicks_and_outbound/",
-   "created_utc": 1784080791,
-   "date": "2026-07-15"
-  },
-  {
-   "kind": "post",
-   "id": "1uwrubp",
-   "subreddit": "SocialMediaMarketing",
-   "title": "Looking for a discussion with content creators with brand deals!",
-   "body": "Hi all, if you are a content creator with experience doing brand deals (First off, congrats!). I want to know more about you and what you’ve learned so far. Comment or DM me! Cheers!",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1uwrubp/looking_for_a_discussion_with_content_creators/",
-   "created_utc": 1784079275,
-   "date": "2026-07-15"
-  },
-  {
-   "kind": "post",
-   "id": "1uwr70l",
-   "subreddit": "SocialMediaMarketing",
-   "title": "I’m starting to think stabilizing ROAS is harder than scaling...",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1uwr70l/im_starting_to_think_stabilizing_roas_is_harder/",
-   "created_utc": 1784077515,
    "date": "2026-07-15"
   },
   {
@@ -17333,30 +17402,6 @@
   },
   {
    "kind": "post",
-   "id": "1uvsrmd",
-   "subreddit": "freelance",
-   "title": "facture retard",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1uvsrmd/facture_retard/",
-   "created_utc": 1783987590,
-   "date": "2026-07-14"
-  },
-  {
-   "kind": "post",
-   "id": "1uvsi9q",
-   "subreddit": "freelance",
-   "title": "Freelance web designers — how do you compete with 10-buck Wix + Squarespace now?",
-   "body": "",
-   "score": 0,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1uvsi9q/freelance_web_designers_how_do_you_compete_with/",
-   "created_utc": 1783986962,
-   "date": "2026-07-13"
-  },
-  {
-   "kind": "post",
    "id": "1uvs6yq",
    "subreddit": "linkedin",
    "title": "For hire",
@@ -17389,18 +17434,6 @@
    "comments": 11,
    "url": "https://reddit.com/r/linkedin/comments/1uvq89l/can_you_monetize_a_linkedin_account_with_5k10k/",
    "created_utc": 1783981223,
-   "date": "2026-07-13"
-  },
-  {
-   "kind": "post",
-   "id": "1uvpzn0",
-   "subreddit": "freelance",
-   "title": "I am tired of doing math in my head every time I want to buy something.",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1uvpzn0/i_am_tired_of_doing_math_in_my_head_every_time_i/",
-   "created_utc": 1783980651,
    "date": "2026-07-13"
   },
   {
@@ -17453,18 +17486,6 @@
   },
   {
    "kind": "post",
-   "id": "1uvoew7",
-   "subreddit": "freelance",
-   "title": "How can freelancers in Ethiopia receive payments and get clients on Fiverr? (Translation & Design services)",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1uvoew7/how_can_freelancers_in_ethiopia_receive_payments/",
-   "created_utc": 1783977080,
-   "date": "2026-07-13"
-  },
-  {
-   "kind": "post",
    "id": "1uvnsnp",
    "subreddit": "linkedin",
    "title": "Internships through linkedin",
@@ -17473,18 +17494,6 @@
    "comments": 0,
    "url": "https://reddit.com/r/linkedin/comments/1uvnsnp/internships_through_linkedin/",
    "created_utc": 1783975723,
-   "date": "2026-07-13"
-  },
-  {
-   "kind": "post",
-   "id": "1uvnijn",
-   "subreddit": "freelance",
-   "title": "About freelance website",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1uvnijn/about_freelance_website/",
-   "created_utc": 1783975111,
    "date": "2026-07-13"
   },
   {
@@ -18062,57 +18071,416 @@
    "url": "https://reddit.com/r/marketing/comments/1uuh62m/how_to_land_a_head_of_marketing_role_in_saas/",
    "created_utc": 1783866930,
    "date": "2026-07-12"
-  },
-  {
-   "kind": "post",
-   "id": "1uuf8eu",
-   "subreddit": "linkedin",
-   "title": "Should I ask for a job referral on LinkedIn?",
-   "body": "Have heard that asking for a job referral into a company when I connect with someone that works there on LinkedIn is a bad idea?  \nIs that true because it might be a better option than job boards our external recruiters who are ghosting and ignoring my applications anyway.   \nSo at least this gets me seen by people on the inside?",
-   "score": 6,
-   "comments": 8,
-   "url": "https://reddit.com/r/linkedin/comments/1uuf8eu/should_i_ask_for_a_job_referral_on_linkedin/",
-   "created_utc": 1783862208,
-   "date": "2026-07-12"
-  },
-  {
-   "kind": "post",
-   "id": "1uuekdk",
-   "subreddit": "linkedin",
-   "title": "Side hustles",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/linkedin/comments/1uuekdk/side_hustles/",
-   "created_utc": 1783860449,
-   "date": "2026-07-12"
-  },
-  {
-   "kind": "post",
-   "id": "1uue7q6",
-   "subreddit": "marketing",
-   "title": "What’s the most annoying gap in marketing communities right now?",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/marketing/comments/1uue7q6/whats_the_most_annoying_gap_in_marketing/",
-   "created_utc": 1783859498,
-   "date": "2026-07-12"
-  },
-  {
-   "kind": "post",
-   "id": "1uudz07",
-   "subreddit": "marketing",
-   "title": "Qr codes",
-   "body": "If I put qr codes around London do u think people would scan them",
-   "score": 1,
-   "comments": 5,
-   "url": "https://reddit.com/r/marketing/comments/1uudz07/qr_codes/",
-   "created_utc": 1783858826,
-   "date": "2026-07-12"
   }
  ],
  "comments": [
+  {
+   "kind": "comment",
+   "id": "ozva02m",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "I appear to be shadow banned from Linkedin, I was not provided any reason why just that “my profile doesn’t comply with the policies”. I submitted an appeal and the email confirm that I will remain restricted. I simply want to to know what I did wrong - it must have been trying to add lots of connections at once, which a friend told me they always do, but to be permanently banned from the platform with no clear path or method of communication with the decision maker? It seems unfair. I’m a business owner, I belong to my cities neighborhood council, I belong to professional organizations in my industry; participating as a member of my professional community has become extremely difficult and I’m so sorry that I’ve broken the rules but I wish I had an opportunity to even understand which were broken. I’ll never do it again id really just like another chance",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1ld0bf2/mega_thread_linkedin_restrictions_hacked_accounts/ozva02m/",
+   "created_utc": 1785074768,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv87ef",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "I’ve tried I’m honestly hopeless on that 🤣",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/ozv87ef/",
+   "created_utc": 1785074233,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv5sx2",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "look for a graphic designer",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/ozv5sx2/",
+   "created_utc": 1785073501,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv5g5f",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "“I don’t usually post personal things on LinkedIn, but here are some pictures of my kids”.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozv5g5f/",
+   "created_utc": 1785073392,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv4v8v",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Yeah i feel like companies have realized that they dont get the best talent after by posting jobs on the internet... they are trying to find established people in various industries and fields and offering a salary that isnt competitive. \n\nI've seen many professionals come through various companies i've worked at just to quit after 2 weeks with the same reponse \"i'm sorry but i have other professional commitments aka i have another job\"   \n\nmind you im in the netsuite erp space and its both a cesspool of grifters and a wonderful talent filled echosystem. \n\nso going back to linkedin reach outs, someone at my company was literally told by HR to stop reaching out to people on linkedin so i think theres probably some new tactic of trying to attract unicorns... but reality is the pushiest recruiters are often really really harrashed by their hiring managers... and its that hiring manager thats the problem. \n\nmy rule of thumb is the pushier the recruiter... you can expect an extensive panel review and case study in addition to like 9 rounds of interviews... and with that many interviews it only takes 1 person to say \"nay\" and you've wasted your time. \n\nif you arent looking i'd sternly tell the recruiter not to contact you again, unless the offer is worth having a discussion about. Times are different now, no one wants a demanding job unless it pays really really well which if you look at the industry... they dont",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozv4v8v/",
+   "created_utc": 1785073211,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv43ez",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "honestly for eco brands, ugc from actual happy customers beats polished content every time, ask for a quick video",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6zq70/can_someone_give_me_tips_for_organic_marketing/ozv43ez/",
+   "created_utc": 1785072966,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv370n",
+   "subreddit": "freelance",
+   "title": "",
+   "body": "You can outsource,I think you should take time off and let someone else do the work for you.",
+   "score": 1,
+   "url": "https://reddit.com/r/freelance/comments/1utgmge/need_advice_i_want_to_terminate_the_contract/ozv370n/",
+   "created_utc": 1785072679,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv2e9j",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "Hi! Does the post2all API genuinely reach Instagram, or is it also fighting Meta's first-party restrictions under the hood?",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1tpwho9/which_tool_you_are_using_for_scheduling_your/ozv2e9j/",
+   "created_utc": 1785072423,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv29g0",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "Hi! Does the post2all API genuinely reach Instagram, or is it also fighting Meta's first-party restrictions under the hood?",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1tpwho9/which_tool_you_are_using_for_scheduling_your/ozv29g0/",
+   "created_utc": 1785072382,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv0l42",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "That crosses the line from persistent to creepy. Phoning a recommendation out of the blue and pretending you applied is a massive breach of trust. Report the message and block him. Recruiters who pull that stunt are either desperate or running a scam, and neither is worth your time.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozv0l42/",
+   "created_utc": 1785071838,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv0can",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Okay cool I will, Webster Dictionary: a belief that [race](https://www.merriam-webster.com/dictionary/race#h1) is a fundamental [determinant](https://www.merriam-webster.com/dictionary/determinant) of human traits and capacities and that racial differences produce an inherent superiority of a particular race.\n\nNothing I said alluded I was superior to them, all I said was they can be annoying recruiters. Their jobs probably require them to constantly follow up because they have metrics to meet which it IS an annoying business practice. Go cry and me sensitive somewhere else.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozv0can/",
+   "created_utc": 1785071758,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv0be8",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "Use Canva it's free",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/ozv0be8/",
+   "created_utc": 1785071750,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozv0583",
+   "subreddit": "marketing",
+   "title": "",
+   "body": "sounds like one of those decisions where the location could either be a huge win or a very expensive lesson",
+   "score": 1,
+   "url": "https://reddit.com/r/marketing/comments/1v6s2zd/any_successfailure_stories_related_to_interstate/ozv0583/",
+   "created_utc": 1785071694,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuzcuk",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "The whole sentence. I suggest you learn the legal definition of racism.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuzcuk/",
+   "created_utc": 1785071432,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuyfd4",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Network by inviting in a recruiter who will find the phone numbers of my friends/colleagues and ring them on my behalf without my consent? No thank you. I'm also not looking for new work.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuyfd4/",
+   "created_utc": 1785071122,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuy71i",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "What about my sentence is racism - point out the specific part, saying that someone is Indian when they quote literally are isn’t racist. The most annoying recruiters are third party outsourced recruiters from other countries. I had one guy from Chennai, India call me so many times and fill up my voicemail that I literally had to email him to tell him that even if I was interested his constant harassing me to call him back caused me to not want to even hear him out. If not wanting to be annoyed is racist then idk what to tell you. & it’s always third party contracted recruiters too, never internal talent mgrs that are annoying.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuy71i/",
+   "created_utc": 1785071045,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozux0jk",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "You sound racist.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozux0jk/",
+   "created_utc": 1785070650,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuwyv2",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Oh okay but yes still very normal, recruiters either are very annoying when they are desperate or absolutely elusive & hard to get in contact - no in between.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuwyv2/",
+   "created_utc": 1785070634,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuwxl0",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "Inbox me please",
+   "score": 1,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1ue47mi/is_it_just_me_or_are_standard_social_media/ozuwxl0/",
+   "created_utc": 1785070623,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuwj8j",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Quality, not quantity.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v0ss18/am_i_hurting_my_career_by_not_indulging_in_the/ozuwj8j/",
+   "created_utc": 1785070485,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuvuwa",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "I was a salesperson in different B2B for 10 years. My last sales job moved me to North Carolina. I was at a party, surrounded by IT people driving really nice cars, and met a software product manager. After she described the job, I knew I wanted to do that. I did that for 25 years and retired (a little) early a couple years ago.   \nI owned 2 side businesses over the years.   \nThe businesses only had success because I didn’t have to go find prospective customers. They came to me with almost zero effort.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v56v7v/linkedin_late_to_the_party/ozuvuwa/",
+   "created_utc": 1785070250,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuu20i",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "There are also quite a few fake recruiter profiles being created to solicit a connection these days.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuu20i/",
+   "created_utc": 1785069612,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuty1n",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Yes, it happens, no, not that often. However, it is an opportunity to network for future opportunities. Take the call, politely say the job is not for you, ask if there are any other positions open, and connect with them on LinkedIn.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuty1n/",
+   "created_utc": 1785069573,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozutboz",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "I thought so too!",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozutboz/",
+   "created_utc": 1785069353,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuta3a",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "You are literally **panicking** about looking at a professional profile on a business platform. It sounds like a nervous angsty teenager wondering if the boy/girl they looked at saw them looking.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v6s1e3/does_setting_my_account_to_private_work/ozuta3a/",
+   "created_utc": 1785069337,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozut2jt",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "This was a British recruitment company",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozut2jt/",
+   "created_utc": 1785069262,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozusnhy",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Most of the people that i have worked  with embellish what they've done and flat out lie.\n\nEven to the point that a former director of IT for one of the biggest housing associations in the UK, was found guilty of embezzlement and served time still listed himself as the IT director of the same organisation.   I made the company aware of it and they said there's nothing they can do... fucking joke !!!",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v46v6y/deleted_my_linkedin_account_after_a_few_years_of/ozusnhy/",
+   "created_utc": 1785069109,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuskrv",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Genuinely good advice in most cases but thank you, I'm fine, panicking after a bad decision when you don't know anything about the subject is a normal thing that can happen to anyone. But was being rude about it necessary ? And what's that nonsense about age ? You certainly don't act much older, considering how you seem to treat other people online. Seriously though, do you really think a 13 years old would be on a Linkedin subreddit ? Or did TikTok really ruin critical thinking in your generation ?\n\nAnyway, someone else actually responded like a normal person would, but thanks anyway !\nNot replying any further from then on :)",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v6s1e3/does_setting_my_account_to_private_work/ozuskrv/",
+   "created_utc": 1785069082,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozurres",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Then don’t engage. Let people who need me discover the post",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/ozurres/",
+   "created_utc": 1785068784,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozurlue",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Thank you for that reply. I feel a little bit better now. Definitely won't do that again now",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v6s1e3/does_setting_my_account_to_private_work/ozurlue/",
+   "created_utc": 1785068727,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozurljh",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "This sub isn't for promotion of your business. Go away.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/ozurljh/",
+   "created_utc": 1785068724,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozurcj3",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Could be a job scam as well.  Read up on job and employment scams.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozurcj3/",
+   "created_utc": 1785068632,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuqiul",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "I have helped 4 people with the strategy building yet. If you don’t think its necessary thats your pov",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/ozuqiul/",
+   "created_utc": 1785068326,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozupnqj",
+   "subreddit": "marketing",
+   "title": "",
+   "body": "Your account must be 30+ days old and it must have 300+ karma to post in r/Marketing\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/marketing) if you have any questions or concerns.*",
+   "score": 1,
+   "url": "https://reddit.com/r/marketing/comments/1v5baac/how_often_do_you_job_hop/ozupnqj/",
+   "created_utc": 1785067999,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuovfh",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Yes its normal, especially if they are Indian third party recruiters.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/ozuovfh/",
+   "created_utc": 1785067701,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozuobcg",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "It's the literal definition of spam. Go away.",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/ozuobcg/",
+   "created_utc": 1785067484,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "comment",
+   "id": "ozumwf4",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "I am literally offering strategy building services as freelancing. How is this spamming?",
+   "score": 1,
+   "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/ozumwf4/",
+   "created_utc": 1785066920,
+   "date": "2026-07-26"
+  },
   {
    "kind": "comment",
    "id": "ozumqcx",
@@ -19897,6 +20265,17 @@
   },
   {
    "kind": "comment",
+   "id": "ozoeiek",
+   "subreddit": "marketing",
+   "title": "",
+   "body": "Your account must be 30+ days old and it must have 300+ karma to post in r/Marketing\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/marketing) if you have any questions or concerns.*",
+   "score": 1,
+   "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozoeiek/",
+   "created_utc": 1784985587,
+   "date": "2026-07-25"
+  },
+  {
+   "kind": "comment",
    "id": "ozodj50",
    "subreddit": "marketing",
    "title": "",
@@ -21155,7 +21534,7 @@
    "subreddit": "linkedin",
    "title": "",
    "body": "Everything",
-   "score": 5,
+   "score": 4,
    "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlc4p5/",
    "created_utc": 1784938507,
    "date": "2026-07-25"
@@ -21166,7 +21545,7 @@
    "subreddit": "linkedin",
    "title": "",
    "body": "Receiving ads as direct messages",
-   "score": 5,
+   "score": 4,
    "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlaym4/",
    "created_utc": 1784938109,
    "date": "2026-07-25"
@@ -21188,7 +21567,7 @@
    "subreddit": "linkedin",
    "title": "",
    "body": "It’s really a shame that so many recruiters give the rest of us a bad name. I don’t send a message to someone unless I want to talk to them. I reply to all messages. I also write the damn message, to hell with Ai messages. Venting a bit, I just want people to know that not all recruiters are created equal.",
-   "score": 1,
+   "score": 3,
    "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozl9brj/",
    "created_utc": 1784937557,
    "date": "2026-07-24"
@@ -23153,17 +23532,6 @@
   },
   {
    "kind": "comment",
-   "id": "oziloaq",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "For sure, there just doesn't seem to be much of a choice, in my mind. It's either I try and or don't. I'm very determined to break into the field.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/oziloaq/",
-   "created_utc": 1784911243,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozikvh0",
    "subreddit": "marketing",
    "title": "",
@@ -23171,50 +23539,6 @@
    "score": 1,
    "url": "https://reddit.com/r/marketing/comments/1v2plwi/career_ideas_to_switch_from_seo/ozikvh0/",
    "created_utc": 1784911045,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozik62s",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "It's worth a shot, I'm just sharing what will probably happen.\n\nEspecially if they're important enough for you to message, everyone is messaging them.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozik62s/",
-   "created_utc": 1784910869,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozijvut",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I ran a DIY venue which was very successful and occasionally help bands/venues book shows. Otherwise, all I have is my degree and some skills in data entry/software. I really don't have much going on at the moment that is very interesting. I'm doing this cause I just feel so jaded with applying to jobs and feeling like my applications are being sent into the void, never to be seen by anyone.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozijvut/",
-   "created_utc": 1784910797,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozijide",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "A few things that helped me:  \n1. Optimize your profile so it's clear what you do and who you help.  \n2. Post  2–4 times a week about what you're learning, building, or working on.  \n3. Comment thoughtfully on posts from people in your industry. This is often more effective than posting alone.  \n4. Connect with people in your niche and personalize your connection requests.  \n5. Don't try to sell immediately. Focus on building relationships and credibility first.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v47e36/beginner_to_linkedin_any_tips/ozijide/",
-   "created_utc": 1784910704,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozijfs5",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Just got the same one from the same person.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1gjtfa8/board_position_message/ozijfs5/",
-   "created_utc": 1784910686,
    "date": "2026-07-24"
   },
   {
@@ -23237,50 +23561,6 @@
    "score": 1,
    "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/oziiwzs/",
    "created_utc": 1784910556,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "oziiefs",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I'll try this, although I was apprehensive to connect and then message because two recruiters advised me that most people don't check their messages due to spam/scams. Also thought it would be better to keep it very concise.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/oziiefs/",
-   "created_utc": 1784910429,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozii9yj",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "The problem is, everyone sends these messages so they come across as disingenuous.\n\nI'm not even in your industry or hiring and I get 2-3 like this a week. I almost always block the people.\n\nMaybe it will work, but I suspect most people will just ignore it. The way to get noticed on LinkedIn is by sharing value. Like literally sharing stuff you're working on, aspiring too, thoughts on your core industry.\n\nBut it's a lot of work, I wouldn't recommend it unless you're established or working on something novel.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozii9yj/",
-   "created_utc": 1784910399,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozigtg3",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Don’t send the message in the connection. Send it once they’ve connected.",
-   "score": -1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozigtg3/",
-   "created_utc": 1784910036,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozigh77",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "\"Hi, [insert name]! I hope you're well. I'm a recent [college name] graduate and [city] resident with a passion for entertainment and business. \n\nYour profile really stood out to me as someone who would be an amazing person to talk to as I can see you’ve spent [ xx] years working as a [xxxxx].\n\nWould you be so kind for us to set up a brief call to discuss your experience at [insert company]. It would be an incredibly insightful conversation for me looking to start my career. \n\nThank you!\"\n\nIs this ok? I don't want to be annoying.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozigh77/",
-   "created_utc": 1784909952,
    "date": "2026-07-24"
   },
   {
@@ -23340,17 +23620,6 @@
   },
   {
    "kind": "comment",
-   "id": "oziembd",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "What I discovered after clicking on the pencil and selecting delete, was that when you are viewing your profile it is still there to select with the different open to options, but it isn't visible on your public profile anymore.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1n287di/how_the_hell_remove_open_for_work_from_profile/oziembd/",
-   "created_utc": 1784909490,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozieltw",
    "subreddit": "marketing",
    "title": "",
@@ -23402,17 +23671,6 @@
    "score": 1,
    "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v3makz/how_to_grow_from_0_to_100k_instagram_followers/ozic1fq/",
    "created_utc": 1784908844,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozibrlz",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I appreciate it, it’s hard when I can only send a message with a max of 300 characters.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozibrlz/",
-   "created_utc": 1784908776,
    "date": "2026-07-24"
   },
   {
@@ -23490,28 +23748,6 @@
    "score": 10,
    "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozi7mox/",
    "created_utc": 1784907747,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozi7hp2",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "\"Brief\" is a good word to use. Let them know it will be quick.",
-   "score": 2,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozi7hp2/",
-   "created_utc": 1784907713,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozi6ywu",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I'm not in that line of business, but if I received a note like that from a recent college grad in my field, I would be inclined to speak with you. And yes, I would change the word 'borrow', otherwise it sounds fine.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozi6ywu/",
-   "created_utc": 1784907582,
    "date": "2026-07-24"
   },
   {
@@ -23659,17 +23895,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhygzp",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I did this and it just spun and spun and spun.  Now when I go back to the profile the banner is still there and there's no longer a pencil to edit it. sigh.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1n287di/how_the_hell_remove_open_for_work_from_profile/ozhygzp/",
-   "created_utc": 1784905375,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhyc7n",
    "subreddit": "marketing",
    "title": "",
@@ -23677,17 +23902,6 @@
    "score": 7,
    "url": "https://reddit.com/r/marketing/comments/1v5baac/how_often_do_you_job_hop/ozhyc7n/",
    "created_utc": 1784905340,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhy2ol",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I replace “borrow” and say “have ten minutes”! Good luck.",
-   "score": 4,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozhy2ol/",
-   "created_utc": 1784905269,
    "date": "2026-07-24"
   },
   {
@@ -23769,17 +23983,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhvaol",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Yes keep going , don't overthink data with your first 100 posts",
-   "score": 2,
-   "url": "https://reddit.com/r/linkedin/comments/1v5398m/whats_your_view_on_this/ozhvaol/",
-   "created_utc": 1784904547,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhuyyp",
    "subreddit": "marketing",
    "title": "",
@@ -23857,28 +24060,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhsagv",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I am noticing many are scams fishing for your info. If they ever say “kindly send…” automatic scam. Also many seem to be in Asia etc which is a no. Do t click their links either.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozhsagv/",
-   "created_utc": 1784903753,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhs8k4",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Me too! It's so annoying",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1u76t8m/slight_issue_with_more_in_linkedin_job_posts/ozhs8k4/",
-   "created_utc": 1784903739,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhs2w6",
    "subreddit": "marketing",
    "title": "",
@@ -23934,17 +24115,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhqo4e",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "That app is literally the worst app ever… one feeling I hate is the feeling of feeling like you’re tryna beg.. even when you try to be as nice as possible you still get left on seen by those dumb fucking weird so called professionals anyways useless bs app I deleted it",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozhqo4e/",
-   "created_utc": 1784903326,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhpy7n",
    "subreddit": "marketing",
    "title": "",
@@ -23967,28 +24137,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhowx0",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "yes. i had opted for some intermediatary who gives sales navigator. the moment they removed my seat, it worked well. the verification was failing because i was added on seats of a third party.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1k5edr5/i_live_in_india_not_able_to_verify_my_linkedin/ozhowx0/",
-   "created_utc": 1784902860,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhor36",
-   "subreddit": "marketing",
-   "title": "",
-   "body": "If this post doesn't follow the rules [report it to the mods](https://www.reddit.com/r/marketing/about/rules/). Join our [community Discord!](https://discord.gg/looking-for-marketing-discussion-811236647760298024)\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/marketing) if you have any questions or concerns.*",
-   "score": 1,
-   "url": "https://reddit.com/r/marketing/comments/1v5croe/how_i_can_help_my_client/ozhor36/",
-   "created_utc": 1784902816,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhoaem",
    "subreddit": "SocialMediaMarketing",
    "title": "",
@@ -23996,61 +24144,6 @@
    "score": 1,
    "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v1ltew/i_did_everything_from_teaching_stories_but/ozhoaem/",
    "created_utc": 1784902691,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozho8n8",
-   "subreddit": "marketing",
-   "title": "",
-   "body": "If this post doesn't follow the rules [report it to the mods](https://www.reddit.com/r/marketing/about/rules/). Join our [community Discord!](https://discord.gg/looking-for-marketing-discussion-811236647760298024)\n\n\n*I am a bot, and this action was performed automatically. Please [contact the moderators of this subreddit](/message/compose/?to=/r/marketing) if you have any questions or concerns.*",
-   "score": 1,
-   "url": "https://reddit.com/r/marketing/comments/1v5cpkt/what_is_your_biggest_problem_in_the_process_of_ai/ozho8n8/",
-   "created_utc": 1784902678,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhnm67",
-   "subreddit": "marketing",
-   "title": "",
-   "body": "Yup! I’m one of them.",
-   "score": 2,
-   "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozhnm67/",
-   "created_utc": 1784902508,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhn79v",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Hi there - We constantly get posts about people losing access to their account or them getting hacked. Please use the mega thread instead https://www.reddit.com/r/linkedin/comments/1ld0bf2/mega_thread_linkedin_restrictions_hacked_accounts/\n\nCan’t login to get support? Use this site https://www.linkedin.com/help/linkedin/ask/TS-RHA",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v4yn0y/cant_access_linkedin_account/ozhn79v/",
-   "created_utc": 1784902397,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhmmxj",
-   "subreddit": "marketing",
-   "title": "",
-   "body": "I mean yes, the entire premise of our industry is to sell things that people don’t need. Everything we do is in service of capitalists looking for unlimited growth, which is inherently unsustainable. No shit we are depressed.",
-   "score": 2,
-   "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozhmmxj/",
-   "created_utc": 1784902244,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhlwoc",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Hi there - We constantly get posts about people losing access to their account or them getting hacked. Please use the mega thread instead https://www.reddit.com/r/linkedin/comments/1ld0bf2/mega_thread_linkedin_restrictions_hacked_accounts/\n\nCan’t login to get support? Use this site https://www.linkedin.com/help/linkedin/ask/TS-RHA",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cadj/please_help_me_get_my_account_back/ozhlwoc/",
-   "created_utc": 1784902045,
    "date": "2026-07-24"
   },
   {
@@ -24077,17 +24170,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozhg9ok",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Surprisingly, easy apply does get a reaction from tourism and hospitality jobs. But not much else",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/1v2g8gz/is_the_easy_apply_section_of_linkedin_fake/ozhg9ok/",
-   "created_utc": 1784900482,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhfsca",
    "subreddit": "SocialMediaMarketing",
    "title": "",
@@ -24095,17 +24177,6 @@
    "score": 1,
    "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v52t2y/brilliant_marketing_from_e_leclerc_at_the_tour_de/ozhfsca/",
    "created_utc": 1784900347,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozheyaz",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "My resume includes the biggest companies in the world and very high profile awards and in 20 years, I've never heard from a single recruiter. Clearly, HR and recruiters do not use LinkedIn.  And before you say, \"you didn't do...blah, blah.....\"  The resume is elite, written by a pro.",
-   "score": 1,
-   "url": "https://reddit.com/r/linkedin/comments/17o25ie/is_linkedin_even_necessary_would_it_hurt_my/ozheyaz/",
-   "created_utc": 1784900111,
    "date": "2026-07-24"
   },
   {
@@ -24139,28 +24210,6 @@
    "score": 1,
    "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v52t2y/brilliant_marketing_from_e_leclerc_at_the_tour_de/ozhd50o/",
    "created_utc": 1784899593,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozha2ec",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I give LinkedIn another five years at most before it's irrelevant. It's clear they have no intention of policing their own platform. Ghost jobs, bots, fake candidates, recruiter scams, and a whole lot of AI slop in my feed. I'm former U.S. military so I even have to deal with foreign spies trying to recruit me online. \n\nLinkedIn seems to do nothing about any of this but they'll roll out features that no one really asked for like short-form videos and games.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v4zujd/linkedin_scam_recruiter_trends_and_why_resume/ozha2ec/",
-   "created_utc": 1784898704,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozh9z4j",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Pre-2020, I was happy with my job and I used to politely decline these types of messages, to which they would politely appreciate my response and tell me to reach out to them if that ever changes.\n\nWe used to have genuine discourse. I miss those days man. Now there’s just too many humans and too many reasons to de-humanize.",
-   "score": 6,
-   "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozh9z4j/",
-   "created_utc": 1784898678,
    "date": "2026-07-24"
   },
   {
@@ -25441,50 +25490,6 @@
   },
   {
    "kind": "comment",
-   "id": "oz4uveg",
-   "subreddit": "SocialMediaMarketing",
-   "title": "",
-   "body": "Yah that my situation too. I sometimes get more views but its very inconsistent. My best advice would just be to be consistent",
-   "score": 1,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v2pz1b/stuck_at_3040_views_per_tiktok_post/oz4uveg/",
-   "created_utc": 1784746924,
-   "date": "2026-07-22"
-  },
-  {
-   "kind": "comment",
-   "id": "oz4uep2",
-   "subreddit": "SocialMediaMarketing",
-   "title": "",
-   "body": "Interesting. How long did it take to build?",
-   "score": 1,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v2rn0p/we_built_an_ai_cmo_after_years_of_working_in_ugc/oz4uep2/",
-   "created_utc": 1784746806,
-   "date": "2026-07-22"
-  },
-  {
-   "kind": "comment",
-   "id": "oz4u1qj",
-   "subreddit": "SocialMediaMarketing",
-   "title": "",
-   "body": "Consistency is key really. Not everything will be a lot of views. Its all based on the algorithm. Keep posting and see what get more engagement.",
-   "score": 2,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v3bjqa/instagram_meme_page/oz4u1qj/",
-   "created_utc": 1784746716,
-   "date": "2026-07-22"
-  },
-  {
-   "kind": "comment",
-   "id": "oz4my0i",
-   "subreddit": "SocialMediaMarketing",
-   "title": "",
-   "body": "If you’re already going viral sometimes, your content works — it’s just not consistent.\n\nI’d simplify it a lot:  \npick 2–3 core content pillars (ex: storytelling, relationships, one hobby)  \nrotate them instead of posting “whatever”  \nbatch content 1–2 days a week so you’re not constantly thinking about it  \nYou don’t need a full agency again tbh. A **coach/consultant** for a few sessions might be enough to help you structure things without taking control away from you.\n\nAlso don’t overthink the OF part — plenty of creators build strong SFW brands alongside it. Your personality is already your advantage, you just need to channel it a bit more consistently.",
-   "score": 1,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v32xzh/where_to_find_freelance_social_media_marketer_or/oz4my0i/",
-   "created_utc": 1784744945,
-   "date": "2026-07-22"
-  },
-  {
-   "kind": "comment",
    "id": "oz4bck4",
    "subreddit": "freelance",
    "title": "",
@@ -26200,6 +26205,126 @@
   }
  ],
  "items": [
+  {
+   "kind": "post",
+   "id": "1v74nav",
+   "subreddit": "freelance",
+   "title": "I just made my first $100 online as a web developer. It finally feels real.",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v74nav/i_just_made_my_first_100_online_as_a_web/",
+   "created_utc": 1785074314,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v74bja",
+   "subreddit": "freelance",
+   "title": "What's a completely random skill you've picked up without meaning to?",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v74bja/whats_a_completely_random_skill_youve_picked_up/",
+   "created_utc": 1785073505,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73ojt",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Need Helppppp with Trial Reels!!!!!",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73ojt/need_helppppp_with_trial_reels/",
+   "created_utc": 1785071876,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73emk",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Want tips about AI maketing!",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73emk/want_tips_about_ai_maketing/",
+   "created_utc": 1785071168,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73c4o",
+   "subreddit": "SocialMediaMarketing",
+   "title": "Looking for someone to design a FB Logo and Banner",
+   "body": "For my Waste Clearance company. UK Got sort of an Idea using Ai. My dad’s happy with using AI logos and shit but i think it defeats the purpose.",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/",
+   "created_utc": 1785070992,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v73ax4",
+   "subreddit": "linkedin",
+   "title": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/linkedin/comments/1v73ax4/hibernated_my_linkedin_account_months_agonow_i/",
+   "created_utc": 1785070913,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72ucq",
+   "subreddit": "freelance",
+   "title": "Need Some peoples For easy Reddit comment and post work earn 50 to 100 dollar per week ( work from home )",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v72ucq/need_some_peoples_for_easy_reddit_comment_and/",
+   "created_utc": 1785069708,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72roy",
+   "subreddit": "SocialMediaMarketing",
+   "title": "🚀 [HIRING] Freelance Lead Generators (India, US & UK Agencies Welcome)",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v72roy/hiring_freelance_lead_generators_india_us_uk/",
+   "created_utc": 1785069510,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v72jaz",
+   "subreddit": "freelance",
+   "title": "Any tips for starting freelancing?",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v72jaz/any_tips_for_starting_freelancing/",
+   "created_utc": 1785068863,
+   "date": "2026-07-26"
+  },
+  {
+   "kind": "post",
+   "id": "1v71wn0",
+   "subreddit": "freelance",
+   "title": "[Hiring] Management & Strategy Consultant (Mercor)",
+   "body": "",
+   "score": 1,
+   "comments": 0,
+   "url": "https://reddit.com/r/freelance/comments/1v71wn0/hiring_management_strategy_consultant_mercor/",
+   "created_utc": 1785067141,
+   "date": "2026-07-26"
+  },
   {
    "kind": "post",
    "id": "1v71rep",
@@ -27370,7 +27495,7 @@
    "subreddit": "freelance",
    "title": "roast my upwork account",
    "body": "",
-   "score": 1,
+   "score": 0,
    "comments": 0,
    "url": "https://reddit.com/r/freelance/comments/1v5v46k/roast_my_upwork_account/",
    "created_utc": 1784945068,
@@ -27881,126 +28006,6 @@
    "date": "2026-07-24"
   },
   {
-   "kind": "post",
-   "id": "1v5fr5y",
-   "subreddit": "marketing",
-   "title": "What will the Marketing Landscape look like in 2027?",
-   "body": "I've been working on strategy for 2027 for my content agency and studio. Since 2006, I have been doing video, photo, SEO, websites, and content marketing for major brands and this coming year seems different. \n\nMaybe I am just getting old LOL\n\n  \nLooking into the future I see GEO, UGC, and live video taking off this coming year. Also, I think social ads will get better in terms of targeting and retargeting with AI help. Perhaps there will be an AI revolt? \n\n  \nIf you are working on web 3.0 advertizing strategy and will to share your thoughts, I'm sure many of us middle aged folks would love to know.... \n\n  \nMy mind reels ... what are your thoughts?",
-   "score": 1,
-   "comments": 3,
-   "url": "https://reddit.com/r/marketing/comments/1v5fr5y/what_will_the_marketing_landscape_look_like_in/",
-   "created_utc": 1784909349,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5fg0f",
-   "subreddit": "linkedin",
-   "title": "Cannot receive the SMS verification code and Persona refuses to verify my government-issued passport",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/linkedin/comments/1v5fg0f/cannot_receive_the_sms_verification_code_and/",
-   "created_utc": 1784908709,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5fb55",
-   "subreddit": "SocialMediaMarketing",
-   "title": "Buy Social Media Followers, Likes & Views",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5fb55/buy_social_media_followers_likes_views/",
-   "created_utc": 1784908415,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5f1zj",
-   "subreddit": "SocialMediaMarketing",
-   "title": "Looking for micro-creators wanting to make more from their audience",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5f1zj/looking_for_microcreators_wanting_to_make_more/",
-   "created_utc": 1784907865,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5ey2i",
-   "subreddit": "freelance",
-   "title": "You can’t build something meaningful at just one speed.",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1v5ey2i/you_cant_build_something_meaningful_at_just_one/",
-   "created_utc": 1784907625,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5edx3",
-   "subreddit": "SocialMediaMarketing",
-   "title": "SMM's What kind of problems your service providers clients are facing? What are some reddits channels best to do research on service providers.",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5edx3/smms_what_kind_of_problems_your_service_providers/",
-   "created_utc": 1784906391,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5e98j",
-   "subreddit": "marketing",
-   "title": "What makes a good teaser campaign?",
-   "body": "I'm tempted to ask what the point is, but many of you have way more teeth in this industry than I. How are you as a marketer framing yourself as the prospect? Yeah, we're trying to inspire curiosity, but why should they care? How do you write? What are you talking about? Because you can't give anything away, but there's still the question of why the audience should care.\n\nThen what metrics are you measuring? Which ones specifically, and why should they matter in the context of a teaser?",
-   "score": 0,
-   "comments": 1,
-   "url": "https://reddit.com/r/marketing/comments/1v5e98j/what_makes_a_good_teaser_campaign/",
-   "created_utc": 1784906108,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5do9h",
-   "subreddit": "SocialMediaMarketing",
-   "title": "For a group project",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5do9h/for_a_group_project/",
-   "created_utc": 1784904843,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5dmsx",
-   "subreddit": "freelance",
-   "title": "Fiverr a good starting point?",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/freelance/comments/1v5dmsx/fiverr_a_good_starting_point/",
-   "created_utc": 1784904752,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "post",
-   "id": "1v5d2hd",
-   "subreddit": "SocialMediaMarketing",
-   "title": "I have 30k followers pet niche . 11 M views monthly . Most from USA . But zero income . Any advice",
-   "body": "",
-   "score": 1,
-   "comments": 0,
-   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5d2hd/i_have_30k_followers_pet_niche_11_m_views_monthly/",
-   "created_utc": 1784903485,
-   "date": "2026-07-24"
-  },
-  {
    "kind": "comment",
    "id": "oznd8ge",
    "subreddit": "marketing",
@@ -28420,17 +28425,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozh9z4j",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Pre-2020, I was happy with my job and I used to politely decline these types of messages, to which they would politely appreciate my response and tell me to reach out to them if that ever changes.\n\nWe used to have genuine discourse. I miss those days man. Now there’s just too many humans and too many reasons to de-humanize.",
-   "score": 6,
-   "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozh9z4j/",
-   "created_utc": 1784898678,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "oz3vpng",
    "subreddit": "freelance",
    "title": "",
@@ -28493,28 +28487,6 @@
    "score": 5,
    "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozm1ue4/",
    "created_utc": 1784947700,
-   "date": "2026-07-25"
-  },
-  {
-   "kind": "comment",
-   "id": "ozlc4p5",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Everything",
-   "score": 5,
-   "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlc4p5/",
-   "created_utc": 1784938507,
-   "date": "2026-07-25"
-  },
-  {
-   "kind": "comment",
-   "id": "ozlaym4",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Receiving ads as direct messages",
-   "score": 5,
-   "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlaym4/",
-   "created_utc": 1784938109,
    "date": "2026-07-25"
   },
   {
@@ -28651,6 +28623,28 @@
   },
   {
    "kind": "comment",
+   "id": "ozlc4p5",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Everything",
+   "score": 4,
+   "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlc4p5/",
+   "created_utc": 1784938507,
+   "date": "2026-07-25"
+  },
+  {
+   "kind": "comment",
+   "id": "ozlaym4",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "Receiving ads as direct messages",
+   "score": 4,
+   "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozlaym4/",
+   "created_utc": 1784938109,
+   "date": "2026-07-25"
+  },
+  {
+   "kind": "comment",
    "id": "ozl74ro",
    "subreddit": "marketing",
    "title": "",
@@ -28691,17 +28685,6 @@
    "score": 4,
    "url": "https://reddit.com/r/marketing/comments/1v5baac/how_often_do_you_job_hop/oziav4e/",
    "created_utc": 1784908553,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhy2ol",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I replace “borrow” and say “have ten minutes”! Good luck.",
-   "score": 4,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozhy2ol/",
-   "created_utc": 1784905269,
    "date": "2026-07-24"
   },
   {
@@ -28813,6 +28796,17 @@
    "url": "https://reddit.com/r/linkedin/comments/1v5k4bt/can_you_filter_out_job_openings_with_ai/ozm3r22/",
    "created_utc": 1784948425,
    "date": "2026-07-25"
+  },
+  {
+   "kind": "comment",
+   "id": "ozl9brj",
+   "subreddit": "linkedin",
+   "title": "",
+   "body": "It’s really a shame that so many recruiters give the rest of us a bad name. I don’t send a message to someone unless I want to talk to them. I reply to all messages. I also write the damn message, to hell with Ai messages. Venting a bit, I just want people to know that not all recruiters are created equal.",
+   "score": 3,
+   "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozl9brj/",
+   "created_utc": 1784937557,
+   "date": "2026-07-24"
   },
   {
    "kind": "comment",
@@ -28992,28 +28986,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozibrlz",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I appreciate it, it’s hard when I can only send a message with a max of 300 characters.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozibrlz/",
-   "created_utc": 1784908776,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozi6ywu",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I'm not in that line of business, but if I received a note like that from a recent college grad in my field, I would be inclined to speak with you. And yes, I would change the word 'borrow', otherwise it sounds fine.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozi6ywu/",
-   "created_utc": 1784907582,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhzj0l",
    "subreddit": "marketing",
    "title": "",
@@ -29032,17 +29004,6 @@
    "score": 3,
    "url": "https://reddit.com/r/marketing/comments/1v5cpkt/what_is_your_biggest_problem_in_the_process_of_ai/ozhpy7n/",
    "created_utc": 1784903136,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozha2ec",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "I give LinkedIn another five years at most before it's irrelevant. It's clear they have no intention of policing their own platform. Ghost jobs, bots, fake candidates, recruiter scams, and a whole lot of AI slop in my feed. I'm former U.S. military so I even have to deal with foreign spies trying to recruit me online. \n\nLinkedIn seems to do nothing about any of this but they'll roll out features that no one really asked for like short-form videos and games.",
-   "score": 3,
-   "url": "https://reddit.com/r/linkedin/comments/1v4zujd/linkedin_scam_recruiter_trends_and_why_resume/ozha2ec/",
-   "created_utc": 1784898704,
    "date": "2026-07-24"
   },
   {
@@ -29553,17 +29514,6 @@
   },
   {
    "kind": "comment",
-   "id": "ozi7hp2",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "\"Brief\" is a good word to use. Let them know it will be quick.",
-   "score": 2,
-   "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozi7hp2/",
-   "created_utc": 1784907713,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
    "id": "ozhz2dy",
    "subreddit": "marketing",
    "title": "",
@@ -29582,17 +29532,6 @@
    "score": 2,
    "url": "https://reddit.com/r/marketing/comments/1v5baac/how_often_do_you_job_hop/ozhwzjw/",
    "created_utc": 1784904987,
-   "date": "2026-07-24"
-  },
-  {
-   "kind": "comment",
-   "id": "ozhvaol",
-   "subreddit": "linkedin",
-   "title": "",
-   "body": "Yes keep going , don't overthink data with your first 100 posts",
-   "score": 2,
-   "url": "https://reddit.com/r/linkedin/comments/1v5398m/whats_your_view_on_this/ozhvaol/",
-   "created_utc": 1784904547,
    "date": "2026-07-24"
   },
   {
@@ -29630,30 +29569,96 @@
   },
   {
    "kind": "comment",
-   "id": "ozhnm67",
-   "subreddit": "marketing",
+   "id": "ozhdrcs",
+   "subreddit": "freelance",
    "title": "",
-   "body": "Yup! I’m one of them.",
+   "body": "Congrats this is really great!!",
    "score": 2,
-   "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozhnm67/",
-   "created_utc": 1784902508,
+   "url": "https://reddit.com/r/freelance/comments/1v3xo2b/guys_finally_some_progress/ozhdrcs/",
+   "created_utc": 1784899772,
    "date": "2026-07-24"
   },
   {
    "kind": "comment",
-   "id": "ozhmmxj",
-   "subreddit": "marketing",
+   "id": "ozh9afc",
+   "subreddit": "SocialMediaMarketing",
    "title": "",
-   "body": "I mean yes, the entire premise of our industry is to sell things that people don’t need. Everything we do is in service of capitalists looking for unlimited growth, which is inherently unsustainable. No shit we are depressed.",
+   "body": "Thanks! I’ll look into SocialBu",
    "score": 2,
-   "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozhmmxj/",
-   "created_utc": 1784902244,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v4r41v/ai_platforms_for_multiple_accounts_streamlining/ozh9afc/",
+   "created_utc": 1784898475,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozglh09",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "For 15+ accounts with cross-account commenting and reporting, that's a pretty specific combo. I'm a co-founder of SocialBu so take this with a grain of salt, but we handle the multi-account management and AI insights side of what you're describing. On your publishing point - you're not wrong, native app limits are real and most tools just paper over that problem rather than solving it.",
+   "score": 2,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v4r41v/ai_platforms_for_multiple_accounts_streamlining/ozglh09/",
+   "created_utc": 1784890176,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozg4fbd",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "Is this genuinely part of your job description or just something you're doing out of boredom? Personally if I was a customer I wouldn't want my pet named and photographed for marketing materials so you'd realistically have to ask permission from each owner. Sharing a pets details online can be a security risk for the pet and owner.\n\nWhat have you been asked to do by your boss? Increase customers?",
+   "score": 2,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5237g/vet_clinic_social_media/ozg4fbd/",
+   "created_utc": 1784882143,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozfqn08",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "honestly the 'patient of the week' pic & a one line caption from the pet's pov does insane numbers, people share it with their own vet group",
+   "score": 2,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5237g/vet_clinic_social_media/ozfqn08/",
+   "created_utc": 1784875458,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozfqck6",
+   "subreddit": "SocialMediaMarketing",
+   "title": "",
+   "body": "yeah publishing features are basically the same everywhere, the api limits it not the app. I'm the founder of Mydrop AI, a social media OS for agencies, so 15+ accounts & reporting is exactly our lane",
+   "score": 2,
+   "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v4r41v/ai_platforms_for_multiple_accounts_streamlining/ozfqck6/",
+   "created_utc": 1784875324,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozfbroq",
+   "subreddit": "freelance",
+   "title": "",
+   "body": "Number 2 is the one I underrate every time. The moments a client relationship wobbled were almost never the actual work, they were a silent change in how something got delivered. I improved a handoff process once without a heads up, figured it was obviously better, and the client read it as something broke. Now I over announce the boring changes. One line, \"sending files this way from now on and here is why,\" costs nothing and kills the what happened email before it gets written.",
+   "score": 2,
+   "url": "https://reddit.com/r/freelance/comments/1v3j8w7/my_top_5_rules_for_long_term_client_relationships/ozfbroq/",
+   "created_utc": 1784868689,
+   "date": "2026-07-24"
+  },
+  {
+   "kind": "comment",
+   "id": "ozejwnc",
+   "subreddit": "freelance",
+   "title": "",
+   "body": "I’d revise #2 to say “have a process.” It’s shocking how many well established people never bothered spelling even that out.",
+   "score": 2,
+   "url": "https://reddit.com/r/freelance/comments/1v3j8w7/my_top_5_rules_for_long_term_client_relationships/ozejwnc/",
+   "created_utc": 1784858173,
    "date": "2026-07-24"
   }
  ],
  "sample": {
-  "posts_fetched": 1504,
-  "comments_fetched": 735,
+  "posts_fetched": 1501,
+  "comments_fetched": 739,
   "posts_analysed": 150,
   "comments_analysed": 150,
   "items_analysed": 300,
@@ -29663,19 +29668,19 @@
   "capacity_limited": false
  },
  "analysis": {
-  "executive_summary": "The audience is highly skeptical of LinkedIn's current state, perceiving it as saturated with self-promotion and AI-generated content, yet they still view it as a primary business channel. Therefore, the content strategy should focus on providing genuine, actionable value that directly addresses common frustrations with the platform and freelancing, while offering authentic insights into growth and personal branding. By acknowledging these pain points and offering practical solutions, the marketer can build trust and position themselves as a credible expert.",
+  "executive_summary": "The audience is deeply frustrated with the current state of LinkedIn, particularly regarding platform issues, recruiter spam, and the prevalence of AI-generated \"slop\" content. They are also seeking practical advice for overcoming common freelancing challenges, such as client acquisition and managing workload, and are tired of generic marketing advice. The most important takeaway for the content strategist is to consistently offer genuine, actionable insights that cut through the noise, directly addressing these frustrations with transparency and practical solutions, rather than contributing to the performative or AI-driven content fatigue.",
   "topics": [
    {
-    "id": 3,
-    "label": "Marketing strategies, tools, and career advice",
-    "count": 79,
-    "share": 26.3,
-    "finding": "The community discusses various marketing approaches, content creation methods, and career progression, often questioning the viability of certain business models and seeking advice on organic growth and client acquisition. There's a clear desire for actionable marketing tips and insights into the industry's future.",
+    "id": 2,
+    "label": "Challenges and frustrations in freelancing",
+    "count": 70,
+    "share": 23.3,
+    "finding": "Freelancers are actively seeking advice on starting, acquiring clients, managing client expectations, and dealing with the financial and operational difficulties of independent work.",
     "citations": [
      {
-      "index": 2,
-      "text": "What CMS/setup do you use to build websites for small business clients?",
-      "url": "https://reddit.com/r/freelance/comments/1v71q8w/what_cmssetup_do_you_use_to_build_websites_for/",
+      "index": 1,
+      "text": "I just made my first $100 online as a web developer. It finally feels real.",
+      "url": "https://reddit.com/r/freelance/comments/1v74nav/i_just_made_my_first_100_online_as_a_web/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
@@ -29683,6 +29688,33 @@
      },
      {
       "index": 7,
+      "text": "Need Some peoples For easy Reddit comment and post work earn 50 to 100 dollar per week ( work from home )",
+      "url": "https://reddit.com/r/freelance/comments/1v72ucq/need_some_peoples_for_easy_reddit_comment_and/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 8,
+      "text": "🚀 [HIRING] Freelance Lead Generators (India, US & UK Agencies Welcome)",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v72roy/hiring_freelance_lead_generators_india_us_uk/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     }
+    ]
+   },
+   {
+    "id": 3,
+    "label": "Marketing strategies and content creation",
+    "count": 68,
+    "share": 22.7,
+    "finding": "The community is looking for effective organic marketing tips, struggling with content creation consistency, and expressing burnout or skepticism towards widely accepted but ineffective marketing advice.",
+    "citations": [
+     {
+      "index": 17,
       "text": "Is a founder branding + LinkedIn lead generation agency still a viable business model?",
       "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v70obb/is_a_founder_branding_linkedin_lead_generation/",
       "date": "2026-07-26",
@@ -29691,61 +29723,43 @@
       "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 8,
+      "index": 18,
       "text": "Can someone give me tips for Organic marketing",
       "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6zq70/can_someone_give_me_tips_for_organic_marketing/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
-     }
-    ]
-   },
-   {
-    "id": 2,
-    "label": "Freelancing challenges, rates, and client management",
-    "count": 69,
-    "share": 23.0,
-    "finding": "Freelancers frequently seek advice on acquiring clients, setting rates, managing client expectations, and handling payment issues, indicating a strong need for practical guidance on business operations. There's also a focus on building a client base from scratch and finding high-ticket contracts.",
-    "citations": [
+     },
      {
-      "index": 1,
-      "text": "Urgent need of Work!!!!!!",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v71rep/urgent_need_of_work/",
+      "index": 19,
+      "text": "I’m curious how other coaches and consultants handle content creation.",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6zjvi/im_curious_how_other_coaches_and_consultants/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
-     },
-     {
-      "index": 5,
-      "text": "2026[July-August] High ticket Contracts Black Book Updated",
-      "url": "https://reddit.com/r/freelance/comments/1v718dh/2026julyaugust_high_ticket_contracts_black_book/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     },
-     {
-      "index": 10,
-      "text": "Looking for constructive feedback on my new Fiverr gig setups",
-      "url": "https://reddit.com/r/freelance/comments/1v6zhxu/looking_for_constructive_feedback_on_my_new/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
      }
     ]
    },
    {
     "id": 1,
     "label": "Struggles with LinkedIn platform and features",
-    "count": 68,
-    "share": 22.7,
-    "finding": "Users express deep dissatisfaction with LinkedIn's functionality, support, and the quality of its content, often questioning its utility for genuine professional networking and job searching. Many perceive it as a platform dominated by self-promoters and AI-generated \"slop.\"",
+    "count": 57,
+    "share": 19.0,
+    "finding": "Users frequently encounter technical issues with account access and search functionality, express skepticism about the platform's utility beyond selling LinkedIn-related services, and are frustrated by recruiter behavior.",
     "citations": [
      {
-      "index": 4,
+      "index": 6,
+      "text": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+      "url": "https://reddit.com/r/linkedin/comments/1v73ax4/hibernated_my_linkedin_account_months_agonow_i/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 14,
       "text": "Is this normal for recruiters on LinkedIn?",
       "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/",
       "date": "2026-07-26",
@@ -29754,19 +29768,116 @@
       "subreddit": "linkedin"
      },
      {
-      "index": 22,
+      "index": 32,
       "text": "Creating a new account vs keeping current one",
       "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6uxwz/creating_a_new_account_vs_keeping_current_one/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
+     }
+    ]
+   },
+   {
+    "id": 5,
+    "label": "Job searching and career progression",
+    "count": 29,
+    "share": 9.7,
+    "finding": "Individuals are seeking career advice, navigating job changes, dealing with recruiter interactions, and expressing a desire to filter out undesirable job aspects like AI interviews or promoted listings.",
+    "citations": [
+     {
+      "index": 82,
+      "text": "Should I quit cold-calling at my current job for a low-paying Agency Internship to break into Marketing Ops?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v64ier/should_i_quit_coldcalling_at_my_current_job_for_a/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 26,
-      "text": "What’s the most impressive connection you’ve made?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6u5xx/whats_the_most_impressive_connection_youve_made/",
+      "index": 87,
+      "text": "Looking for part time job",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6244k/looking_for_part_time_job/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 123,
+      "text": "I genuinely need some career advice (from 50k to 85k)",
+      "url": "https://reddit.com/r/marketing/comments/1v5lsbh/i_genuinely_need_some_career_advice_from_50k_to/",
+      "date": "2026-07-24",
+      "score": 19,
+      "type": "post",
+      "subreddit": "marketing"
+     }
+    ]
+   },
+   {
+    "id": 4,
+    "label": "AI's impact on marketing and content",
+    "count": 8,
+    "share": 2.7,
+    "finding": "There is interest in using AI for marketing materials and writing tools, but also significant frustration and negative perception regarding the proliferation of low-quality, AI-generated content (\"slop\") on platforms like LinkedIn.",
+    "citations": [
+     {
+      "index": 4,
+      "text": "Want tips about AI maketing!",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73emk/want_tips_about_ai_maketing/",
       "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 5,
+      "text": "Looking for someone to design a FB Logo and Banner",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73c4o/looking_for_someone_to_design_a_fb_logo_and_banner/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 25,
+      "text": "Creating marketing materials with ai",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6wvex/creating_marketing_materials_with_ai/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     }
+    ]
+   }
+  ],
+  "pain_points": [
+   {
+    "text": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+    "citations": [
+     {
+      "index": 6,
+      "text": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+      "url": "https://reddit.com/r/linkedin/comments/1v73ax4/hibernated_my_linkedin_account_months_agonow_i/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 61,
+      "text": "The support doesn’t understand",
+      "url": "https://reddit.com/r/linkedin/comments/1v6fupr/the_support_doesnt_understand/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 65,
+      "text": "ACCOUNT IS BLOCKED FOR ALMOST 3 MONTHS NO RESPONSE",
+      "url": "https://reddit.com/r/linkedin/comments/1v6dii8/account_is_blocked_for_almost_3_months_no_response/",
+      "date": "2026-07-25",
       "score": 1,
       "type": "post",
       "subreddit": "linkedin"
@@ -29774,84 +29885,10 @@
     ]
    },
    {
-    "id": 5,
-    "label": "Social media content and growth",
-    "count": 32,
-    "share": 10.7,
-    "finding": "Users are interested in strategies for growing their social media presence, finding clients on platforms like Instagram, and creating engaging content that avoids being perceived as \"dead\" or inauthentic. The discussion includes practical tools and methods for social media management and organic reach.",
+    "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
     "citations": [
      {
-      "index": 6,
-      "text": "I got tired of ad-bloated file converters, so I built 50 client-side social media tools with zero backend",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v70qtc/i_got_tired_of_adbloated_file_converters_so_i/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     },
-     {
-      "index": 12,
-      "text": "Stop posting just to stay active.",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6yhgx/stop_posting_just_to_stay_active/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     },
-     {
-      "index": 27,
-      "text": "Like my insta post eli.miller11",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6s3l7/like_my_insta_post_elimiller11/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     }
-    ]
-   },
-   {
-    "id": 4,
-    "label": "AI impact on marketing and content creation",
-    "count": 5,
-    "share": 1.7,
-    "finding": "There's a mixed sentiment regarding AI in marketing, with some exploring its use for content creation and tools, while others express concern about AI-generated \"slop\" and its impact on content quality and authenticity. The community is actively discussing the practical application and potential pitfalls of AI.",
-    "citations": [
-     {
-      "index": 15,
-      "text": "Creating marketing materials with ai",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6wvex/creating_marketing_materials_with_ai/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     },
-     {
-      "index": 20,
-      "text": "How about an AI financial brain that connects your entire finances and gives unbiased insights to optimize every rupee.",
-      "url": "https://reddit.com/r/marketing/comments/1v6vjsr/how_about_an_ai_financial_brain_that_connects/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "marketing"
-     },
-     {
-      "index": 36,
-      "text": "Built an AI writing tool for quick emails, resumes, bios & social posts—would love feedback",
-      "url": "https://reddit.com/r/freelance/comments/1v6mql6/built_an_ai_writing_tool_for_quick_emails_resumes/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     }
-    ]
-   }
-  ],
-  "pain_points": [
-   {
-    "text": "Skepticism about LinkedIn's true value, feeling it's only for those selling 'how to LinkedIn' courses.",
-    "citations": [
-     {
-      "index": 45,
+      "index": 55,
       "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
       "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
       "date": "2026-07-25",
@@ -29860,30 +29897,30 @@
       "subreddit": "linkedin"
      },
      {
-      "index": 179,
-      "text": "I can summarized it in: \"LinkedIN is like the work version of a 15yo emo girl MySpace\".",
-      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozk9t1x/",
-      "date": "2026-07-24",
-      "score": 7,
-      "type": "comment",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 219,
+      "index": 217,
       "text": "lol depends who you are following doesn’t it. There are a billion people using LinkedIn. So no, not everyone on LinkedIn is trying to sell y…",
       "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozqusss/",
       "date": "2026-07-25",
       "score": 3,
       "type": "comment",
       "subreddit": "linkedin"
+     },
+     {
+      "index": 252,
+      "text": "Selling shovels.",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozr5g8v/",
+      "date": "2026-07-25",
+      "score": 2,
+      "type": "comment",
+      "subreddit": "linkedin"
      }
     ]
    },
    {
-    "text": "Marketing burnout and feeling tired of the industry.",
+    "text": "I'm REALLY TIRED OF MARKETING",
     "citations": [
      {
-      "index": 18,
+      "index": 28,
       "text": "I'm REALLY TIRED OF MARKETING",
       "url": "https://reddit.com/r/marketing/comments/1v6vxt1/im_really_tired_of_marketing/",
       "date": "2026-07-26",
@@ -29892,35 +29929,44 @@
       "subreddit": "marketing"
      },
      {
-      "index": 240,
+      "index": 203,
+      "text": "I think we’re all just tired. And it’s showing so bad 😂",
+      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozhqzfs/",
+      "date": "2026-07-24",
+      "score": 5,
+      "type": "comment",
+      "subreddit": "marketing"
+     },
+     {
+      "index": 239,
       "text": "I’ve been in marketing for about 5 years and I’m so burnt out. I dream of working in a different field. I really love the company I’m at now…",
       "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozidy9k/",
       "date": "2026-07-24",
       "score": 3,
       "type": "comment",
       "subreddit": "marketing"
-     },
-     {
-      "index": 282,
-      "text": "Yes and I am one of them! There’s a constant chase and grind to marketing, especially in the tech space. I have to remind myself every singl…",
-      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozj26we/",
-      "date": "2026-07-24",
-      "score": 2,
-      "type": "comment",
-      "subreddit": "marketing"
      }
     ]
    },
    {
-    "text": "Frustration with AI-generated content, 'slop,' and plagiarism on professional platforms.",
+    "text": "AI slop has been a sad reality, but stealing that slop and copy-pasting is infuriating. Identical slop, verbatim. From multiple LinkedIn \"users\". Easy to catch but LinkedIn does not care apparently.",
     "citations": [
      {
-      "index": 110,
+      "index": 120,
       "text": "I'm done with AI Slop Plagiarism, cancelling my LinkedIn subscription",
       "url": "https://reddit.com/r/linkedin/comments/1v5nejj/im_done_with_ai_slop_plagiarism_cancelling_my/",
       "date": "2026-07-24",
       "score": 9,
       "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 156,
+      "text": "The excessive HR AI slop",
+      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/oziwu04/",
+      "date": "2026-07-24",
+      "score": 25,
+      "type": "comment",
       "subreddit": "linkedin"
      },
      {
@@ -29931,55 +29977,121 @@
       "score": 10,
       "type": "comment",
       "subreddit": "freelance"
+     }
+    ]
+   },
+   {
+    "text": "I’m waiting for the results of my third interview, and I feel like I’m being ghosted. Is it okay to reach out to the interviewer on LinkedIn?",
+    "citations": [
+     {
+      "index": 130,
+      "text": "I’m waiting for the results of my third interview, and I feel like I’m being ghosted. Is it okay to reach out to the interviewer on LinkedIn?",
+      "url": "https://reddit.com/r/linkedin/comments/1v5l2yn/im_waiting_for_the_results_of_my_third_interview/",
+      "date": "2026-07-24",
+      "score": 2,
+      "type": "post",
+      "subreddit": "linkedin"
      },
      {
-      "index": 162,
-      "text": "\\* The ghost jobs being reposted over and over and can't be hidden. \\* The AI slop on my feed. AI slop about AI. That's all it is for me now…",
-      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozjumru/",
+      "index": 231,
+      "text": "Acceptable, sure. Effective, I'd say unlikely. Don't ask for things from people you don't know in an initial message. Engage with a post or…",
+      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozjtkm4/",
       "date": "2026-07-24",
-      "score": 12,
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 236,
+      "text": "You are right. Don’t wait for the connection, give a reason for connecting and ask to connect, up front.",
+      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozivjai/",
+      "date": "2026-07-24",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     }
+    ]
+   }
+  ],
+  "questions": [
+   {
+    "text": "Any tips for starting freelancing?",
+    "citations": [
+     {
+      "index": 9,
+      "text": "Any tips for starting freelancing?",
+      "url": "https://reddit.com/r/freelance/comments/1v72jaz/any_tips_for_starting_freelancing/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 33,
+      "text": "Freelancers who built a client base from scratch — what actually worked for you?",
+      "url": "https://reddit.com/r/freelance/comments/1v6uwhs/freelancers_who_built_a_client_base_from_scratch/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 57,
+      "text": "How do you actually get your first freelance design clients? ⭐",
+      "url": "https://reddit.com/r/freelance/comments/1v6i5t7/how_do_you_actually_get_your_first_freelance/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     }
+    ]
+   },
+   {
+    "text": "Is this normal for recruiters on LinkedIn?",
+    "citations": [
+     {
+      "index": 14,
+      "text": "Is this normal for recruiters on LinkedIn?",
+      "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 223,
+      "text": "It’s really a shame that so many recruiters give the rest of us a bad name. I don’t send a message to someone unless I want to talk to them.…",
+      "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozl9brj/",
+      "date": "2026-07-24",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 268,
+      "text": "One called my phone when my number isn't anywhere on my account. They messaged me on linkedin too. I asked how they got my phone number & I'…",
+      "url": "https://reddit.com/r/linkedin/comments/1v4zujd/linkedin_scam_recruiter_trends_and_why_resume/ozl4tos/",
+      "date": "2026-07-24",
+      "score": 2,
       "type": "comment",
       "subreddit": "linkedin"
      }
     ]
    },
    {
-    "text": "Poor or unresponsive customer support from LinkedIn, leading to blocked accounts and unresolved issues.",
+    "text": "How do you actually get your first freelance design clients?",
     "citations": [
      {
-      "index": 51,
-      "text": "The support doesn’t understand",
-      "url": "https://reddit.com/r/linkedin/comments/1v6fupr/the_support_doesnt_understand/",
+      "index": 57,
+      "text": "How do you actually get your first freelance design clients? ⭐",
+      "url": "https://reddit.com/r/freelance/comments/1v6i5t7/how_do_you_actually_get_your_first_freelance/",
       "date": "2026-07-25",
       "score": 1,
       "type": "post",
-      "subreddit": "linkedin"
+      "subreddit": "freelance"
      },
      {
-      "index": 55,
-      "text": "ACCOUNT IS BLOCKED FOR ALMOST 3 MONTHS NO RESPONSE",
-      "url": "https://reddit.com/r/linkedin/comments/1v6dii8/account_is_blocked_for_almost_3_months_no_response/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 109,
-      "text": "Can't delete or login to Linkedin account",
-      "url": "https://reddit.com/r/linkedin/comments/1v5np10/cant_delete_or_login_to_linkedin_account/",
-      "date": "2026-07-24",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     }
-    ]
-   },
-   {
-    "text": "Difficulty acquiring clients and finding consistent work as a freelancer.",
-    "citations": [
-     {
-      "index": 23,
+      "index": 33,
       "text": "Freelancers who built a client base from scratch — what actually worked for you?",
       "url": "https://reddit.com/r/freelance/comments/1v6uwhs/freelancers_who_built_a_client_base_from_scratch/",
       "date": "2026-07-26",
@@ -29989,34 +30101,41 @@
      },
      {
       "index": 1,
-      "text": "Urgent need of Work!!!!!!",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v71rep/urgent_need_of_work/",
+      "text": "I just made my first $100 online as a web developer. It finally feels real.",
+      "url": "https://reddit.com/r/freelance/comments/1v74nav/i_just_made_my_first_100_online_as_a_web/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     }
+    ]
+   },
+   {
+    "text": "What's one piece of marketing advice that everyone seems to agree with but you've never really believed? 🤔",
+    "citations": [
+     {
+      "index": 21,
+      "text": "What's one piece of marketing advice that everyone seems to agree with but you've never really believed? 🤔",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6yjbq/whats_one_piece_of_marketing_advice_that_everyone/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 40,
-      "text": "Looking for a B2B Lead Generation Freelancer",
-      "url": "https://reddit.com/r/freelance/comments/1v6k480/looking_for_a_b2b_lead_generation_freelancer/",
-      "date": "2026-07-25",
-      "score": 2,
-      "type": "post",
-      "subreddit": "freelance"
-     }
-    ]
-   }
-  ],
-  "questions": [
-   {
-    "text": "Is a founder branding + LinkedIn lead generation agency still a viable business model?",
-    "citations": [
+      "index": 209,
+      "text": "Totally when you first study advertising, marketing, or design, you get really romanticised around the whole whimsical idea of talking to so…",
+      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozl74ro/",
+      "date": "2026-07-24",
+      "score": 4,
+      "type": "comment",
+      "subreddit": "marketing"
+     },
      {
-      "index": 7,
-      "text": "Is a founder branding + LinkedIn lead generation agency still a viable business model?",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v70obb/is_a_founder_branding_linkedin_lead_generation/",
-      "date": "2026-07-26",
+      "index": 113,
+      "text": "Do you actually have a marketing strategy or just a pile of random tactics?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5rd24/do_you_actually_have_a_marketing_strategy_or_just/",
+      "date": "2026-07-24",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
@@ -30024,55 +30143,31 @@
     ]
    },
    {
-    "text": "Freelancers who built a client base from scratch, what actually worked for you?",
+    "text": "Can you filter out job openings with AI intrerviews?",
     "citations": [
      {
-      "index": 23,
-      "text": "Freelancers who built a client base from scratch — what actually worked for you?",
-      "url": "https://reddit.com/r/freelance/comments/1v6uwhs/freelancers_who_built_a_client_base_from_scratch/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     }
-    ]
-   },
-   {
-    "text": "What's the most impressive connection you've made on LinkedIn?",
-    "citations": [
-     {
-      "index": 26,
-      "text": "What’s the most impressive connection you’ve made?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6u5xx/whats_the_most_impressive_connection_youve_made/",
-      "date": "2026-07-26",
+      "index": 132,
+      "text": "Can you filter out job openings with AI intrerviews?",
+      "url": "https://reddit.com/r/linkedin/comments/1v5k4bt/can_you_filter_out_job_openings_with_ai/",
+      "date": "2026-07-24",
       "score": 1,
       "type": "post",
       "subreddit": "linkedin"
-     }
-    ]
-   },
-   {
-    "text": "How do you guys find clients on Instagram?",
-    "citations": [
+     },
      {
-      "index": 31,
-      "text": "How do you guys find client in instagram?",
-      "url": "https://reddit.com/r/freelance/comments/1v6py47/how_do_you_guys_find_client_in_instagram/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     }
-    ]
-   },
-   {
-    "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
-    "citations": [
+      "index": 199,
+      "text": "Sounds exactly like something I’ve gone for recently ! Main emphasis was on AI optimisation but so many tasks on job description for part ti…",
+      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozif565/",
+      "date": "2026-07-24",
+      "score": 5,
+      "type": "comment",
+      "subreddit": "marketing"
+     },
      {
-      "index": 45,
-      "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
-      "date": "2026-07-25",
+      "index": 144,
+      "text": "Filter out promoted jobs?",
+      "url": "https://reddit.com/r/linkedin/comments/1v5hcxa/filter_out_promoted_jobs/",
+      "date": "2026-07-24",
       "score": 1,
       "type": "post",
       "subreddit": "linkedin"
@@ -30082,130 +30177,126 @@
   ],
   "content_ideas": [
    {
-    "title": "Is LinkedIn just a platform for selling 'how to LinkedIn' courses?",
-    "hook": "Is LinkedIn just a platform for selling 'how to LinkedIn' courses?",
-    "platform": "linkedin",
+    "title": "LinkedIn Account Locked? Here's What NOT to Do.",
+    "hook": "My LinkedIn account was hibernated, and getting back in was a nightmare.",
     "format": "Text post",
-    "angle": "Acknowledge and validate the common skepticism about LinkedIn's true value, then offer a genuine perspective on how to use it effectively for client acquisition without being 'salesy.'",
-    "rationale": "Directly addresses a major community frustration, inviting engagement from those who feel the same way and offering a fresh, honest take.",
-    "addresses": "Pain point: Skepticism about LinkedIn's true value, feeling it's only for those selling 'how to LinkedIn' courses.",
+    "angle": "Share personal experience and actionable steps for dealing with LinkedIn account access issues.",
+    "rationale": "Directly addresses a common, frustrating platform issue with a relatable personal story.",
+    "addresses": "Struggles with LinkedIn platform and features",
     "citations": [
      {
-      "index": 45,
-      "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
+      "index": 6,
+      "text": "Hibernated my LinkedIn account months ago..now I can't get back into it at all 😭",
+      "url": "https://reddit.com/r/linkedin/comments/1v73ax4/hibernated_my_linkedin_account_months_agonow_i/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 61,
+      "text": "The support doesn’t understand",
+      "url": "https://reddit.com/r/linkedin/comments/1v6fupr/the_support_doesnt_understand/",
       "date": "2026-07-25",
       "score": 1,
       "type": "post",
       "subreddit": "linkedin"
      },
      {
-      "index": 179,
-      "text": "I can summarized it in: \"LinkedIN is like the work version of a 15yo emo girl MySpace\".",
-      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozk9t1x/",
-      "date": "2026-07-24",
-      "score": 7,
-      "type": "comment",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 219,
-      "text": "lol depends who you are following doesn’t it. There are a billion people using LinkedIn. So no, not everyone on LinkedIn is trying to sell y…",
-      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozqusss/",
+      "index": 65,
+      "text": "ACCOUNT IS BLOCKED FOR ALMOST 3 MONTHS NO RESPONSE",
+      "url": "https://reddit.com/r/linkedin/comments/1v6dii8/account_is_blocked_for_almost_3_months_no_response/",
       "date": "2026-07-25",
-      "score": 3,
-      "type": "comment",
+      "score": 1,
+      "type": "post",
       "subreddit": "linkedin"
      }
     ]
    },
    {
-    "title": "Built a client base from scratch? What ACTUALLY worked for you?",
-    "hook": "Built a client base from scratch? What ACTUALLY worked for you?",
-    "platform": "linkedin",
-    "format": "Poll",
-    "angle": "Ask the audience for their proven strategies for client acquisition, then offer to share your own insights in a follow-up post.",
-    "rationale": "Encourages direct interaction and provides valuable data for the creator, while also setting up future content.",
-    "addresses": "Pain point: Difficulty acquiring clients and finding consistent work as a freelancer.",
+    "title": "Stop Posting Just to Stay Active: Quality Over Quantity on LinkedIn",
+    "hook": "\"Stop posting just to stay active.\" This advice is everywhere, but what does it *really* mean?",
+    "format": "Carousel (PDF)",
+    "angle": "Debunk the \"just stay active\" myth and provide a framework for creating valuable, non-spammy content.",
+    "rationale": "Challenges a common, often unhelpful piece of advice and offers a practical alternative.",
+    "addresses": "Marketing strategies and content creation",
     "citations": [
      {
-      "index": 23,
-      "text": "Freelancers who built a client base from scratch — what actually worked for you?",
-      "url": "https://reddit.com/r/freelance/comments/1v6uwhs/freelancers_who_built_a_client_base_from_scratch/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     },
-     {
-      "index": 1,
-      "text": "Urgent need of Work!!!!!!",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v71rep/urgent_need_of_work/",
+      "index": 22,
+      "text": "Stop posting just to stay active.",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6yhgx/stop_posting_just_to_stay_active/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 40,
-      "text": "Looking for a B2B Lead Generation Freelancer",
-      "url": "https://reddit.com/r/freelance/comments/1v6k480/looking_for_a_b2b_lead_generation_freelancer/",
+      "index": 76,
+      "text": "Is organic reach actually dead or are we just creating the wrong content for it ?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v67u79/is_organic_reach_actually_dead_or_are_we_just/",
       "date": "2026-07-25",
-      "score": 2,
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 113,
+      "text": "Do you actually have a marketing strategy or just a pile of random tactics?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5rd24/do_you_actually_have_a_marketing_strategy_or_just/",
+      "date": "2026-07-24",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     }
+    ]
+   },
+   {
+    "title": "Freelancing 101: How I Landed My First Clients (Without Fiverr/Upwork)",
+    "hook": "Just made your first $100 online? That feeling is real. Now, how to get more?",
+    "format": "Video script",
+    "angle": "Share a step-by-step guide on how to acquire initial freelance clients through organic methods.",
+    "rationale": "Provides direct answers to a fundamental question for aspiring freelancers.",
+    "addresses": "Challenges and frustrations in freelancing",
+    "citations": [
+     {
+      "index": 1,
+      "text": "I just made my first $100 online as a web developer. It finally feels real.",
+      "url": "https://reddit.com/r/freelance/comments/1v74nav/i_just_made_my_first_100_online_as_a_web/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 9,
+      "text": "Any tips for starting freelancing?",
+      "url": "https://reddit.com/r/freelance/comments/1v72jaz/any_tips_for_starting_freelancing/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 33,
+      "text": "Freelancers who built a client base from scratch — what actually worked for you?",
+      "url": "https://reddit.com/r/freelance/comments/1v6uwhs/freelancers_who_built_a_client_base_from_scratch/",
+      "date": "2026-07-26",
+      "score": 1,
       "type": "post",
       "subreddit": "freelance"
      }
     ]
    },
    {
-    "title": "I'm REALLY tired of marketing. Anyone else feel this way?",
-    "hook": "I'm REALLY tired of marketing. Anyone else feel this way?",
-    "platform": "linkedin",
+    "title": "The AI Content Trap: Why Your Personal Brand Needs a Human Touch",
+    "hook": "Seeing too many em dashes? You're not alone. AI slop is killing authenticity.",
     "format": "Text post",
-    "angle": "Share personal experience with marketing burnout and offer strategies for maintaining passion and avoiding exhaustion in the freelance world.",
-    "rationale": "Creates relatability and community around a shared, often unspoken, struggle, positioning the creator as empathetic and helpful.",
-    "addresses": "Pain point: Marketing burnout and feeling tired of the industry.",
+    "angle": "Discuss the negative impact of AI-generated content on personal branding and how to stand out with genuine human content.",
+    "rationale": "Taps into the widespread frustration with AI content and offers a solution for personal branding.",
+    "addresses": "AI's impact on marketing and content",
     "citations": [
      {
-      "index": 18,
-      "text": "I'm REALLY TIRED OF MARKETING",
-      "url": "https://reddit.com/r/marketing/comments/1v6vxt1/im_really_tired_of_marketing/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "marketing"
-     },
-     {
-      "index": 240,
-      "text": "I’ve been in marketing for about 5 years and I’m so burnt out. I dream of working in a different field. I really love the company I’m at now…",
-      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozidy9k/",
-      "date": "2026-07-24",
-      "score": 3,
-      "type": "comment",
-      "subreddit": "marketing"
-     },
-     {
-      "index": 282,
-      "text": "Yes and I am one of them! There’s a constant chase and grind to marketing, especially in the tech space. I have to remind myself every singl…",
-      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozj26we/",
-      "date": "2026-07-24",
-      "score": 2,
-      "type": "comment",
-      "subreddit": "marketing"
-     }
-    ]
-   },
-   {
-    "title": "AI slop is ruining my LinkedIn feed. Here's how I spot it.",
-    "hook": "AI slop is ruining my LinkedIn feed. Here's how I spot it.",
-    "platform": "linkedin",
-    "format": "Carousel (PDF)",
-    "angle": "Discuss the rise of AI-generated content on LinkedIn, its negative impact, and provide tips for identifying it and creating authentic, human-centric content instead.",
-    "rationale": "Taps into a current, highly visible frustration on the platform, offering practical advice and promoting quality content.",
-    "addresses": "Pain point: Frustration with AI-generated content, 'slop,' and plagiarism on professional platforms.",
-    "citations": [
-     {
-      "index": 110,
+      "index": 120,
       "text": "I'm done with AI Slop Plagiarism, cancelling my LinkedIn subscription",
       "url": "https://reddit.com/r/linkedin/comments/1v5nejj/im_done_with_ai_slop_plagiarism_cancelling_my/",
       "date": "2026-07-24",
@@ -30223,65 +30314,63 @@
       "subreddit": "freelance"
      },
      {
-      "index": 162,
-      "text": "\\* The ghost jobs being reposted over and over and can't be hidden. \\* The AI slop on my feed. AI slop about AI. That's all it is for me now…",
-      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/ozjumru/",
+      "index": 156,
+      "text": "The excessive HR AI slop",
+      "url": "https://reddit.com/r/linkedin/comments/1v5fx0u/what_are_things_you_dont_like_about_linkedin/oziwu04/",
       "date": "2026-07-24",
-      "score": 12,
+      "score": 25,
       "type": "comment",
       "subreddit": "linkedin"
      }
     ]
    },
    {
-    "title": "LinkedIn support doesn't understand. My account was blocked for 3 months.",
-    "hook": "LinkedIn support doesn't understand. My account was blocked for 3 months.",
-    "platform": "linkedin",
-    "format": "Video script",
-    "angle": "Share a personal or hypothetical story about dealing with LinkedIn's poor support or broken features, then offer community-sourced workarounds or best practices.",
-    "rationale": "Validates user frustrations and provides practical solutions or a sense of shared experience, fostering community.",
-    "addresses": "Pain point: Poor or unresponsive customer support from LinkedIn, leading to blocked accounts and unresolved issues.",
+    "title": "Is LinkedIn Just for Selling LinkedIn Courses? My Take as a Marketer.",
+    "hook": "\"Everyone on LinkedIn is trying to sell you a course.\" Is this true? Let's talk.",
+    "format": "Poll",
+    "angle": "Open a discussion about the perception that LinkedIn is overly saturated with \"gurus\" selling how-to courses, and offer a nuanced perspective.",
+    "rationale": "Engages the audience on a highly relatable and often-discussed platform frustration.",
+    "addresses": "Struggles with LinkedIn platform and features",
     "citations": [
      {
-      "index": 51,
-      "text": "The support doesn’t understand",
-      "url": "https://reddit.com/r/linkedin/comments/1v6fupr/the_support_doesnt_understand/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     },
-     {
       "index": 55,
-      "text": "ACCOUNT IS BLOCKED FOR ALMOST 3 MONTHS NO RESPONSE",
-      "url": "https://reddit.com/r/linkedin/comments/1v6dii8/account_is_blocked_for_almost_3_months_no_response/",
+      "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
       "date": "2026-07-25",
       "score": 1,
       "type": "post",
       "subreddit": "linkedin"
      },
      {
-      "index": 109,
-      "text": "Can't delete or login to Linkedin account",
-      "url": "https://reddit.com/r/linkedin/comments/1v5np10/cant_delete_or_login_to_linkedin_account/",
-      "date": "2026-07-24",
-      "score": 1,
-      "type": "post",
+      "index": 217,
+      "text": "lol depends who you are following doesn’t it. There are a billion people using LinkedIn. So no, not everyone on LinkedIn is trying to sell y…",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozqusss/",
+      "date": "2026-07-25",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 252,
+      "text": "Selling shovels.",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozr5g8v/",
+      "date": "2026-07-25",
+      "score": 2,
+      "type": "comment",
       "subreddit": "linkedin"
      }
     ]
    },
    {
-    "title": "No budget, no manpower? Organic marketing tips that actually work.",
-    "hook": "No budget, no manpower? Organic marketing tips that actually work.",
-    "platform": "linkedin",
-    "format": "Text post",
-    "angle": "Provide actionable, low-cost organic marketing strategies for freelancers and small businesses, focusing on content creation and community engagement.",
-    "rationale": "Appeals to a broad audience of freelancers and small business owners looking for practical, accessible growth strategies.",
-    "addresses": "Topic 3: Marketing strategies, tools, and career advice",
+    "title": "Beyond the Buzzwords: Organic Marketing Strategies That Actually Work",
+    "hook": "Tired of \"organic marketing\" advice that never delivers? Let's get real.",
+    "format": "Carousel (PDF)",
+    "angle": "Provide concrete, actionable organic marketing strategies that don't require a huge budget or manpower.",
+    "rationale": "Addresses the need for practical, budget-friendly marketing advice for startups and freelancers.",
+    "addresses": "Marketing strategies and content creation",
     "citations": [
      {
-      "index": 8,
+      "index": 18,
       "text": "Can someone give me tips for Organic marketing",
       "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6zq70/can_someone_give_me_tips_for_organic_marketing/",
       "date": "2026-07-26",
@@ -30290,19 +30379,93 @@
       "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 247,
+      "index": 76,
+      "text": "Is organic reach actually dead or are we just creating the wrong content for it ?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v67u79/is_organic_reach_actually_dead_or_are_we_just/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 243,
       "text": "Completely new to digital marketing launching a consumer product is an interesting position, honestly. You haven't picked up bad habits yet.…",
       "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v4fzw3/looking_for_help_marketing_my_new_product/ozb5gk7/",
       "date": "2026-07-23",
       "score": 3,
       "type": "comment",
       "subreddit": "SocialMediaMarketing"
+     }
+    ]
+   },
+   {
+    "title": "Ghosted After an Interview? When (and How) to Follow Up on LinkedIn.",
+    "hook": "Third interview, then silence. Is it okay to reach out on LinkedIn? Yes, but carefully.",
+    "format": "Video script",
+    "angle": "Offer advice on appropriate LinkedIn etiquette for following up after job interviews, especially when feeling ghosted.",
+    "rationale": "Provides guidance on a common, anxiety-inducing career progression scenario.",
+    "addresses": "Job searching and career progression",
+    "citations": [
+     {
+      "index": 130,
+      "text": "I’m waiting for the results of my third interview, and I feel like I’m being ghosted. Is it okay to reach out to the interviewer on LinkedIn?",
+      "url": "https://reddit.com/r/linkedin/comments/1v5l2yn/im_waiting_for_the_results_of_my_third_interview/",
+      "date": "2026-07-24",
+      "score": 2,
+      "type": "post",
+      "subreddit": "linkedin"
      },
      {
-      "index": 66,
-      "text": "Is organic reach actually dead or are we just creating the wrong content for it ?",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v67u79/is_organic_reach_actually_dead_or_are_we_just/",
-      "date": "2026-07-25",
+      "index": 231,
+      "text": "Acceptable, sure. Effective, I'd say unlikely. Don't ask for things from people you don't know in an initial message. Engage with a post or…",
+      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozjtkm4/",
+      "date": "2026-07-24",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 236,
+      "text": "You are right. Don’t wait for the connection, give a reason for connecting and ask to connect, up front.",
+      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozivjai/",
+      "date": "2026-07-24",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     }
+    ]
+   },
+   {
+    "title": "My Unpopular Opinion: That \"Everyone Agrees With\" Marketing Advice I Never Believed.",
+    "hook": "What's one piece of marketing advice everyone agrees with, but you don't? My answer might surprise you.",
+    "format": "Text post",
+    "angle": "Challenge a widely accepted marketing belief with a personal, evidence-based counter-argument.",
+    "rationale": "Sparks engagement by taking a contrarian stance on a common marketing topic.",
+    "addresses": "Marketing strategies and content creation",
+    "citations": [
+     {
+      "index": 21,
+      "text": "What's one piece of marketing advice that everyone seems to agree with but you've never really believed? 🤔",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6yjbq/whats_one_piece_of_marketing_advice_that_everyone/",
+      "date": "2026-07-26",
+      "score": 1,
+      "type": "post",
+      "subreddit": "SocialMediaMarketing"
+     },
+     {
+      "index": 209,
+      "text": "Totally when you first study advertising, marketing, or design, you get really romanticised around the whole whimsical idea of talking to so…",
+      "url": "https://reddit.com/r/marketing/comments/1v55yhy/do_you_think_theres_lots_of_depressed_marketers/ozl74ro/",
+      "date": "2026-07-24",
+      "score": 4,
+      "type": "comment",
+      "subreddit": "marketing"
+     },
+     {
+      "index": 113,
+      "text": "Do you actually have a marketing strategy or just a pile of random tactics?",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5rd24/do_you_actually_have_a_marketing_strategy_or_just/",
+      "date": "2026-07-24",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
@@ -30310,34 +30473,107 @@
     ]
    },
    {
-    "title": "Coaches, consultants: How do you handle content creation?",
-    "hook": "Coaches, consultants: How do you handle content creation?",
-    "platform": "linkedin",
-    "format": "Text post",
-    "angle": "Share your own content creation workflow and invite other coaches and consultants to share theirs, fostering a collaborative discussion.",
-    "rationale": "Directly answers a question from the research, encouraging peer-to-peer learning and positioning the creator as a facilitator.",
-    "addresses": "Topic 3: Marketing strategies, tools, and career advice",
+    "title": "The Freelancer's Guide to Client Communication: Setting Expectations & Avoiding Scope Creep",
+    "hook": "\"Just one quick change!\" Sound familiar? Here's how to handle it.",
+    "format": "Long-form article",
+    "angle": "Provide comprehensive strategies for clear client communication, setting boundaries, and managing scope creep to protect your time and sanity.",
+    "rationale": "Addresses critical pain points for freelancers related to client management and project delivery.",
+    "addresses": "Challenges and frustrations in freelancing",
     "citations": [
      {
-      "index": 9,
-      "text": "I’m curious how other coaches and consultants handle content creation.",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6zjvi/im_curious_how_other_coaches_and_consultants/",
+      "index": 66,
+      "text": "How do you guys handle scope creep when clients ask for 'just one quick change'?",
+      "url": "https://reddit.com/r/freelance/comments/1v6deh0/how_do_you_guys_handle_scope_creep_when_clients/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 118,
+      "text": "I Lost a $1,000 Freelance Client Because I Didn't Set Clear Expectations Upfront",
+      "url": "https://reddit.com/r/freelance/comments/1v5pygz/i_lost_a_1000_freelance_client_because_i_didnt/",
+      "date": "2026-07-24",
+      "score": 1,
+      "type": "post",
+      "subreddit": "freelance"
+     },
+     {
+      "index": 189,
+      "text": "This is a great list, totally agree on all counts. Point #1 is super important - freelancers tend to get frustrated with clients when they a…",
+      "url": "https://reddit.com/r/freelance/comments/1v3j8w7/my_top_5_rules_for_long_term_client_relationships/oz3vpng/",
+      "date": "2026-07-22",
+      "score": 6,
+      "type": "comment",
+      "subreddit": "freelance"
+     }
+    ]
+   },
+   {
+    "title": "Recruiters on LinkedIn: What's Normal, What's Not, and How to Spot the Red Flags",
+    "hook": "Is that recruiter message normal? Or just another spam attempt? Let's decode it.",
+    "format": "Carousel (PDF)",
+    "angle": "Educate users on typical recruiter behavior on LinkedIn, how to differentiate genuine opportunities from spam, and how to engage effectively.",
+    "rationale": "Directly addresses user confusion and frustration with recruiter interactions on the platform.",
+    "addresses": "Struggles with LinkedIn platform and features",
+    "citations": [
+     {
+      "index": 14,
+      "text": "Is this normal for recruiters on LinkedIn?",
+      "url": "https://reddit.com/r/linkedin/comments/1v719qz/is_this_normal_for_recruiters_on_linkedin/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
-      "subreddit": "SocialMediaMarketing"
+      "subreddit": "linkedin"
      },
      {
-      "index": 125,
-      "text": "Trying to build a better workflow before managing multiple accounts",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v5jjlq/trying_to_build_a_better_workflow_before_managing/",
+      "index": 223,
+      "text": "It’s really a shame that so many recruiters give the rest of us a bad name. I don’t send a message to someone unless I want to talk to them.…",
+      "url": "https://reddit.com/r/linkedin/comments/1v59scm/linkedin_job_messages_from_recruiter_why_dont/ozl9brj/",
       "date": "2026-07-24",
-      "score": 5,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
      },
      {
-      "index": 136,
+      "index": 268,
+      "text": "One called my phone when my number isn't anywhere on my account. They messaged me on linkedin too. I asked how they got my phone number & I'…",
+      "url": "https://reddit.com/r/linkedin/comments/1v4zujd/linkedin_scam_recruiter_trends_and_why_resume/ozl4tos/",
+      "date": "2026-07-24",
+      "score": 2,
+      "type": "comment",
+      "subreddit": "linkedin"
+     }
+    ]
+   },
+   {
+    "title": "Building a Personal Brand on LinkedIn: It's Not About Selling Courses (Unless You Are)",
+    "hook": "\"LinkedIn only works for people selling courses.\" Let's challenge that narrative.",
+    "format": "Video script",
+    "angle": "Explain how to build an authentic personal brand on LinkedIn that attracts clients without resorting to perceived \"guru\" tactics.",
+    "rationale": "Offers a positive, actionable alternative to the common cynical view of LinkedIn personal branding.",
+    "addresses": "Struggles with LinkedIn platform and features",
+    "citations": [
+     {
+      "index": 55,
+      "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
+      "date": "2026-07-25",
+      "score": 1,
+      "type": "post",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 217,
+      "text": "lol depends who you are following doesn’t it. There are a billion people using LinkedIn. So no, not everyone on LinkedIn is trying to sell y…",
+      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/ozqusss/",
+      "date": "2026-07-25",
+      "score": 3,
+      "type": "comment",
+      "subreddit": "linkedin"
+     },
+     {
+      "index": 146,
       "text": "Does your LinkedIn account need strategy?",
       "url": "https://reddit.com/r/linkedin/comments/1v5g88r/does_your_linkedin_account_need_strategy/",
       "date": "2026-07-24",
@@ -30348,56 +30584,26 @@
     ]
    },
    {
-    "title": "Stop posting just to stay active. Here's why.",
-    "hook": "Stop posting just to stay active. Here's why.",
-    "platform": "linkedin",
-    "format": "Long-form article",
-    "angle": "Argue against superficial content creation and advocate for strategic, value-driven posting that genuinely engages the audience and builds a personal brand.",
-    "rationale": "Challenges a common, ineffective practice and offers a more impactful approach, resonating with those seeking real growth.",
-    "addresses": "Topic 5: Social media content and growth",
+    "title": "AI Tools for Marketers: How to Use Them Without Creating \"Slop\"",
+    "hook": "AI can help, but how do you avoid sounding like a robot?",
+    "format": "Text post",
+    "angle": "Provide practical tips and best practices for leveraging AI marketing tools while maintaining a human, authentic voice.",
+    "rationale": "Addresses the interest in AI tools while mitigating the fear of producing low-quality content.",
+    "addresses": "AI's impact on marketing and content",
     "citations": [
      {
-      "index": 12,
-      "text": "Stop posting just to stay active.",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6yhgx/stop_posting_just_to_stay_active/",
+      "index": 4,
+      "text": "Want tips about AI maketing!",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v73emk/want_tips_about_ai_maketing/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
       "subreddit": "SocialMediaMarketing"
      },
      {
-      "index": 295,
-      "text": "Yes keep going , don't overthink data with your first 100 posts",
-      "url": "https://reddit.com/r/linkedin/comments/1v5398m/whats_your_view_on_this/ozhvaol/",
-      "date": "2026-07-24",
-      "score": 2,
-      "type": "comment",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 66,
-      "text": "Is organic reach actually dead or are we just creating the wrong content for it ?",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v67u79/is_organic_reach_actually_dead_or_are_we_just/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     }
-    ]
-   },
-   {
-    "title": "Is LinkedIn lead gen still viable? My take on founder branding.",
-    "hook": "Is LinkedIn lead gen still viable? My take on founder branding.",
-    "platform": "linkedin",
-    "format": "Text post",
-    "angle": "Discuss the current state of LinkedIn for lead generation and founder branding, offering insights into what strategies are still effective amidst platform changes and user skepticism.",
-    "rationale": "Provides an expert opinion on a directly asked question, offering clarity and strategic guidance.",
-    "addresses": "Question: Is a founder branding + LinkedIn lead generation agency still a viable business model?",
-    "citations": [
-     {
-      "index": 7,
-      "text": "Is a founder branding + LinkedIn lead generation agency still a viable business model?",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v70obb/is_a_founder_branding_linkedin_lead_generation/",
+      "index": 25,
+      "text": "Creating marketing materials with ai",
+      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6wvex/creating_marketing_materials_with_ai/",
       "date": "2026-07-26",
       "score": 1,
       "type": "post",
@@ -30405,135 +30611,12 @@
      },
      {
       "index": 46,
-      "text": "LinkedIn sigue siendo el principal canal de negocios",
-      "url": "https://reddit.com/r/linkedin/comments/1v6iniy/linkedin_sigue_siendo_el_principal_canal_de/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 45,
-      "text": "Am I the only person who feels that LinkedIn only works for people who are trying to sell others on how to use LinkedIn to earn money?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6j44f/am_i_the_only_person_who_feels_that_linkedin_only/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     }
-    ]
-   },
-   {
-    "title": "I lost a $1,000 client because I didn't set clear expectations.",
-    "hook": "I lost a $1,000 client because I didn't set clear expectations.",
-    "platform": "linkedin",
-    "format": "Carousel (PDF)",
-    "angle": "Share a lesson learned about the importance of clear contracts, scope definition, and managing client expectations to avoid disputes and ensure fair compensation.",
-    "rationale": "Offers a relatable, cautionary tale with practical advice, appealing to freelancers struggling with client management.",
-    "addresses": "Topic 2: Freelancing challenges, rates, and client management",
-    "citations": [
-     {
-      "index": 108,
-      "text": "I Lost a $1,000 Freelance Client Because I Didn't Set Clear Expectations Upfront",
-      "url": "https://reddit.com/r/freelance/comments/1v5pygz/i_lost_a_1000_freelance_client_because_i_didnt/",
-      "date": "2026-07-24",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     },
-     {
-      "index": 54,
-      "text": "Client Expectations vs Client Budget 😅 Every Marketer Can Relate",
-      "url": "https://reddit.com/r/freelance/comments/1v6do9a/client_expectations_vs_client_budget_every/",
+      "text": "Built an AI writing tool for quick emails, resumes, bios & social posts—would love feedback",
+      "url": "https://reddit.com/r/freelance/comments/1v6mql6/built_an_ai_writing_tool_for_quick_emails_resumes/",
       "date": "2026-07-25",
       "score": 1,
       "type": "post",
       "subreddit": "freelance"
-     },
-     {
-      "index": 177,
-      "text": "What does your contract say?",
-      "url": "https://reddit.com/r/freelance/comments/1v1yq4e/client_asked_for_partial_refund/oyrk7va/",
-      "date": "2026-07-20",
-      "score": 8,
-      "type": "comment",
-      "subreddit": "freelance"
-     }
-    ]
-   },
-   {
-    "title": "What's the most impressive connection you've made on LinkedIn?",
-    "hook": "What's the most impressive connection you've made on LinkedIn?",
-    "platform": "linkedin",
-    "format": "Text post",
-    "angle": "Ask the community about their most valuable LinkedIn connections and share insights on how to cultivate meaningful professional relationships on the platform.",
-    "rationale": "Encourages positive engagement and sharing of success stories, shifting the narrative from platform frustration to potential value.",
-    "addresses": "Question: What's the most impressive connection you've made?",
-    "citations": [
-     {
-      "index": 26,
-      "text": "What’s the most impressive connection you’ve made?",
-      "url": "https://reddit.com/r/linkedin/comments/1v6u5xx/whats_the_most_impressive_connection_youve_made/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 237,
-      "text": "You are right. Don’t wait for the connection, give a reason for connecting and ask to connect, up front.",
-      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozivjai/",
-      "date": "2026-07-24",
-      "score": 3,
-      "type": "comment",
-      "subreddit": "linkedin"
-     },
-     {
-      "index": 288,
-      "text": "Connection requests is fine, it's when you start asking for a call or for their time.",
-      "url": "https://reddit.com/r/linkedin/comments/1v5cswg/is_this_message_that_i_sent_on_linkedin_acceptable/ozit76a/",
-      "date": "2026-07-24",
-      "score": 2,
-      "type": "comment",
-      "subreddit": "linkedin"
-     }
-    ]
-   },
-   {
-    "title": "How to find clients on Instagram? My top 3 strategies.",
-    "hook": "How do you find clients on Instagram? My top 3 strategies.",
-    "platform": "linkedin",
-    "format": "Video script",
-    "angle": "Provide specific, actionable strategies for freelancers to find and attract clients on Instagram, drawing parallels to other social media platforms.",
-    "rationale": "Directly answers a user question with practical, platform-specific advice, appealing to freelancers looking to diversify their client sources.",
-    "addresses": "Question: How do you guys find client in instagram?",
-    "citations": [
-     {
-      "index": 31,
-      "text": "How do you guys find client in instagram?",
-      "url": "https://reddit.com/r/freelance/comments/1v6py47/how_do_you_guys_find_client_in_instagram/",
-      "date": "2026-07-26",
-      "score": 1,
-      "type": "post",
-      "subreddit": "freelance"
-     },
-     {
-      "index": 43,
-      "text": "How do I find sponsors/brands for my page?",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6jo9m/how_do_i_find_sponsorsbrands_for_my_page/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
-     },
-     {
-      "index": 39,
-      "text": "ISO social media integration recommendations",
-      "url": "https://reddit.com/r/SocialMediaMarketing/comments/1v6li9w/iso_social_media_integration_recommendations/",
-      "date": "2026-07-25",
-      "score": 1,
-      "type": "post",
-      "subreddit": "SocialMediaMarketing"
      }
     ]
    }
@@ -30541,7 +30624,7 @@
   "item_sentiments": [
    {
     "i": 1,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 2,
@@ -30549,7 +30632,7 @@
    },
    {
     "i": 3,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 4,
@@ -30557,11 +30640,11 @@
    },
    {
     "i": 5,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 6,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 7,
@@ -30581,15 +30664,15 @@
    },
    {
     "i": 11,
-    "s": "neu"
-   },
-   {
-    "i": 12,
     "s": "neg"
    },
    {
-    "i": 13,
+    "i": 12,
     "s": "neu"
+   },
+   {
+    "i": 13,
+    "s": "pos"
    },
    {
     "i": 14,
@@ -30601,7 +30684,7 @@
    },
    {
     "i": 16,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 17,
@@ -30609,7 +30692,7 @@
    },
    {
     "i": 18,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 19,
@@ -30625,7 +30708,7 @@
    },
    {
     "i": 22,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 23,
@@ -30633,11 +30716,11 @@
    },
    {
     "i": 24,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 25,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 26,
@@ -30649,7 +30732,7 @@
    },
    {
     "i": 28,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 29,
@@ -30657,7 +30740,7 @@
    },
    {
     "i": 30,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 31,
@@ -30665,7 +30748,7 @@
    },
    {
     "i": 32,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 33,
@@ -30677,11 +30760,11 @@
    },
    {
     "i": 35,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 36,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 37,
@@ -30697,7 +30780,7 @@
    },
    {
     "i": 40,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 41,
@@ -30705,7 +30788,7 @@
    },
    {
     "i": 42,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 43,
@@ -30721,7 +30804,7 @@
    },
    {
     "i": 46,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 47,
@@ -30741,7 +30824,7 @@
    },
    {
     "i": 51,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 52,
@@ -30749,11 +30832,11 @@
    },
    {
     "i": 53,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 54,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 55,
@@ -30769,35 +30852,35 @@
    },
    {
     "i": 58,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 59,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 60,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 61,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 62,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 63,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 64,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 65,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 66,
@@ -30805,19 +30888,19 @@
    },
    {
     "i": 67,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 68,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 69,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 70,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 71,
@@ -30825,7 +30908,7 @@
    },
    {
     "i": 72,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 73,
@@ -30845,7 +30928,7 @@
    },
    {
     "i": 77,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 78,
@@ -30909,7 +30992,7 @@
    },
    {
     "i": 93,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 94,
@@ -30937,7 +31020,7 @@
    },
    {
     "i": 100,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 101,
@@ -30949,7 +31032,7 @@
    },
    {
     "i": 103,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 104,
@@ -30969,15 +31052,15 @@
    },
    {
     "i": 108,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 109,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 110,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 111,
@@ -30993,31 +31076,31 @@
    },
    {
     "i": 114,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 115,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 116,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 117,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 118,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 119,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 120,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 121,
@@ -31033,19 +31116,19 @@
    },
    {
     "i": 124,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 125,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 126,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 127,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 128,
@@ -31061,11 +31144,11 @@
    },
    {
     "i": 131,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 132,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 133,
@@ -31077,7 +31160,7 @@
    },
    {
     "i": 135,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 136,
@@ -31089,7 +31172,7 @@
    },
    {
     "i": 138,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 139,
@@ -31101,7 +31184,7 @@
    },
    {
     "i": 141,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 142,
@@ -31117,7 +31200,7 @@
    },
    {
     "i": 145,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 146,
@@ -31129,7 +31212,7 @@
    },
    {
     "i": 148,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 149,
@@ -31137,7 +31220,7 @@
    },
    {
     "i": 150,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 151,
@@ -31225,7 +31308,7 @@
    },
    {
     "i": 172,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 173,
@@ -31293,23 +31376,23 @@
    },
    {
     "i": 189,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 190,
-    "s": "pos"
-   },
-   {
-    "i": 191,
-    "s": "pos"
-   },
-   {
-    "i": 192,
     "s": "neg"
    },
    {
-    "i": 193,
+    "i": 191,
+    "s": "neg"
+   },
+   {
+    "i": 192,
     "s": "pos"
+   },
+   {
+    "i": 193,
+    "s": "neg"
    },
    {
     "i": 194,
@@ -31321,11 +31404,11 @@
    },
    {
     "i": 196,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 197,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 198,
@@ -31337,7 +31420,7 @@
    },
    {
     "i": 200,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 201,
@@ -31349,19 +31432,19 @@
    },
    {
     "i": 203,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 204,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 205,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 206,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 207,
@@ -31369,11 +31452,11 @@
    },
    {
     "i": 208,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 209,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 210,
@@ -31381,15 +31464,15 @@
    },
    {
     "i": 211,
-    "s": "neg"
-   },
-   {
-    "i": 212,
     "s": "pos"
    },
    {
-    "i": 213,
+    "i": 212,
     "s": "neu"
+   },
+   {
+    "i": 213,
+    "s": "neg"
    },
    {
     "i": 214,
@@ -31397,39 +31480,39 @@
    },
    {
     "i": 215,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 216,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 217,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 218,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 219,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 220,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 221,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 222,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 223,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 224,
@@ -31437,11 +31520,11 @@
    },
    {
     "i": 225,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 226,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 227,
@@ -31449,7 +31532,7 @@
    },
    {
     "i": 228,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 229,
@@ -31461,7 +31544,7 @@
    },
    {
     "i": 231,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 232,
@@ -31469,19 +31552,19 @@
    },
    {
     "i": 233,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 234,
-    "s": "neg"
-   },
-   {
-    "i": 235,
     "s": "pos"
    },
    {
-    "i": 236,
+    "i": 235,
     "s": "neg"
+   },
+   {
+    "i": 236,
+    "s": "pos"
    },
    {
     "i": 237,
@@ -31489,7 +31572,7 @@
    },
    {
     "i": 238,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 239,
@@ -31497,23 +31580,23 @@
    },
    {
     "i": 240,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 241,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 242,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 243,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 244,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 245,
@@ -31529,15 +31612,15 @@
    },
    {
     "i": 248,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 249,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 250,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 251,
@@ -31545,11 +31628,11 @@
    },
    {
     "i": 252,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 253,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 254,
@@ -31561,19 +31644,19 @@
    },
    {
     "i": 256,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 257,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 258,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 259,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 260,
@@ -31589,7 +31672,7 @@
    },
    {
     "i": 263,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 264,
@@ -31597,31 +31680,31 @@
    },
    {
     "i": 265,
-    "s": "pos"
-   },
-   {
-    "i": 266,
-    "s": "pos"
-   },
-   {
-    "i": 267,
-    "s": "pos"
-   },
-   {
-    "i": 268,
-    "s": "pos"
-   },
-   {
-    "i": 269,
     "s": "neu"
    },
    {
-    "i": 270,
+    "i": 266,
     "s": "neg"
    },
    {
-    "i": 271,
+    "i": 267,
     "s": "neg"
+   },
+   {
+    "i": 268,
+    "s": "neg"
+   },
+   {
+    "i": 269,
+    "s": "neg"
+   },
+   {
+    "i": 270,
+    "s": "pos"
+   },
+   {
+    "i": 271,
+    "s": "neu"
    },
    {
     "i": 272,
@@ -31629,7 +31712,7 @@
    },
    {
     "i": 273,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 274,
@@ -31637,19 +31720,19 @@
    },
    {
     "i": 275,
-    "s": "neu"
-   },
-   {
-    "i": 276,
     "s": "neg"
    },
    {
+    "i": 276,
+    "s": "neu"
+   },
+   {
     "i": 277,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 278,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 279,
@@ -31661,15 +31744,15 @@
    },
    {
     "i": 281,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 282,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 283,
-    "s": "neg"
+    "s": "pos"
    },
    {
     "i": 284,
@@ -31681,11 +31764,11 @@
    },
    {
     "i": 286,
-    "s": "neu"
+    "s": "neg"
    },
    {
     "i": 287,
-    "s": "pos"
+    "s": "neg"
    },
    {
     "i": 288,
@@ -31701,19 +31784,19 @@
    },
    {
     "i": 291,
-    "s": "neg"
+    "s": "neu"
    },
    {
     "i": 292,
-    "s": "pos"
+    "s": "neu"
    },
    {
     "i": 293,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 294,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 295,
@@ -31725,19 +31808,19 @@
    },
    {
     "i": 297,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 298,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 299,
-    "s": "neu"
+    "s": "pos"
    },
    {
     "i": 300,
-    "s": "neg"
+    "s": "pos"
    }
   ]
  },
@@ -31745,42 +31828,42 @@
   "sentiment": {
    "counts": {
     "pos": 60,
-    "neu": 147,
-    "neg": 93
+    "neu": 154,
+    "neg": 86
    },
    "percentages": {
     "pos": 20,
-    "neu": 49,
-    "neg": 31
+    "neu": 51,
+    "neg": 29
    },
    "classified": 300,
    "unclassified": 0
   },
   "engagement": {
-   "score": 4247,
-   "comments": 3696
+   "score": 4239,
+   "comments": 3683
   },
   "date_range": {
    "oldest": "2026-07-12",
    "newest": "2026-07-26",
-   "newest_ts": 1785066702,
-   "newest_iso": "2026-07-26 11:51 UTC",
+   "newest_ts": 1785074314,
+   "newest_iso": "2026-07-26 13:58 UTC",
    "label": "12-26 Jul 2026",
    "short_label": "12-26 Jul"
   },
-  "lag_hours": 0.1,
+  "lag_hours": 0.2,
   "trend": [
    [
     "2026-07-13",
-    49
+    45
    ],
    [
     "2026-07-14",
-    76
+    75
    ],
    [
     "2026-07-15",
-    122
+    118
    ],
    [
     "2026-07-16",
@@ -31824,7 +31907,7 @@
    ],
    [
     "2026-07-26",
-    35
+    45
    ]
   ]
  }

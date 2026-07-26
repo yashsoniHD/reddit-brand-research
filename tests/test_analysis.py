@@ -317,120 +317,78 @@ class TestIdeaHookSanitisation:
         raw = {"content_ideas": [
             {"title": "Guide", "hook": "See ![x](http://evil.example/p.png) this hook"}
         ]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="linkedin")
+        result = analysis.sanitize_synthesis(raw, n_items=3)
         assert result["content_ideas"][0]["hook"] == "See x this hook"
 
     def test_hook_is_truncated_to_max_chars(self):
         raw = {"content_ideas": [{"title": "Guide", "hook": "x" * 200}]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="linkedin")
+        result = analysis.sanitize_synthesis(raw, n_items=3)
         assert len(result["content_ideas"][0]["hook"]) == analysis.MAX_HOOK_CHARS
 
     def test_missing_hook_becomes_an_empty_string_not_a_dropped_idea(self):
         raw = {"content_ideas": [{"title": "Guide"}]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="linkedin")
+        result = analysis.sanitize_synthesis(raw, n_items=3)
         assert result["content_ideas"][0]["hook"] == ""
         assert result["content_ideas"][0]["title"] == "Guide"
 
     def test_no_markdown_link_survives_a_hook(self):
         raw = {"content_ideas": [{"title": "Guide", "hook": "[a](http://evil.example)"}]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="linkedin")
+        result = analysis.sanitize_synthesis(raw, n_items=3)
         assert "http" not in result["content_ideas"][0]["hook"]
 
-
-class TestIdeaPlatformCoercion:
-    def test_fixed_platform_overrides_whatever_the_model_said(self):
-        raw = {"content_ideas": [
-            {"title": "A", "platform": "instagram"},
-            {"title": "B", "platform": "made up platform"},
-            {"title": "C"},
-        ]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="linkedin")
-        assert [idea["platform"] for idea in result["content_ideas"]] == ["linkedin"] * 3
-
-    def test_fixed_instagram_run_overrides_a_linkedin_value_from_the_model(self):
-        raw = {"content_ideas": [{"title": "A", "platform": "linkedin"}]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="instagram")
-        assert result["content_ideas"][0]["platform"] == "instagram"
-
-    def test_both_respects_valid_model_supplied_values(self):
-        raw = {"content_ideas": [
-            {"title": "A", "platform": "instagram"},
-            {"title": "B", "platform": "linkedin"},
-        ]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="both")
-        assert [idea["platform"] for idea in result["content_ideas"]] == ["instagram", "linkedin"]
-
-    def test_both_defaults_invalid_or_missing_values_to_linkedin(self):
-        raw = {"content_ideas": [
-            {"title": "A", "platform": "tiktok"},
-            {"title": "B", "platform": None},
-            {"title": "C"},
-        ]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="both")
-        assert [idea["platform"] for idea in result["content_ideas"]] == ["linkedin"] * 3
-
-    def test_platform_matching_ignores_case_and_punctuation(self):
-        raw = {"content_ideas": [{"title": "A", "platform": "  Instagram! "}]}
-        result = analysis.sanitize_synthesis(raw, n_items=3, platform="both")
-        assert result["content_ideas"][0]["platform"] == "instagram"
-
-    def test_unspecified_run_platform_falls_back_to_the_models_answer_or_linkedin(self):
-        # platform="" (the default) behaves like an unfixed run for coercion purposes.
-        raw = {"content_ideas": [{"title": "A", "platform": "instagram"}, {"title": "B"}]}
+    def test_ideas_never_carry_a_platform_field(self):
+        # Platform is gone from the product surface; sanitisation must not resurrect
+        # it even if a stale prompt or a hand-built payload includes one.
+        raw = {"content_ideas": [{"title": "Guide", "hook": "x", "platform": "instagram"}]}
         result = analysis.sanitize_synthesis(raw, n_items=3)
-        assert [idea["platform"] for idea in result["content_ideas"]] == ["instagram", "linkedin"]
+        assert "platform" not in result["content_ideas"][0]
+        assert set(result["content_ideas"][0].keys()) == {
+            "title", "hook", "format", "angle", "rationale", "addresses", "item_indices"
+        }
 
 
 class TestSynthesisPrompt:
     """`_synthesis_prompt` is what actually reaches the model; sanitisation cannot
-    fix a prompt that never asked for the right platform or the right query."""
+    fix a prompt that never asked for the right query."""
 
     def test_prompt_contains_the_query(self):
-        prompt = analysis._synthesis_prompt([], [], "skincare routines for oily skin", "", "linkedin", ["x"])
+        prompt = analysis._synthesis_prompt([], [], "skincare routines for oily skin", "", ["x"])
         assert "skincare routines for oily skin" in prompt
 
-    def test_prompt_contains_the_platform_label(self):
-        prompt = analysis._synthesis_prompt([], [], "q", "", "linkedin", ["x"])
+    def test_prompt_targets_linkedin_implicitly(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
         assert "LinkedIn" in prompt
 
-    def test_fixed_platform_lists_only_that_platforms_formats(self):
-        prompt = analysis._synthesis_prompt([], [], "q", "", "linkedin", ["x"])
-        assert "Carousel (PDF)" in prompt
-        assert "Reel script" not in prompt
+    def test_prompt_lists_the_flat_format_menu(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        for fmt in analysis.IDEA_FORMATS:
+            assert fmt in prompt
 
-    def test_both_platforms_lists_both_format_menus(self):
-        prompt = analysis._synthesis_prompt([], [], "q", "", "both", ["x"])
-        assert "Carousel (PDF)" in prompt
-        assert "Reel script" in prompt
+    def test_prompt_has_no_platform_field_in_its_json_contract(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert '"platform"' not in prompt
 
     def test_profile_line_is_present_only_when_profile_is_non_empty(self):
-        without_profile = analysis._synthesis_prompt([], [], "q", "", "linkedin", ["x"])
+        without_profile = analysis._synthesis_prompt([], [], "q", "", ["x"])
         with_profile = analysis._synthesis_prompt(
-            [], [], "q", "I run a skincare brand", "linkedin", ["x"]
+            [], [], "q", "I run a skincare brand", ["x"]
         )
         assert "They describe themselves as" not in without_profile
         assert "They describe themselves as: I run a skincare brand" in with_profile
-
-    def test_fixed_platform_rule_names_that_platform_for_every_idea(self):
-        prompt = analysis._synthesis_prompt([], [], "q", "", "instagram", ["x"])
-        assert '"instagram" for every idea' in prompt
-
-    def test_both_platform_rule_asks_the_model_to_choose(self):
-        prompt = analysis._synthesis_prompt([], [], "q", "", "both", ["x"])
-        assert '"platform" is "linkedin" or "instagram". Choose whichever feed' in prompt
 
     def test_no_prompt_contains_an_em_or_en_dash(self):
         # The prompts forbid the model from using dashes; they should not model the
         # habit themselves, in their own instructional text or example strings.
         classification = analysis._classification_prompt([], ["x"])
-        synthesis = analysis._synthesis_prompt([], [], "q", "", "linkedin", ["x"])
+        synthesis = analysis._synthesis_prompt([], [], "q", "", ["x"])
         discovery_prompt = discovery._discovery_prompt("q", "")
-        for prompt in (classification, synthesis, discovery_prompt):
+        draft = analysis._draft_prompt({}, [], "q", "")
+        for prompt in (classification, synthesis, discovery_prompt, draft):
             assert "—" not in prompt and "–" not in prompt
 
     def test_classification_and_synthesis_prompts_state_the_no_dash_rule(self):
         classification = analysis._classification_prompt([], ["x"])
-        synthesis = analysis._synthesis_prompt([], [], "q", "", "linkedin", ["x"])
+        synthesis = analysis._synthesis_prompt([], [], "q", "", ["x"])
         for prompt in (classification, synthesis):
             assert "em dash" in prompt and "en dash" in prompt
 
@@ -440,26 +398,25 @@ class TestSynthesisPrompt:
 
 
 class TestSynthesizePublicCall:
-    def test_forwards_query_and_platform_into_the_prompt_and_sanitises_the_result(self, monkeypatch):
+    def test_forwards_query_into_the_prompt_and_sanitises_the_result(self, monkeypatch):
         captured = {}
 
         def fake_chat_json(prompt, max_tokens, label):
             captured["prompt"] = prompt
             captured["label"] = label
             return (
-                {"content_ideas": [{"title": "A", "hook": "Stop scrolling", "platform": "instagram"}]},
+                {"content_ideas": [{"title": "A", "hook": "Stop scrolling"}]},
                 "test-model",
             )
 
         monkeypatch.setattr(analysis, "_chat_json", fake_chat_json)
-        result = analysis.synthesize([], [], "skincare routines", "", "linkedin", ["skincareaddiction"])
+        result = analysis.synthesize([], [], "skincare routines", "", ["skincareaddiction"])
 
         assert result["model"] == "test-model"
         assert captured["label"] == "synthesis"
         assert "skincare routines" in captured["prompt"]
-        # The run is fixed to LinkedIn, so the model's stray "instagram" is overridden.
-        assert result["content_ideas"][0]["platform"] == "linkedin"
         assert result["content_ideas"][0]["hook"] == "Stop scrolling"
+        assert "platform" not in result["content_ideas"][0]
 
 
 class _FakeCandidate:
@@ -481,9 +438,13 @@ class _FakeModels:
     def __init__(self, bodies):
         self.bodies = list(bodies)
         self.calls = 0
+        self.last_prompt = None
+        self.last_config = None
 
     def generate_content(self, model, contents, config):
         self.calls += 1
+        self.last_prompt = contents
+        self.last_config = config
         body = self.bodies[min(self.calls - 1, len(self.bodies) - 1)]
         return _FakeResponse(body)
 
@@ -491,6 +452,138 @@ class _FakeModels:
 class _FakeClient:
     def __init__(self, bodies):
         self.models = _FakeModels(bodies)
+
+
+class TestSanitizePost:
+    """`sanitize_post` cleans a whole draft without collapsing it to one line: the
+    blank lines between paragraphs are what makes a post readable in a feed, so
+    `strip_markdown` (which flattens all whitespace) is applied per line instead."""
+
+    def test_markdown_is_stripped_per_line_and_blank_lines_survive(self):
+        raw = "**Bold opener.**\n\nA [linked](http://evil.example) second line."
+        result = analysis.sanitize_post(raw)
+        assert result == "Bold opener.\n\nA linked second line."
+
+    def test_runs_of_blank_lines_collapse_to_one(self):
+        raw = "First paragraph.\n\n\n\nSecond paragraph."
+        result = analysis.sanitize_post(raw)
+        assert "\n\n\n" not in result
+        assert result == "First paragraph.\n\nSecond paragraph."
+
+    def test_hashtag_line_is_capped_at_the_maximum(self):
+        raw = "A post.\n\n#one #two #three #four #five #six"
+        result = analysis.sanitize_post(raw)
+        last_line = result.split("\n")[-1]
+        assert last_line.count("#") == analysis.DRAFT_MAX_HASHTAGS
+        assert last_line == "#one #two #three"
+
+    def test_a_hashtag_used_mid_sentence_is_left_alone(self):
+        # Only a line that is PURELY hashtags gets capped; one used as a word within
+        # a sentence is ordinary text, not the "wall of tags" the cap exists for.
+        raw = "Growth is not a #hashtag strategy, it is a habit."
+        result = analysis.sanitize_post(raw)
+        assert result == raw
+
+    def test_paired_emphasis_is_stripped_but_a_lone_asterisk_survives(self):
+        raw = "It costs $5 * 3 for the *bundle*, not **the whole thing**."
+        result = analysis.sanitize_post(raw)
+        assert "$5 * 3" in result
+        assert "*bundle*" not in result and "bundle" in result
+        assert "**" not in result
+
+    def test_crlf_and_lone_cr_line_endings_are_normalised_to_lf(self):
+        raw = "Line one.\r\nLine two.\r\n\r\nLine three.\r"
+        result = analysis.sanitize_post(raw)
+        assert "\r" not in result
+        assert result == "Line one.\nLine two.\n\nLine three."
+
+    def test_em_and_en_dashes_are_normalised_like_everywhere_else(self):
+        raw = "Scope creep 2019—2024 is not a pricing problem — it is a discovery one."
+        result = analysis.sanitize_post(raw)
+        assert "—" not in result and "–" not in result
+        assert "2019-2024" in result
+
+    def test_none_becomes_an_empty_string(self):
+        assert analysis.sanitize_post(None) == ""
+
+    def test_does_not_end_with_a_trailing_blank_line(self):
+        raw = "A post.\n\n\n"
+        result = analysis.sanitize_post(raw)
+        assert result == result.rstrip()
+        assert result == "A post."
+
+
+class TestDraftPost:
+    """`draft_post` turns one content idea into a publish-ready post. These tests use
+    the same fake client shape as the retry regression tests above: `.text` and
+    `.candidates[0].finish_reason`, injected via `monkeypatch.setattr(analysis,
+    "_client", fake)` so nothing here reaches Vertex."""
+
+    IDEA = {
+        "title": "Why your agency retainer keeps shrinking",
+        "hook": "Your retainer is not shrinking because of your pricing.",
+        "format": "Text post",
+        "angle": "Scope creep is a discovery problem, not a contract problem.",
+        "addresses": "Agencies losing margin on fixed-fee work",
+    }
+    EVIDENCE = [
+        "We quoted 20 hours and delivered 65.",
+        "Every retainer I have lost started with a free quick favour in month two.",
+    ]
+
+    @staticmethod
+    def _client_with(payload):
+        import json as _json
+
+        return _FakeClient([_json.dumps(payload)])
+
+    def test_returns_exactly_the_post_key(self, monkeypatch):
+        client = self._client_with({"post": "Hello there.\n\nSecond line."})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        result = analysis.draft_post(self.IDEA, self.EVIDENCE, "q", "p")
+
+        assert set(result.keys()) == {"post"}
+        assert result["post"] == "Hello there.\n\nSecond line."
+
+    def test_empty_result_raises_the_user_ready_error(self, monkeypatch):
+        client = self._client_with({"post": "   \n\n  "})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.draft_post(self.IDEA, self.EVIDENCE, "q", "")
+
+        assert str(excinfo.value) == "We could not draft that post. Please try again."
+
+    def test_thinking_stays_on_for_drafts(self, monkeypatch):
+        client = self._client_with({"post": "Hello there."})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        analysis.draft_post(self.IDEA, self.EVIDENCE, "q", "")
+
+        # Thinking is turned off by passing a thinking_config; its absence here is
+        # what proves the draft call left the default (thinking on) untouched.
+        assert "thinking_config" not in client.models.last_config
+
+    def test_idea_query_profile_and_evidence_all_reach_the_prompt(self, monkeypatch):
+        client = self._client_with({"post": "Hello there."})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        analysis.draft_post(
+            self.IDEA, self.EVIDENCE, "content ideas for marketing agencies", "I run a 6-person agency"
+        )
+
+        prompt = client.models.last_prompt
+        for needle in (
+            self.IDEA["hook"], self.IDEA["angle"], "marketing agencies",
+            "6-person agency", "We quoted 20 hours",
+        ):
+            assert needle in prompt
+
+    def test_evidence_is_capped_before_it_reaches_the_prompt(self):
+        many = ["excerpt number {}".format(i) for i in range(20)]
+        lines = analysis._evidence_lines(many)
+        assert len(lines.split("\n")) == analysis.DRAFT_MAX_EVIDENCE
 
 
 class TestChatJsonRetriesMalformedPayloads:
