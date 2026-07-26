@@ -1,0 +1,161 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Theme follows the operating system. There is no in-app toggle, so the dark
+   variant is a media query rather than a class on <html>. Every shadcn
+   component's `dark:` utility rides on this. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-heading: var(--font-sans);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-brand: var(--brand);
+  --color-brand-ink: var(--brand-ink);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  color-scheme: light;
+
+  --radius: 0.75rem;
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  /* Page plane and card surface. Charts render on --card, which is the surface
+     every colour below was contrast-checked against. */
+  --background: #f8f8f6;
+  --foreground: #0b0b0b;
+  --card: #ffffff;
+  --card-foreground: #0b0b0b;
+  --popover: #ffffff;
+  --popover-foreground: #0b0b0b;
+
+  /* The one accent. --brand is the mark colour (bars, logo, rules);
+     --brand-ink is the darker step that carries text and solid buttons. */
+  --brand: #2a78d6;
+  --brand-ink: #1f5fab;
+
+  --primary: #1f5fab;
+  --primary-foreground: #ffffff;
+  --secondary: #eeeeea;
+  --secondary-foreground: #0b0b0b;
+  --muted: #f1f1ed;
+  --muted-foreground: #6b6a66;
+  --accent: #e9f0fb;
+  --accent-foreground: #1f5fab;
+  --destructive: #c0332f;
+  --border: rgba(11, 11, 11, 0.11);
+  --input: rgba(11, 11, 11, 0.16);
+  --ring: #2a78d6;
+
+  /* Data marks. Sentiment is a diverging encoding: accent / neutral gray /
+     critical red, validated for colour-vision deficiency on both surfaces. */
+  --viz-accent: #2a78d6;
+  --viz-track: #eceae4;
+  --viz-grid: #e1e0d9;
+  --viz-pos: #2a78d6;
+  --viz-neu: #898781;
+  --viz-neg: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --background: #0d0d0d;
+    --foreground: #f4f4f1;
+    --card: #1a1a19;
+    --card-foreground: #f4f4f1;
+    --popover: #1a1a19;
+    --popover-foreground: #f4f4f1;
+
+    --brand: #3987e5;
+    --brand-ink: #86b6ef;
+
+    --primary: #2a78d6;
+    --primary-foreground: #ffffff;
+    --secondary: #262625;
+    --secondary-foreground: #f4f4f1;
+    --muted: #232322;
+    --muted-foreground: #9d9b94;
+    --accent: #16283f;
+    --accent-foreground: #86b6ef;
+    --destructive: #e66767;
+    --border: rgba(255, 255, 255, 0.12);
+    --input: rgba(255, 255, 255, 0.18);
+    --ring: #3987e5;
+
+    --viz-accent: #3987e5;
+    --viz-track: #2c2c2a;
+    --viz-grid: #2c2c2a;
+    --viz-pos: #3987e5;
+    --viz-neu: #898781;
+    --viz-neg: #d03b3b;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* One visible focus treatment everywhere, on both themes. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-foreground);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
