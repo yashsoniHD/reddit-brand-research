@@ -50,6 +50,7 @@ from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, Response, StreamingResponse  # noqa: E402
 
+import analysis  # noqa: E402
 import pipeline  # noqa: E402
 import report_export  # noqa: E402
 
@@ -68,7 +69,12 @@ app.add_middleware(
 )
 
 SAMPLE_PATH = _REPO_ROOT / "sample_report.json"
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
+
+# analysis.draft_post already caps evidence at DRAFT_MAX_EVIDENCE internally, but
+# the API layer does not trust its caller either, so the same cap is applied
+# again here before the call is made.
+DRAFT_MAX_EVIDENCE = 6
 
 # If the worker thread has not posted a progress update in this many seconds
 # (a long Vertex or Arctic Shift call), the generator re-sends the last message
@@ -79,6 +85,7 @@ HEARTBEAT_SECONDS = 10
 # The same sentence app.py shows for an unexpected exception, so the API and
 # the (soon to be removed) Streamlit UI never disagree about the generic case.
 GENERIC_ERROR_MESSAGE = "Something went wrong while building that report. Please try again."
+GENERIC_DRAFT_ERROR_MESSAGE = "Something went wrong while drafting that post. Please try again."
 
 EXPORTERS = {
     "markdown": (report_export.report_markdown, "text/markdown; charset=utf-8", "md"),
@@ -98,7 +105,7 @@ def _stream_invalid(errors) -> "StreamingResponse":
     return StreamingResponse(_single(), media_type="application/x-ndjson")
 
 
-def _run_report_lines(query: str, profile: str, platform: str, days: int):
+def _run_report_lines(query: str, profile: str, days: int):
     """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
 
     run_report is synchronous and, with a live model and Reddit archive, can
@@ -117,7 +124,7 @@ def _run_report_lines(query: str, profile: str, platform: str, days: int):
 
     def worker() -> None:
         try:
-            bundle = pipeline.run_report(query, profile, platform, days, progress=progress)
+            bundle = pipeline.run_report(query, profile, days, progress=progress)
             updates.put(("report", bundle))
         except (pipeline.RunError, ValueError) as exc:
             # These already carry a user-ready sentence (see pipeline.py and
@@ -154,23 +161,20 @@ async def post_report(request: Request):
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 - any body that is not valid JSON
-        return _stream_invalid(["Send a JSON body with query, profile, platform and days."])
+        return _stream_invalid(["Send a JSON body with query, profile and days."])
 
     if not isinstance(body, dict):
-        return _stream_invalid(["Send a JSON body with query, profile, platform and days."])
+        return _stream_invalid(["Send a JSON body with query, profile and days."])
 
     checked = pipeline.validate_inputs(
         body.get("query", ""),
         body.get("profile", ""),
-        body.get("platform", ""),
         body.get("days"),
     )
     if checked["errors"]:
         return _stream_invalid(checked["errors"])
 
-    generator = _run_report_lines(
-        checked["query"], checked["profile"], checked["platform"], checked["days"]
-    )
+    generator = _run_report_lines(checked["query"], checked["profile"], checked["days"])
     return StreamingResponse(generator, media_type="application/x-ndjson")
 
 
@@ -188,6 +192,78 @@ async def get_sample():
         return {"available": False}
 
     return {"available": True, "bundle": bundle}
+
+
+@app.post("/api/draft")
+async def post_draft(request: Request):
+    """Draft a publish-ready LinkedIn post for one content idea.
+
+    Plain JSON, no streaming: unlike /api/report this is a single Gemini call
+    that returns in normal request time, not a multi-minute pipeline.
+
+    Response shapes (exactly two, both plain JSON so the frontend only ever
+    reads either "post" or "error" and never has to branch on status code
+    for the message itself):
+      - 200 {"post": "..."}: success.
+      - 422 {"error": "..."}: the request body itself is malformed (missing
+        or non-dict idea, non-list evidence, unparsable JSON). This is a
+        client bug, not a service failure, so it gets a 4xx.
+      - 500 {"error": "..."}: the body was well-formed but the model layer
+        could not produce a post (analysis.draft_post raised ValueError with
+        a user-ready sentence, or something else went wrong). This mirrors
+        the {"type": "error", "message": ...} terminal line /api/report
+        yields for the same kind of failure, just without streaming.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - any body that is not valid JSON
+        return JSONResponse(
+            {"error": "Send a JSON body with idea, evidence, query and profile."}, status_code=422
+        )
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "Send a JSON body with idea, evidence, query and profile."}, status_code=422
+        )
+
+    idea = body.get("idea")
+    evidence = body.get("evidence")
+    if evidence is None:
+        evidence = []
+
+    if not isinstance(idea, dict):
+        return JSONResponse(
+            {"error": "That idea could not be read. Please reopen the report and try again."},
+            status_code=422,
+        )
+    if not isinstance(evidence, list):
+        return JSONResponse(
+            {"error": "That idea's evidence could not be read. Please reopen the report and try again."},
+            status_code=422,
+        )
+
+    # Coerce every idea field to a plain string: the frontend sends back
+    # exactly what the report bundle gave it, but this endpoint does not
+    # assume that, since a hand-built or stale request could send anything.
+    clean_idea = {
+        field: str(idea.get(field)) if idea.get(field) is not None else ""
+        for field in ("title", "hook", "format", "angle", "addresses")
+    }
+    clean_evidence = [str(item) for item in evidence[:DRAFT_MAX_EVIDENCE]]
+    query = str(body.get("query") or "")
+    profile = str(body.get("profile") or "")
+
+    try:
+        result = analysis.draft_post(clean_idea, clean_evidence, query, profile)
+    except ValueError as exc:
+        # A user-ready sentence from the model layer, same treatment as the
+        # RunError/ValueError branch in _run_report_lines.
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    except Exception:  # noqa: BLE001 - last resort, details go to the log only
+        logger.exception("unhandled error while drafting a post")
+        return JSONResponse({"error": GENERIC_DRAFT_ERROR_MESSAGE}, status_code=500)
+
+    return {"post": result["post"]}
 
 
 def _bundle_from_payload(payload) -> Optional[dict]:

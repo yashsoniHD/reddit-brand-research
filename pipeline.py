@@ -21,14 +21,11 @@ import stats
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
 TIME_WINDOWS = (7, 14, 30)
 MIN_QUERY_CHARS = 10
 MAX_QUERY_CHARS = 300
 MAX_PROFILE_CHARS = 500
-# Keys are what the bundle stores; labels are what gets rendered. Taken from the
-# analysis layer so the prompt and the report can never disagree about a name.
-PLATFORMS = dict(analysis.PLATFORM_LABELS)
 # The history label has to fit a sidebar, so the query is cut down to a glance.
 MAX_LABEL_QUERY_CHARS = 30
 
@@ -37,7 +34,7 @@ class RunError(Exception):
     """A run that could not produce a report, with a message fit for a user."""
 
 
-def validate_inputs(query: str, profile: str, platform: str, days: int) -> dict:
+def validate_inputs(query: str, profile: str, days: int) -> dict:
     """Check every field at once and collect all problems.
 
     Reporting one error at a time makes people submit four times to learn four
@@ -64,10 +61,6 @@ def validate_inputs(query: str, profile: str, platform: str, days: int) -> dict:
             )
         )
 
-    cleaned_platform = str(platform or "").strip().lower()
-    if cleaned_platform not in PLATFORMS:
-        errors.append("Choose LinkedIn, Instagram or both.")
-
     if days not in TIME_WINDOWS:
         errors.append("Choose a time window of 7, 14 or 30 days.")
 
@@ -75,7 +68,6 @@ def validate_inputs(query: str, profile: str, platform: str, days: int) -> dict:
         "errors": errors,
         "query": cleaned_query,
         "profile": cleaned_profile,
-        "platform": cleaned_platform,
         "days": days,
     }
 
@@ -99,7 +91,6 @@ def _resolve_citations(indices: Sequence[int], items: Sequence[dict]) -> List[di
 def run_report(
     query: str,
     profile: str,
-    platform: str,
     days: int,
     progress: Optional[Callable[[str], None]] = None,
     discover: Optional[Callable] = None,
@@ -123,8 +114,7 @@ def run_report(
     synthesize = synthesize or analysis.synthesize
 
     started = time.time()
-    platform_label = PLATFORMS.get(platform, PLATFORMS["both"])
-    logger.info("run start: query=%r platform=%s days=%s", query, platform, days)
+    logger.info("run start: query=%r days=%s", query, days)
 
     say("Finding communities talking about this…")
     found_communities = discover(query, profile)
@@ -187,9 +177,9 @@ def run_report(
     n_comments_analysed = len(items) - n_posts_analysed
     say("Classified {} posts and {} comments…".format(n_posts_analysed, n_comments_analysed))
 
-    say("Writing your {} content ideas…".format(platform_label))
+    say("Writing your content ideas…")
     synthesis = synthesize(
-        items, classification["topics"], query, profile, platform, used, preview_chars
+        items, classification["topics"], query, profile, used, preview_chars
     )
 
     # ── Everything below is computed, not generated ───────────────────────────
@@ -226,8 +216,6 @@ def run_report(
         "inputs": {
             "query": query,
             "profile": profile,
-            "platform": platform,
-            "platform_label": platform_label,
             "subreddits": used,
             "days": days,
         },
@@ -275,7 +263,6 @@ def run_report(
                 {
                     "title": idea["title"],
                     "hook": idea["hook"],
-                    "platform": idea["platform"],
                     "format": idea["format"],
                     "angle": idea["angle"],
                     "rationale": idea["rationale"],
@@ -311,6 +298,4 @@ def run_label(bundle: dict) -> str:
     query = " ".join(str(inputs.get("query") or "Report").split())
     if len(query) > MAX_LABEL_QUERY_CHARS:
         query = query[: MAX_LABEL_QUERY_CHARS - 1].rstrip() + "…"
-    return "{} · {} · {}d".format(
-        query, inputs.get("platform_label", ""), inputs.get("days", "")
-    )
+    return "{} · {}d".format(query, inputs.get("days", ""))

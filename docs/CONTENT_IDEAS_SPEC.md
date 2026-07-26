@@ -325,6 +325,76 @@ tests/test_app_state.py DELETED; replaced by tests/test_api.py
   locally if the CLI is available, otherwise structure verified against
   current Vercel docs).
 
+## Addendum 3 (2026-07-26): ideas-first report, LinkedIn-only, draft posts, redesign
+
+User feedback on the deployed product. Five changes, bundle becomes v3.
+
+### 1. Platform removed from the product surface (bundle v3)
+
+The product generates LinkedIn-ready ideas, but the word "platform" (and any
+LinkedIn/Instagram selector or badge) disappears from the UI and the bundle.
+LinkedIn-native writing is an internal property of the prompts.
+
+- `BUNDLE_VERSION = 3`. `inputs = {query, profile, days}` (platform and
+  platform_label gone). `content_ideas[*]` loses `platform`; keeps
+  {title, hook, format, angle, rationale, addresses, citations}.
+- `pipeline.validate_inputs(query, profile, days)`;
+  `run_report(query, profile, days, ...)`; PLATFORMS constant deleted.
+- `analysis.synthesize(items, topics, query, profile, subreddits,
+  preview_chars)`. Prompt targets LinkedIn implicitly: formats menu is
+  Text post, Carousel (PDF), Poll, Long-form article, Video script; hooks
+  written to stop a professional feed scroll. No platform key in output.
+- CLI drops --platform. /api/sample gates on bundle_version == 3.
+  sample_report.json regenerated as v3. Frontend types/guards move to v3.
+- run_label: "{query truncated} · {n}d".
+
+### 2. New feature: click an idea, get a publish-ready post
+
+- `analysis.draft_post(idea, evidence, query, profile) -> {"post": str}`:
+  one Gemini call (thinking on) that writes the complete LinkedIn post for
+  that idea: the idea's hook as the opening line (model may polish it),
+  short scannable paragraphs with line breaks, concrete substance drawn
+  from the supplied evidence excerpts, 120-220 words, 0-3 hashtags at the
+  end, no markdown, no links, no em dashes, no "I asked AI" tells.
+  Sanitised via strip_markdown applied per line (line breaks preserved).
+- API: POST /api/draft, body {idea: {title, hook, format, angle,
+  addresses}, evidence: [up to 6 strings], query, profile} -> {"post": str}
+  or {"error": msg} with a user-ready sentence. Plain JSON, no streaming.
+- Frontend: clicking an idea card opens a dialog: idea title, generated
+  post in a publish-look preview (whitespace preserved), Copy button
+  (clipboard + copied feedback), Regenerate button, friendly error state.
+  Draft starts generating on open; result cached per idea per report view
+  so reopening does not re-bill.
+
+### 3. Report is ideas-first
+
+Section order: summary strip (one compact line: query, communities read,
+window, item count) -> CONTENT IDEAS (the product) -> a visually quieter
+"What the research says" zone: topics, sentiment, pain points + questions,
+activity trend -> collapsed-by-default source data and methodology ->
+footer. Executive summary becomes a short intro line above the ideas, not
+a boxed section.
+
+### 4. Minimal evidence links
+
+No text hyperlinks for citations anywhere (screenshot showed underlined
+post titles + date + upvotes dominating the page). Every citation renders
+as a small numbered pill/chip (1, 2, 3...) linking to the source, with
+title/date/upvotes available on hover (title attribute or tooltip), sized
+like a superscript footnote. Applies to idea cards, topics, pain points
+and questions. Pain points/questions become tighter list items with their
+pills inline after the text.
+
+### 5. Design lift
+
+Idea cards in a responsive grid: 3 columns on desktop, 2 on tablet, 1 on
+mobile. Cards are the hero: hook as the headline (quote styling), format
+as a small tag, angle as supporting text, "Draft this post" affordance on
+hover/click. The rest of the report uses a calmer hierarchy (smaller
+headings, muted surfaces, more whitespace, no walls of links). Dark mode
+gets elevated card surfaces rather than flat black. Keep the accessibility
+and no-CDN rules from Addendum 2.
+
 ### 3. Landing layout + design + logo (Addendum 1, superseded where it says Streamlit)
 
 - Landing order: title/caption → FORM (the search box is the product) →

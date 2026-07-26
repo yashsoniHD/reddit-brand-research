@@ -1,15 +1,15 @@
-"""Run the real pipeline from a terminal — end-to-end check and sample generator.
+"""Run the real pipeline from a terminal: end-to-end check and sample generator.
 
 Exercises exactly the code path the Streamlit app uses, with no Streamlit involved.
 
     python scripts/run_report.py \
         --query "Productivity struggles freelance designers have juggling multiple clients" \
         --profile "I run a Notion template shop for freelance designers" \
-        --platform linkedin --days 7 \
+        --days 7 \
         --json sample_report.json --markdown report.md --sample
 
-Pass --subreddits to skip discovery entirely and analyse specific communities instead
-— useful for deterministic regeneration and for debugging one community in isolation.
+Pass --subreddits to skip discovery entirely and analyse specific communities instead,
+which is useful for deterministic regeneration and for debugging one community.
 """
 
 from __future__ import annotations
@@ -64,7 +64,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a Reddit content ideas report.")
     parser.add_argument("--query", required=True, help="what you want content ideas about")
     parser.add_argument("--profile", default="", help="optional: who you are / your brand")
-    parser.add_argument("--platform", default="linkedin", choices=list(pipeline.PLATFORMS.keys()))
     parser.add_argument("--days", type=int, default=7, choices=list(pipeline.TIME_WINDOWS))
     parser.add_argument("--json", dest="json_path", help="write the full bundle here")
     parser.add_argument("--markdown", dest="markdown_path", help="write the Markdown report here")
@@ -80,7 +79,7 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout
     )
 
-    checked = pipeline.validate_inputs(args.query, args.profile, args.platform, args.days)
+    checked = pipeline.validate_inputs(args.query, args.profile, args.days)
     if checked["errors"]:
         for error in checked["errors"]:
             print("input error: {}".format(error))
@@ -99,7 +98,6 @@ def main() -> int:
         bundle = pipeline.run_report(
             checked["query"],
             checked["profile"],
-            checked["platform"],
             checked["days"],
             progress=lambda message: print("  · {}".format(message)),
             discover=discover,
@@ -128,7 +126,8 @@ def main() -> int:
     sample = bundle["sample"]
     sentiment = bundle["stats"]["sentiment"]
     print("\n--- end-to-end summary ---")
-    print("platform:            {}".format(bundle["inputs"]["platform_label"]))
+    print("bundle version:      {}".format(bundle["bundle_version"]))
+    print("query:               {}".format(bundle["inputs"]["query"]))
     print("communities:         {}".format(", ".join(bundle["inputs"]["subreddits"])))
     print("communities found:   {}".format(
         ", ".join("r/{}".format(c["name"]) for c in bundle["discovery"]["communities"])))

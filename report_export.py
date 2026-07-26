@@ -16,7 +16,6 @@ import stats
 
 SENTIMENT_ORDER = ("pos", "neu", "neg")
 SENTIMENT_TITLES = {"pos": "Positive", "neu": "Neutral", "neg": "Negative"}
-PLATFORM_TITLES = {"linkedin": "LinkedIn", "instagram": "Instagram"}
 _FILENAME_SAFE = re.compile(r"[^a-z0-9]+")
 # Long enough to recognise the run, short enough to survive email clients and
 # filesystems that truncate.
@@ -58,7 +57,6 @@ def report_markdown(bundle: dict) -> str:
     date_range = computed.get("date_range", {})
     engagement = computed.get("engagement", {})
     subs = ", ".join("r/{}".format(name) for name in inputs.get("subreddits", []))
-    platform = inputs.get("platform_label", "")
     low_data = sample.get("low_data")
 
     out: List[str] = []
@@ -67,9 +65,9 @@ def report_markdown(bundle: dict) -> str:
     add("# Content ideas: {}".format(_escape(inputs.get("query", "Reddit research"))))
     add("")
     add(
-        "**Platform:** {} · **Communities:** {} · **Window:** last {} days · "
+        "**Communities:** {} · **Window:** last {} days · "
         "**Actual range:** {}".format(
-            platform, subs, inputs.get("days", ""), date_range.get("label", "n/a")
+            subs, inputs.get("days", ""), date_range.get("label", "n/a")
         )
     )
     add("**Generated:** {} · **Analysis:** {}".format(
@@ -200,10 +198,7 @@ def report_markdown(bundle: dict) -> str:
             # rather than paraphrased into a bullet.
             add("> **“{}”**".format(_escape(idea["hook"])))
             add("")
-        add("**Platform:** {} · **Format:** {}".format(
-            PLATFORM_TITLES.get(idea.get("platform"), idea.get("platform", "")),
-            idea.get("format", ""),
-        ))
+        add("**Format:** {}".format(idea.get("format", "")))
         if idea.get("angle"):
             add("")
             add("**Angle:** {}".format(idea["angle"]))
@@ -339,7 +334,6 @@ def ideas_csv(bundle: dict) -> str:
         rows.append([
             idea.get("title", ""),
             idea.get("hook", ""),
-            idea.get("platform", ""),
             idea.get("format", ""),
             idea.get("angle", ""),
             idea.get("addresses", ""),
@@ -347,6 +341,6 @@ def ideas_csv(bundle: dict) -> str:
             " ".join(citation.get("url", "") for citation in citations),
         ])
     return _csv(
-        ["title", "hook", "platform", "format", "angle", "addresses", "rationale", "evidence_urls"],
+        ["title", "hook", "format", "angle", "addresses", "rationale", "evidence_urls"],
         rows,
     )

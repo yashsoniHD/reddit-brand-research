@@ -98,15 +98,25 @@ MAX_CONTENT_IDEAS = 12
 MAX_HOOK_CHARS = 120
 LOW_DATA_THRESHOLD = 10
 
-# ── Platforms ─────────────────────────────────────────────────────────────────
-# A run targets one platform or both; a single idea always belongs to exactly one,
-# because the format and the hook only make sense for one feed at a time.
-IDEA_PLATFORMS = ("linkedin", "instagram")
-PLATFORM_LABELS = {"linkedin": "LinkedIn", "instagram": "Instagram", "both": "LinkedIn + Instagram"}
-PLATFORM_FORMATS = {
-    "linkedin": ("Text post", "Carousel (PDF)", "Poll", "Long-form article", "Video script"),
-    "instagram": ("Reel script", "Carousel", "Story series", "Caption + image idea"),
-}
+# ── Formats ───────────────────────────────────────────────────────────────────
+# The product writes for one professional feed, so there is no platform to choose and
+# nothing about a platform in the output. Naming the formats explicitly is still what
+# keeps ideas publishable: left to itself the model returns "Blog post" and
+# "Newsletter", which nobody can publish as written.
+IDEA_FORMATS = ("Text post", "Carousel (PDF)", "Poll", "Long-form article", "Video script")
+
+# ── Draft posts ───────────────────────────────────────────────────────────────
+# Long enough to say something, short enough to survive the feed's "see more" fold.
+DRAFT_MIN_WORDS = 120
+DRAFT_MAX_WORDS = 220
+DRAFT_MAX_HASHTAGS = 3
+# Enough evidence to give the post real substance, capped because the draft should
+# read as one person's point of view, not a literature review.
+DRAFT_MAX_EVIDENCE = 6
+DRAFT_EVIDENCE_CHARS = 400
+# Thinking stays on for drafting, so this covers the model's reasoning as well as a
+# 220-word post.
+DRAFT_MAX_TOKENS = 8000
 
 # ── User-facing error messages ────────────────────────────────────────────────
 _BUSY = "The analysis service is busy right now. Please try again in a minute."
@@ -128,6 +138,7 @@ _API_DISABLED = (
 )
 _INCOMPLETE = "The analysis came back incomplete. Please retry."
 _UNAVAILABLE = "The analysis service is temporarily unavailable. Please try again in a moment."
+_DRAFT_FAILED = "We could not draft that post. Please try again."
 
 _MARKDOWN_LINK_PATTERN = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 # Em (U+2014) and en (U+2013) dashes, written as escapes so this file stays free of
@@ -760,31 +771,8 @@ def _match_topic_descriptions(raw_entries: Any, topics: Sequence[dict]) -> dict:
     return descriptions
 
 
-def _idea_platform(value: Any, run_platform: str) -> str:
-    """Which feed an idea belongs to. Always one of IDEA_PLATFORMS.
-
-    When the run targets a single platform the model gets no vote: every idea was
-    written for that feed, so a stray "instagram" in a LinkedIn run is a mistake,
-    not a choice. Only a `both` run reads the model's answer, and an unreadable one
-    falls back to the first platform rather than leaving the field unrenderable.
-    """
-    if run_platform in IDEA_PLATFORMS:
-        return run_platform
-    text = "".join(ch for ch in strip_markdown(value).lower() if ch.isalnum())
-    for platform in IDEA_PLATFORMS:
-        if text == platform:
-            return platform
-    return IDEA_PLATFORMS[0]
-
-
-def sanitize_synthesis(
-    raw: Any, n_items: int, topics: Sequence[dict] = (), platform: str = ""
-) -> dict:
-    """Coerce call 2's output; drop anything that cannot be rendered honestly.
-
-    `platform` is the run's platform key, used to settle each idea's own platform
-    field, so the returned ideas are always renderable even when the model omits it.
-    """
+def sanitize_synthesis(raw: Any, n_items: int, topics: Sequence[dict] = ()) -> dict:
+    """Coerce call 2's output; drop anything that cannot be rendered honestly."""
     raw = raw if isinstance(raw, dict) else {}
     descriptions = _match_topic_descriptions(raw.get("topic_descriptions"), topics)
 
@@ -801,7 +789,6 @@ def sanitize_synthesis(
                 # A missing hook is not worth dropping a whole idea over; the report
                 # renders it only when there is one.
                 "hook": strip_markdown(entry.get("hook"))[:MAX_HOOK_CHARS].strip(),
-                "platform": _idea_platform(entry.get("platform"), platform),
                 "format": strip_markdown(entry.get("format")) or "Content",
                 "angle": strip_markdown(entry.get("angle")),
                 "rationale": strip_markdown(entry.get("rationale")),
@@ -907,42 +894,11 @@ def _synthesis_listing_indices(
     return sorted(ordered)
 
 
-def platform_label(platform: str) -> str:
-    return PLATFORM_LABELS.get(platform, PLATFORM_LABELS["both"])
-
-
-def _format_menu(platform: str) -> str:
-    """The formats the model may choose from, per platform it is writing for.
-
-    Left to itself the model returns "Blog post" and "Newsletter" for an Instagram
-    run, which is useless to someone who only publishes Reels. Listing the native
-    formats explicitly is what keeps the ideas publishable as written.
-    """
-    keys = IDEA_PLATFORMS if platform not in IDEA_PLATFORMS else (platform,)
-    return "\n".join(
-        "  {} → {}".format(PLATFORM_LABELS[key], ", ".join(PLATFORM_FORMATS[key]))
-        for key in keys
-    )
-
-
-def _platform_rule(platform: str) -> str:
-    if platform in IDEA_PLATFORMS:
-        return (
-            '"platform" is "{}" for every idea, because that is the only feed they '
-            "publish on.".format(platform)
-        )
-    return (
-        '"platform" is "linkedin" or "instagram". Choose whichever feed the idea '
-        "belongs on, and cover both across the set."
-    )
-
-
 def _synthesis_prompt(
     items: Sequence[dict],
     topics: Sequence[dict],
     query: str,
     profile: str,
-    platform: str,
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
 ) -> str:
@@ -974,7 +930,7 @@ def _synthesis_prompt(
     if profile:
         profile_line = "\nThey describe themselves as: {}\n".format(profile)
 
-    return """You are a content strategist for someone growing an audience on {label}.
+    return """You are a content strategist for someone growing an audience on LinkedIn.
 
 They are researching: {query}
 {profile_line}
@@ -995,9 +951,9 @@ Return ONLY a JSON object with exactly these keys:
   "topic_descriptions": [{{"id": 1, "label": "<exact label>", "finding": "..."}}],
   "pain_points": [{{"text": "...", "item_indices": [4, 9]}}],
   "questions": [{{"text": "...", "item_indices": [4, 9]}}],
-  "content_ideas": [{{"title": "...", "hook": "...", "platform": "...",
-                      "format": "...", "angle": "...", "rationale": "...",
-                      "addresses": "...", "item_indices": [4]}}]
+  "content_ideas": [{{"title": "...", "hook": "...", "format": "...",
+                      "angle": "...", "rationale": "...", "addresses": "...",
+                      "item_indices": [4]}}]
 }}
 
 Rules:
@@ -1015,11 +971,9 @@ Rules:
 - "questions": the {max_q} questions people are actually asking, phrased as questions.
 - "content_ideas": {min_ideas} to {max_ideas} posts they could publish.
 - "hook" is the literal first line of the post or script, at most {max_hook}
-  characters, written to stop the scroll. Not a description of the hook, the words
-  themselves. Use the community's own language, never "In today's post".
-- {platform_rule}
-- "format" must be one of these, matching that idea's platform:
-{formats}
+  characters, written to stop a professional feed scroll. Not a description of the
+  hook, the words themselves. Use the community's own language, never "In today's post".
+- "format" must be exactly one of these: {formats}
 - "angle" is the specific take in one sentence. "addresses" names the pain point or
   topic it answers. "rationale" is one sentence on why this audience would engage.
 - Every "item_indices" must contain 1-3 item numbers taken from the numbered list
@@ -1030,7 +984,6 @@ Rules:
   start a new sentence instead.
 
 No markdown fences, no commentary. JSON only.""".format(
-        label=platform_label(platform),
         query=query,
         profile_line=profile_line,
         communities=", ".join("r/{}".format(name) for name in subreddits),
@@ -1042,8 +995,7 @@ No markdown fences, no commentary. JSON only.""".format(
         min_ideas=MIN_CONTENT_IDEAS,
         max_ideas=MAX_CONTENT_IDEAS,
         max_hook=MAX_HOOK_CHARS,
-        platform_rule=_platform_rule(platform),
-        formats=_format_menu(platform),
+        formats=", ".join(IDEA_FORMATS),
     )
 
 
@@ -1138,15 +1090,14 @@ def synthesize(
     topics: Sequence[dict],
     query: str,
     profile: str,
-    platform: str,
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
 ) -> dict:
-    """Call 2: turn the labels into platform-native content ideas with evidence."""
-    logger.info("synthesising %s ideas for %s", platform, query)
+    """Call 2: turn the labels into publishable content ideas with evidence."""
+    logger.info("synthesising ideas for %r", query)
     try:
         raw, model = _chat_json(
-            _synthesis_prompt(items, topics, query, profile, platform, subreddits, preview_chars),
+            _synthesis_prompt(items, topics, query, profile, subreddits, preview_chars),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
         )
@@ -1156,11 +1107,11 @@ def synthesize(
         # was rejected for what we sent, and cutting the model's room to answer would
         # trade a rejection for a truncated, unparseable one.
         raw, model = _chat_json(
-            _synthesis_prompt(items, topics, query, profile, platform, subreddits, 90),
+            _synthesis_prompt(items, topics, query, profile, subreddits, 90),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
         )
-    result = sanitize_synthesis(raw, len(items), topics, platform)
+    result = sanitize_synthesis(raw, len(items), topics)
     result["model"] = model
     matched = len(result["topic_descriptions"])
     if topics and matched < len(topics):
@@ -1173,3 +1124,175 @@ def synthesize(
         len(result["content_ideas"]),
     )
     return result
+
+
+# ── Draft post ────────────────────────────────────────────────────────────────
+_HASHTAG_LINE_PATTERN = re.compile(r"^#\w[\w-]*(\s+#\w[\w-]*)*$")
+# Paired markdown emphasis only. A lone asterisk is far more likely to be "$5 * 3"
+# than a formatting slip, and stripping those would corrupt real content.
+_EMPHASIS_PATTERN = re.compile(r"(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1")
+_LIST_MARKER_PATTERN = re.compile(r"^\s*(?:[#>]+|[-*+]|\d+[.)])\s+")
+
+
+def _sanitize_post_line(line: str) -> str:
+    """One line of a draft, flattened but not merged into its neighbours."""
+    text = _LIST_MARKER_PATTERN.sub("", line)
+    # Twice, so "**bold _and_ italic**" loses both layers.
+    for _ in range(2):
+        text = _EMPHASIS_PATTERN.sub(r"\2", text)
+    return strip_markdown(text)
+
+
+def _cap_hashtags(lines: List[str]) -> List[str]:
+    """Trim a trailing hashtag line to the agreed maximum.
+
+    Models reliably overshoot hashtags, and a wall of twelve of them is the clearest
+    possible signal that a post was machine-written. Only a line that is purely
+    hashtags is touched, so a hashtag used mid-sentence is left alone.
+    """
+    for position in range(len(lines) - 1, -1, -1):
+        line = lines[position]
+        if not line:
+            continue
+        if _HASHTAG_LINE_PATTERN.match(line):
+            tags = line.split()
+            if len(tags) > DRAFT_MAX_HASHTAGS:
+                logger.info("trimmed %s hashtags to %s", len(tags), DRAFT_MAX_HASHTAGS)
+                lines[position] = " ".join(tags[:DRAFT_MAX_HASHTAGS])
+        break
+    return lines
+
+
+def sanitize_post(value: Any) -> str:
+    """Clean a draft without destroying its shape.
+
+    `strip_markdown` flattens all whitespace, which is right for a one-line field and
+    wrong for a post: the blank lines between short paragraphs are what makes it
+    readable in a feed. So it is applied per line, and the line structure is rebuilt
+    around it. Runs of blank lines collapse to one, because two blank lines look like
+    a mistake rather than a pause.
+    """
+    raw = "" if value is None else str(value)
+    lines = [_sanitize_post_line(line) for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+
+    kept: List[str] = []
+    for line in lines:
+        if not line and (not kept or not kept[-1]):
+            continue
+        kept.append(line)
+    while kept and not kept[-1]:
+        kept.pop()
+
+    return "\n".join(_cap_hashtags(kept))
+
+
+def _evidence_lines(evidence: Sequence[Any]) -> str:
+    lines = []
+    for raw in list(evidence or [])[:DRAFT_MAX_EVIDENCE]:
+        text = strip_markdown(raw)[:DRAFT_EVIDENCE_CHARS].strip()
+        if text:
+            lines.append("  - {}".format(text))
+    return "\n".join(lines)
+
+
+def _draft_prompt(idea: dict, evidence: Sequence[Any], query: str, profile: str) -> str:
+    idea = idea if isinstance(idea, dict) else {}
+    excerpts = _evidence_lines(evidence)
+
+    context = []
+    if query:
+        context.append("They are building an audience around: {}".format(strip_markdown(query)))
+    if profile:
+        context.append("They describe themselves as: {}".format(strip_markdown(profile)))
+    context_block = "\n".join(context)
+
+    brief = []
+    for field, caption in (
+        ("title", "Idea"),
+        ("hook", "Opening line to use"),
+        ("format", "Format"),
+        ("angle", "Angle"),
+        ("addresses", "What it answers"),
+    ):
+        value = strip_markdown(idea.get(field))
+        if value:
+            brief.append("  {}: {}".format(caption, value))
+
+    return """You are ghostwriting a LinkedIn post for the person described below. You
+write the way a practitioner talks: specific, plain, and worth someone's time.
+
+{context}
+
+Write the post for this idea:
+
+{brief}
+
+Source excerpts from the Reddit discussions this idea came from. Draw the substance
+and the specifics from these. Do not quote any of them at length and do not name
+Reddit or any subreddit:
+
+{excerpts}
+
+Return ONLY a JSON object with exactly this key:
+
+{{
+  "post": "..."
+}}
+
+Rules for "post":
+- Open with the given opening line. You may sharpen its wording, but keep its promise
+  and keep it as the first line.
+- {min_words} to {max_words} words. Short paragraphs of one to three sentences,
+  separated by a blank line, because a wall of text does not get read in a feed.
+  Use "\\n\\n" between paragraphs inside the JSON string.
+- Make one point and support it with something concrete from the excerpts: a number, a
+  named situation, a real objection. Cut every sentence that could apply to any topic.
+- End with one line that invites a reply, phrased as a genuine question rather than
+  "What do you think?".
+- Then at most {max_hashtags} hashtags on the final line. Zero is fine.
+- Plain text only. No markdown, no bold, no bullet characters, no headings, no links,
+  no URLs, no emoji.
+- Never use an em dash or an en dash. Use a comma or start a new sentence instead.
+- Never mention AI, research, analysis, "data shows", or how this post was produced.
+  This is the author speaking from their own experience.
+
+No markdown fences, no commentary. JSON only.""".format(
+        context=context_block or "  (no extra context given)",
+        brief="\n".join(brief) or "  (no idea details given)",
+        excerpts=excerpts or "  (no excerpts available)",
+        min_words=DRAFT_MIN_WORDS,
+        max_words=DRAFT_MAX_WORDS,
+        max_hashtags=DRAFT_MAX_HASHTAGS,
+    )
+
+
+def draft_post(
+    idea: dict, evidence: Sequence[Any] = (), query: str = "", profile: str = ""
+) -> dict:
+    """Turn one content idea into a post the user can publish as written.
+
+    Returns {"post": str}. Thinking stays on: this is the one call whose whole output
+    is prose a person will put their name on, so it is worth the extra seconds.
+
+    Raises ValueError with a user-ready sentence, like the other public calls, so the
+    caller can show it without translating anything.
+    """
+    logger.info("drafting a post for %r", strip_markdown((idea or {}).get("title"))[:60])
+    raw, model = _chat_json(
+        _draft_prompt(idea or {}, evidence, query, profile), DRAFT_MAX_TOKENS, "draft"
+    )
+
+    post = sanitize_post(raw.get("post"))
+    if not post:
+        logger.error("draft came back with no usable text")
+        raise ValueError(_DRAFT_FAILED)
+
+    words = len(post.split())
+    if not DRAFT_MIN_WORDS * 0.7 <= words <= DRAFT_MAX_WORDS * 1.3:
+        # Worth knowing about, not worth refusing: a post 20 words over still reads
+        # fine, and the user can see the length for themselves.
+        logger.info("draft length %s words is outside the %s to %s target",
+                    words, DRAFT_MIN_WORDS, DRAFT_MAX_WORDS)
+    logger.info("draft complete with %s: %s words, %s lines",
+                model, words, post.count("\n") + 1)
+    return {"post": post}
