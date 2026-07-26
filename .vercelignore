@@ -1,0 +1,19 @@
+# .vercelignore replaces .gitignore for deploy uploads: list everything that
+# must not ship, not just the delta.
+.git
+.venv
+node_modules
+.next
+__pycache__
+*.pyc
+.pytest_cache
+.env
+.env.local
+.env*.local
+.remember
+.claude
+# Local interpreter pin only; shipping it makes Vercel try to install
+# Python 3.9, which its build image cannot run. Vercel defaults to 3.12.
+.python-version
+tests
+docs
