@@ -53,6 +53,9 @@ TEMPERATURE = 0
 MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1, 2)
 MAX_RATE_LIMIT_WAIT_SECONDS = 25
+# Enough of a bad payload to recognise the malformation in a log without dumping a
+# whole report's worth of model output into it.
+BAD_PAYLOAD_LOG_CHARS = 200
 
 # ── Token budget ──────────────────────────────────────────────────────────────
 # Gemini's context window is far larger than any sample this app builds, so the
@@ -137,6 +140,7 @@ _QUOTA_PATTERN = re.compile(
     r"resource[_ ]exhausted|quota|rate.?limit|too many requests", re.IGNORECASE
 )
 _RESET_HINT_PATTERN = re.compile(r"try again in\s+((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", re.IGNORECASE)
+_TRAILING_COMMA_PATTERN = re.compile(r",\s*([}\]])")
 _client = None
 
 
@@ -144,6 +148,15 @@ class PayloadTooLarge(Exception):
     """The request was larger than the provider will accept in one call.
 
     Not user-facing: the caller shaves the budget, refits the sample and retries.
+    """
+
+
+class _UnparseableResponse(Exception):
+    """The call succeeded but the body was not a JSON object we could use.
+
+    Never escapes this module. It exists so the retry loop can tell "the model wrote
+    something malformed" apart from "the provider errored", which lead to different
+    messages once the attempts run out.
     """
 
 
@@ -322,26 +335,59 @@ def _is_payload_too_large(exc: Exception) -> bool:
     )
 
 
-def _response_text(response: Any, label: str) -> str:
+def _finish_reason(response: Any) -> str:
+    """Why the model stopped, as a string that is safe to log and to match on."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return "NO_CANDIDATES"
+    return str(getattr(candidates[0], "finish_reason", "") or "UNKNOWN")
+
+
+def _response_text(response: Any, label: str, finish: str) -> str:
     """The model's text, or an empty string when the call produced nothing usable.
 
     A response with no candidates (blocked prompt) and one truncated at the token
     ceiling both arrive as valid objects with no parseable JSON in them, so both are
-    funnelled into the same "incomplete" path rather than raising an attribute error.
+    funnelled into the same retry path rather than raising an attribute error.
     Truncation is named in the log because from the outside it looks identical to the
     model returning nonsense, and the fix is completely different.
     """
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        return ""
-    finish = str(getattr(candidates[0], "finish_reason", "") or "")
     if "MAX_TOKENS" in finish:
         logger.warning(
             "%s hit its output token ceiling and was truncated; raise its max_tokens "
             "or turn thinking off for it",
             label,
         )
+    if not getattr(response, "candidates", None):
+        return ""
     return getattr(response, "text", None) or ""
+
+
+def _parse_json_object(text: str) -> Optional[dict]:
+    """The response as a dict, or None when it is not usable as one.
+
+    Strict parsing first. A trailing comma before a closing brace or bracket is the one
+    malformation JSON-mode models produce often enough to be worth handling, and it is
+    only ever consulted after strict parsing has already failed, so this cannot change
+    the meaning of a document `json.loads` would have accepted. Everything else (a
+    truncated array, an unquoted key, prose wrapped around the JSON, a top-level list)
+    is reported as unusable, because guessing at those is how a sanitiser starts
+    inventing data.
+    """
+    attempts = [text]
+    repaired = _TRAILING_COMMA_PATTERN.sub(r"\1", text)
+    if repaired != text:
+        attempts.append(repaired)
+
+    for candidate in attempts:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        # Valid JSON of the wrong shape is not something a repair can fix, but a retry
+        # might, so it is reported the same way as a parse failure.
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def _chat_json(
@@ -391,24 +437,36 @@ def _chat_json(
             else:
                 logger.warning("%s transient API error (attempt %s): %s", label, attempt + 1, exc)
         else:
-            content = _response_text(response, label)
-            if not content.strip():
-                logger.error("%s returned no content", label)
-                raise ValueError(_INCOMPLETE)
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError as exc:
-                logger.error("%s returned unparseable JSON: %s", label, exc)
-                raise ValueError(_INCOMPLETE)
-            if not isinstance(parsed, dict):
-                raise ValueError(_INCOMPLETE)
-            logger.info("%s completed with %s in %.1fs", label, model, time.time() - started)
-            return parsed, model
+            finish = _finish_reason(response)
+            content = _response_text(response, label, finish)
+            parsed = _parse_json_object(content)
+            if parsed is not None:
+                logger.info("%s completed with %s in %.1fs", label, model, time.time() - started)
+                return parsed, model
+            # A malformed body is a flaky response, not a broken request. Even at
+            # temperature 0 the model occasionally emits a trailing comma or an
+            # unquoted key, and the previous version threw away an otherwise good
+            # 80-second run over one of them. Retrying costs one call and almost
+            # always heals it.
+            preview = content[:BAD_PAYLOAD_LOG_CHARS]
+            last_exc = _UnparseableResponse(
+                "finish_reason={} payload={!r}".format(finish, preview)
+            )
+            logger.warning(
+                "%s returned no usable JSON object (attempt %s of %s), finish_reason=%s, "
+                "payload starts: %r",
+                label, attempt + 1, MAX_ATTEMPTS, finish, preview,
+            )
 
         if attempt < MAX_ATTEMPTS - 1:
             time.sleep(_retry_wait_seconds(last_exc, attempt))
 
     logger.error("%s exhausted retries: %s", label, last_exc)
+    # Order matters: an unparseable payload can contain any words at all, including a
+    # Reddit post about hitting a quota, so its own type is checked before the message
+    # of the last failure is pattern-matched for anything.
+    if isinstance(last_exc, _UnparseableResponse):
+        raise ValueError(_INCOMPLETE)
     if last_exc is not None and _is_quota_error(last_exc):
         raise ValueError(quota_message(last_exc) or _BUSY)
     raise ValueError(_UNAVAILABLE)

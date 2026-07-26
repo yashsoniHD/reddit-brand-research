@@ -462,6 +462,118 @@ class TestSynthesizePublicCall:
         assert result["content_ideas"][0]["hook"] == "Stop scrolling"
 
 
+class _FakeCandidate:
+    def __init__(self, finish="STOP"):
+        self.finish_reason = finish
+
+
+class _FakeResponse:
+    """Shape of a real Vertex response: `.text` and `.candidates[0].finish_reason`."""
+
+    def __init__(self, text, finish="STOP"):
+        self.text = text
+        self.candidates = [_FakeCandidate(finish)]
+
+
+class _FakeModels:
+    """Queues one body per call, repeating the last one past the end of the list."""
+
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.calls = 0
+
+    def generate_content(self, model, contents, config):
+        self.calls += 1
+        body = self.bodies[min(self.calls - 1, len(self.bodies) - 1)]
+        return _FakeResponse(body)
+
+
+class _FakeClient:
+    def __init__(self, bodies):
+        self.models = _FakeModels(bodies)
+
+
+class TestChatJsonRetriesMalformedPayloads:
+    """Regression coverage for the retryable-JSON-parse path in `_chat_json`.
+
+    Gemini occasionally returns a payload that is not quite valid JSON (a trailing
+    comma, an unquoted key) or a body that parses but is not the object shape asked
+    for (a top-level list, an empty string). Before this, any of those was fatal on
+    the first attempt, throwing away an otherwise-good multi-second call. Now a
+    trailing comma is repaired in place (no retry spent), and anything else
+    unparseable is retried like a transient failure, up to MAX_ATTEMPTS.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        # These tests deliberately exhaust MAX_ATTEMPTS in one case; without this the
+        # real RETRY_DELAYS_SECONDS backoff would slow the suite for no reason.
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+
+    def test_trailing_comma_is_repaired_without_spending_a_retry(self, monkeypatch):
+        client = _FakeClient(['{"a": 1,}', '{"a": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo")
+
+        assert parsed == {"a": 1}
+        assert model == analysis.PRIMARY_MODEL
+        # The second, valid body must never have been needed.
+        assert client.models.calls == 1
+
+    def test_unquoted_key_then_valid_body_is_healed_by_one_retry(self, monkeypatch):
+        client = _FakeClient(['{\n  ok: true\n}', '{"ok": true}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo")
+
+        assert parsed == {"ok": True}
+        assert client.models.calls == 2
+
+    def test_garbage_every_attempt_raises_the_incomplete_message_after_max_attempts(self, monkeypatch):
+        client = _FakeClient(["not json at all"])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.chat_json("prompt", 100, "demo")
+
+        assert str(excinfo.value) == analysis._INCOMPLETE
+        assert "came back incomplete" in str(excinfo.value)
+        assert client.models.calls == analysis.MAX_ATTEMPTS
+
+    def test_top_level_list_is_retried_as_wrong_shape_not_accepted(self, monkeypatch):
+        client = _FakeClient(["[1, 2, 3]", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo")
+
+        assert parsed == {"ok": 1}
+        assert client.models.calls == 2
+
+    def test_empty_body_then_valid_body_is_retried_and_succeeds(self, monkeypatch):
+        client = _FakeClient(["", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo")
+
+        assert parsed == {"ok": 1}
+        assert client.models.calls == 2
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '{"a": [1, 2]}',
+            '{"s": "a, ] literal"}',
+            '{"n": {"m": [1]}}',
+            '{"s": "trailing comma, in a string,}"}',
+        ],
+    )
+    def test_repair_regex_never_alters_json_that_strict_parsing_already_accepts(self, text):
+        # No fake client needed: this exercises _parse_json_object directly, proving
+        # the repair pass is only ever consulted after strict json.loads has failed.
+        assert analysis._parse_json_object(text) == analysis.json.loads(text)
+
+
 class TestErrorMapping:
     def test_quota_is_recognised_and_reported_with_its_reset_time(self):
         exc = Exception(
