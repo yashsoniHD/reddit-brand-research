@@ -5,12 +5,19 @@ import {
   type DraftResponse,
   type ReportRequest,
   type SampleResponse,
+  type SavedReport,
   type StreamLine,
 } from "./types";
 
 /**
  * A run ends in exactly one of these. `invalid` carries per-field validation
  * messages from the engine; `error` carries one already user-ready sentence.
+ *
+ * The bundle a `report` outcome carries already has `report_id` stashed on it
+ * when the server saved the run: the id arrives beside the bundle on the
+ * terminal line, and putting it on the bundle here means every consumer
+ * downstream (history, exports, the draft dialog) reads it from the one object
+ * they already pass around.
  */
 export type RunOutcome =
   | { kind: "report"; bundle: Bundle }
@@ -99,8 +106,13 @@ export async function runReport(
       return;
     }
     if (parsed.type === "report") {
+      const savedId =
+        typeof parsed.report_id === "string" && parsed.report_id ? parsed.report_id : null;
       terminal = isBundleV4(parsed.bundle)
-        ? { kind: "report", bundle: parsed.bundle }
+        ? {
+            kind: "report",
+            bundle: savedId ? { ...parsed.bundle, report_id: savedId } : parsed.bundle,
+          }
         : {
             kind: "error",
             message:
@@ -143,6 +155,26 @@ export async function runReport(
   return { kind: "error", message: sawUnparseable ? UNREADABLE : STREAM_DIED };
 }
 
+/**
+ * GET /api/sample/available. A yes/no answer, so the mount-time check does not
+ * pull the whole multi-megabyte sample down on every first paint.
+ *
+ * A 404 means this build's backend predates the endpoint: the full sample may
+ * well still be there, so the optimistic answer is the right one and the button
+ * click finds out for certain. Any other failure hides the button.
+ */
+export async function fetchSampleAvailable(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const response = await fetch("/api/sample/available", { signal });
+    if (response.status === 404) return true;
+    if (!response.ok) return false;
+    const payload = (await response.json()) as { available?: unknown } | null;
+    return payload?.available === true;
+  } catch {
+    return false;
+  }
+}
+
 /** GET /api/sample. Returns null when no v3 sample is available. */
 export async function fetchSample(signal?: AbortSignal): Promise<Bundle | null> {
   try {
@@ -154,6 +186,106 @@ export async function fetchSample(signal?: AbortSignal): Promise<Bundle | null> 
     return { ...payload.bundle, is_sample: true };
   } catch {
     return null;
+  }
+}
+
+/* ── Saved reports ──────────────────────────────────────────────────────────── */
+
+/**
+ * A saved report either loads, is not there, or could not be reached. The three
+ * are kept apart because they deserve different sentences: "this link is dead"
+ * is final, "storage is down" is worth retrying.
+ */
+export type SavedReportOutcome =
+  | { kind: "report"; bundle: Bundle; drafts: Record<string, string> }
+  | { kind: "missing"; message: string }
+  | { kind: "error"; message: string };
+
+const REPORT_MISSING = "This report link does not exist or was removed.";
+const REPORT_UNREACHABLE =
+  "That report could not be loaded just now. Please refresh to try again.";
+
+/**
+ * GET /api/reports/{id}.
+ *
+ * The bundle comes back with `report_id` already stashed on it, so a report
+ * opened from a link behaves exactly like one that was just run: the same copy
+ * link, the same draft persistence, the same history entry.
+ */
+export async function fetchReport(
+  id: string,
+  signal?: AbortSignal,
+): Promise<SavedReportOutcome> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/reports/${encodeURIComponent(id)}`, { signal });
+  } catch {
+    return { kind: "error", message: REPORT_UNREACHABLE };
+  }
+
+  if (response.status === 404) {
+    const message = await messageFrom(response);
+    return { kind: "missing", message: message ?? REPORT_MISSING };
+  }
+  if (!response.ok) {
+    const message = await messageFrom(response);
+    return { kind: "error", message: message ?? REPORT_UNREACHABLE };
+  }
+
+  let payload: SavedReport | null = null;
+  try {
+    payload = (await response.json()) as SavedReport;
+  } catch {
+    payload = null;
+  }
+  if (!payload || !isBundleV4(payload.bundle)) {
+    return {
+      kind: "error",
+      message:
+        "That report was saved in a format this app does not recognise. Please run it again.",
+    };
+  }
+
+  const drafts: Record<string, string> = {};
+  for (const [key, value] of Object.entries(payload.drafts ?? {})) {
+    if (typeof value === "string") drafts[key] = value;
+  }
+  return { kind: "report", bundle: { ...payload.bundle, report_id: id }, drafts };
+}
+
+/** The server's own sentence when it sent one, otherwise null. */
+async function messageFrom(response: Response): Promise<string | null> {
+  try {
+    const payload = (await response.json()) as { message?: unknown } | null;
+    const message = payload?.message;
+    return typeof message === "string" && message.trim() ? message : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST /api/drafts. Save an edited post against a saved report.
+ *
+ * Resolves to whether it landed and never throws: this fires in the background
+ * behind an edit the reader has already made, and an unhandled rejection from a
+ * blur handler helps nobody. The caller decides whether silence is acceptable
+ * (it is, today: the draft is still cached in the page either way).
+ */
+export async function saveDraft(
+  reportId: string,
+  ideaIndex: number,
+  post: string,
+): Promise<boolean> {
+  try {
+    const response = await fetch("/api/drafts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ report_id: reportId, idea_index: ideaIndex, post }),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -171,6 +303,22 @@ export type DraftOutcome =
 const DRAFT_FAILED =
   "That post could not be written just now. Please try again in a moment.";
 
+const DRAFT_RETRY_DELAY_MS = 700;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
 export async function draftPost(
   request: DraftRequest,
   signal?: AbortSignal,
@@ -183,6 +331,19 @@ export async function draftPost(
       body: JSON.stringify(request),
       signal,
     });
+    // One retry, and only for a server-side fault: a 5xx from the model host is
+    // usually a blip, while a 4xx means the request itself is wrong and sending
+    // it again would just bill a second failure. An abort is never retried.
+    if (response.status >= 500 && !signal?.aborted) {
+      await sleep(DRAFT_RETRY_DELAY_MS, signal);
+      if (signal?.aborted) return { kind: "aborted" };
+      response = await fetch("/api/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+        signal,
+      });
+    }
   } catch (error) {
     if (isAbort(error)) return { kind: "aborted" };
     return {

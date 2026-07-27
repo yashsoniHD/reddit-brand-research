@@ -45,6 +45,11 @@ export interface Citation {
   score: number;
   type: string;
   subreddit: string;
+  /**
+   * A longer passage from the source item, when the engine sent one. Optional:
+   * bundles written before excerpts existed carry only `text`.
+   */
+  excerpt?: string;
 }
 
 export interface Community {
@@ -61,6 +66,12 @@ export interface Discovery {
   considered: string[];
 }
 
+/** A shape the ideas can be written for. None chosen means "any". */
+export type ContentType = "text" | "carousel" | "video" | "poll" | "article";
+
+/** How the communities for this run were chosen. */
+export type DiscoveryMode = "manual" | "model";
+
 export interface Inputs {
   query: string;
   profile: string;
@@ -69,6 +80,19 @@ export interface Inputs {
   /** The requested time range. Optional: bundles from before it returned as an
    * advanced setting do not carry it; the engine default is 30. */
   days?: number;
+  /**
+   * The formats the ideas were pinned to. Optional: absent on every run that
+   * asked for a mix, which is any run that chose none of them or all of them.
+   */
+  content_types?: ContentType[];
+  /**
+   * The single format runs were pinned to before the setting took several.
+   * Read only: stored history and shared bundles still carry it, and it means
+   * the same as a one-item `content_types`. Never written by the engine now.
+   */
+  content_type?: ContentType;
+  /** Optional: absent on bundles written before the engine recorded it. */
+  discovery?: DiscoveryMode;
 }
 
 /** How the analysed sample was chosen from the fetched pool. */
@@ -80,8 +104,11 @@ export interface SelectionInfo {
   method: string;
   /** Candidates the model actually rated (0 on fallback). */
   triaged: number;
-  /** How many candidates were rated 0 (unrelated), 1 (maybe), 2 (on-topic). */
-  relevance_counts: Record<"0" | "1" | "2", number>;
+  /**
+   * How many candidates were rated 0 (unrelated), 1 (maybe), 2 (on-topic).
+   * Optional: a deterministic-fallback run rates nothing and may omit it.
+   */
+  relevance_counts?: Record<"0" | "1" | "2", number>;
 }
 
 export interface SampleInfo {
@@ -130,6 +157,11 @@ export interface ItemSentiment {
 }
 
 export interface Analysis {
+  /**
+   * A short generated title for the run. Optional: bundles written before the
+   * engine produced one fall back to the query.
+   */
+  report_title?: string;
   executive_summary: string;
   topics: Topic[];
   pain_points: Claim[];
@@ -148,6 +180,11 @@ export interface SentimentStats {
 export interface EngagementStats {
   score: number;
   comments: number;
+  /**
+   * The same two numbers over the analysed sample rather than the whole fetch.
+   * Optional: older bundles carry only the fetch-wide totals.
+   */
+  analysed?: { upvotes: number; comments: number };
 }
 
 export interface DateRange {
@@ -168,11 +205,29 @@ export interface Stats {
   engagement: EngagementStats;
   date_range: DateRange;
   lag_hours: number;
+  /** Alias some engine versions emit for `lag_hours`. Read both, prefer this. */
+  data_lag_hours?: number;
   trend: TrendPoint[];
 }
 
 export interface Bundle {
   bundle_version: number;
+  /**
+   * The id this run was saved under, when it was saved at all.
+   *
+   * Not written by the engine: the NDJSON terminal line carries it *alongside*
+   * the bundle (`{"type": "report", "bundle": {...}, "report_id": "..."}`)
+   * rather than inside it, so what the server stores is byte-for-byte what the
+   * engine produced and re-exporting a saved report cannot smuggle an id into
+   * the file. This field is where the client stashes it after the fact, which
+   * is what carries it into history, into the export buttons and into the
+   * draft dialog without threading a second value through every component.
+   *
+   * Absent whenever the save failed, whenever the database is not configured,
+   * and on every history entry written before saved reports existed. Every
+   * feature that depends on it is additive for exactly that reason.
+   */
+  report_id?: string;
   /** "YYYY-MM-DD HH:MM UTC" */
   generated_at: string;
   generated_ts: number;
@@ -202,13 +257,22 @@ export interface ReportRequest {
   /** Comma-separated community names; skips discovery when set. */
   subreddits?: string;
   relevance_filter?: boolean;
+  /** Omitted entirely when the user asked for a mix. */
+  content_types?: ContentType[];
 }
 
 export type StreamLine =
   | { type: "progress"; message: string }
-  | { type: "report"; bundle: Bundle }
+  /** `report_id` is present only when the run was saved. See Bundle.report_id. */
+  | { type: "report"; bundle: Bundle; report_id?: string }
   | { type: "invalid"; errors: string[] }
   | { type: "error"; message: string };
+
+/** GET /api/reports/{id}. Draft keys are the idea index as a string. */
+export interface SavedReport {
+  bundle: Bundle;
+  drafts: Record<string, string>;
+}
 
 export type SampleResponse =
   | { available: true; bundle: Bundle }
@@ -231,6 +295,20 @@ export interface DraftRequest {
   evidence: string[];
   query: string;
   profile: string;
+  /**
+   * Where to file the finished post. Both are sent together or not at all, and
+   * only for a report that was saved: with them the server stores the draft as
+   * it hands it back, so a refresh returns it.
+   */
+  report_id?: string;
+  idea_index?: number;
+}
+
+/** POST /api/drafts: an already-written post, saved against a stored report. */
+export interface SaveDraftRequest {
+  report_id: string;
+  idea_index: number;
+  post: string;
 }
 
 export type DraftResponse = { post: string } | { error: string };
@@ -246,6 +324,50 @@ export const TIME_WINDOWS = [7, 14, 30] as const;
 export const DEFAULT_DAYS = 30;
 export const MAX_MANUAL_SUBREDDITS = 4;
 
+/** The checkbox group, in the order it renders. None ticked means "any". */
+export const CONTENT_TYPE_CHOICES: { value: ContentType; label: string }[] = [
+  { value: "text", label: "Text post" },
+  { value: "carousel", label: "Carousel" },
+  { value: "video", label: "Video script" },
+  { value: "poll", label: "Poll" },
+  { value: "article", label: "Long-form article" },
+];
+
+export function isContentType(value: string): value is ContentType {
+  return CONTENT_TYPE_CHOICES.some((choice) => choice.value === value);
+}
+
+/**
+ * The content types a URL asked for: comma-separated, deduped, menu order.
+ *
+ * A link written before the setting took several values carries one bare name,
+ * which the split handles without a special case. Anything unrecognised is
+ * dropped rather than refused, because a bad parameter should not stop the
+ * rest of a shared search from loading.
+ */
+export function parseContentTypes(value: string | null): ContentType[] {
+  const asked = new Set(
+    (value ?? "").split(",").map((part) => part.trim().toLowerCase()),
+  );
+  return CONTENT_TYPE_CHOICES.filter((choice) => asked.has(choice.value)).map(
+    (choice) => choice.value,
+  );
+}
+
+/**
+ * The formats a stored bundle's ideas were written for.
+ *
+ * A bundle from before the setting took several values carries the single
+ * `content_type`, and saved history is full of them, so both fields are read
+ * and the older one renders as a list of one.
+ */
+export function bundleContentTypes(inputs?: Inputs): ContentType[] {
+  if (inputs?.content_types && inputs.content_types.length > 0) {
+    return inputs.content_types;
+  }
+  return inputs?.content_type ? [inputs.content_type] : [];
+}
+
 export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   pos: "Positive",
   neu: "Neutral",
@@ -254,19 +376,29 @@ export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
 
 export const SENTIMENT_ORDER: SentimentKey[] = ["pos", "neu", "neg"];
 
-/** Narrow an unknown payload before anything renders it. */
+function isObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Narrow an unknown payload before anything renders it.
+ *
+ * The check reaches one level into `stats`, because every section below the
+ * ideas reads `stats.sentiment`, `stats.date_range` and `stats.engagement`
+ * directly. A bundle missing any of them would pass a shallow guard and then
+ * crash the report halfway down the page, which is a far worse failure than
+ * refusing it at the door.
+ */
 export function isBundleV4(value: unknown): value is Bundle {
-  if (!value || typeof value !== "object") return false;
+  if (!isObject(value)) return false;
   const candidate = value as Partial<Bundle>;
+  if (candidate.bundle_version !== BUNDLE_VERSION) return false;
+  if (!isObject(candidate.inputs)) return false;
+  if (!isObject(candidate.analysis)) return false;
+  if (!isObject(candidate.sample)) return false;
+  if (!isObject(candidate.stats)) return false;
+  const stats = candidate.stats as Partial<Stats>;
   return (
-    candidate.bundle_version === BUNDLE_VERSION &&
-    typeof candidate.inputs === "object" &&
-    candidate.inputs !== null &&
-    typeof candidate.analysis === "object" &&
-    candidate.analysis !== null &&
-    typeof candidate.stats === "object" &&
-    candidate.stats !== null &&
-    typeof candidate.sample === "object" &&
-    candidate.sample !== null
+    isObject(stats.sentiment) && isObject(stats.date_range) && isObject(stats.engagement)
   );
 }

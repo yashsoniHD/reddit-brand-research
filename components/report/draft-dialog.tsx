@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, Copy, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { EvidencePills } from "@/components/report/evidence-pills";
 import {
   Dialog,
   DialogContent,
@@ -9,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { draftPost } from "@/lib/api";
+import { draftPost, saveDraft } from "@/lib/api";
 import { truncate } from "@/lib/format";
 import { MAX_DRAFT_EVIDENCE, type ContentIdea } from "@/lib/types";
 
@@ -19,11 +21,17 @@ import { MAX_DRAFT_EVIDENCE, type ContentIdea } from "@/lib/types";
  * Drafting starts the moment the dialog opens, so the common path is one click
  * and a wait rather than a click and then a second click. Results are cached by
  * the parent per rendered report, so reopening a card never bills a second call.
+ *
+ * When the report was saved, the cache is also a database row: generation is
+ * told where to file the result, and an edit is written back, so the draft
+ * survives a refresh and comes back with the report from its link.
  */
 
 export interface DraftContext {
   query: string;
   profile: string;
+  /** Set only when this report is stored. Absent means nothing persists. */
+  reportId?: string;
 }
 
 type State =
@@ -31,10 +39,17 @@ type State =
   | { phase: "ready"; post: string }
   | { phase: "error"; message: string };
 
+/**
+ * What the writing call gets to work from.
+ *
+ * The excerpt is a real passage from the source item and the title is a label
+ * for it, so the excerpt is always the better prompt material. Older bundles
+ * carry only the title, which is why the fallback exists.
+ */
 function evidenceFor(idea: ContentIdea): string[] {
   return (idea.citations ?? [])
     .slice(0, MAX_DRAFT_EVIDENCE)
-    .map((citation) => citation.text)
+    .map((citation) => (citation.excerpt?.trim() ? citation.excerpt : citation.text))
     .filter(Boolean);
 }
 
@@ -45,11 +60,14 @@ function evidenceFor(idea: ContentIdea): string[] {
  */
 function DraftBody({
   idea,
+  ideaIndex,
   context,
   cached,
   onCache,
 }: {
   idea: ContentIdea;
+  /** Which idea this is in the report, and therefore which row it saves to. */
+  ideaIndex: number;
   context: DraftContext;
   cached: string | undefined;
   onCache: (post: string) => void;
@@ -61,6 +79,45 @@ function DraftBody({
   const [copyError, setCopyError] = useState<string | null>(null);
   const controller = useRef<AbortController | null>(null);
   const copyTimer = useRef<number | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  // What the database is known to hold, so a blur that changed nothing (the
+  // common case: open, read, close) costs no request at all. Seeded with the
+  // cached post, which either came back from the server or was written by it.
+  const savedPost = useRef<string | undefined>(cached);
+  const citations = (idea.citations ?? []).slice(0, MAX_DRAFT_EVIDENCE);
+
+  /**
+   * Persist an edit, best effort and silent.
+   *
+   * Blur is the debounce: it fires once per visit to the editor rather than
+   * once per keystroke, which is exactly the granularity a save wants, and a
+   * timer-based debounce would have to be flushed on unmount anyway, since
+   * closing the dialog blurs the textarea and unmounts this body in the same
+   * tick. Failure is deliberately invisible: the post is still in the page's
+   * cache and still on screen, so an alarming banner would be describing a
+   * problem the reader cannot act on and has not yet suffered.
+   */
+  const persist = useCallback(
+    (post: string) => {
+      const reportId = context.reportId;
+      if (!reportId || !post.trim() || post === savedPost.current) return;
+      savedPost.current = post;
+      void saveDraft(reportId, ideaIndex, post);
+    },
+    [context.reportId, ideaIndex],
+  );
+
+  /**
+   * The editor grows with the post instead of scrolling inside itself: the
+   * dialog body already scrolls, and two nested scrollbars around one piece of
+   * text is a worse reading experience than a long box.
+   */
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.style.height = "auto";
+    editor.style.height = `${editor.scrollHeight}px`;
+  }, [state]);
 
   /** Fires the request and records the outcome. Never sets the loading state:
    *  callers own that, which keeps the mount path free of a synchronous
@@ -82,6 +139,11 @@ function DraftBody({
         evidence: evidenceFor(idea),
         query: context.query,
         profile: context.profile,
+        // Sent together or not at all: with them the server files the post it
+        // just wrote, so nothing has to be saved from here afterwards.
+        ...(context.reportId
+          ? { report_id: context.reportId, idea_index: ideaIndex }
+          : {}),
       },
       abort.signal,
     );
@@ -89,11 +151,12 @@ function DraftBody({
     if (outcome.kind === "aborted") return;
     if (outcome.kind === "post") {
       setState({ phase: "ready", post: outcome.post });
+      savedPost.current = context.reportId ? outcome.post : undefined;
       onCache(outcome.post);
       return;
     }
     setState({ phase: "error", message: outcome.message });
-  }, [idea, context.query, context.profile, onCache]);
+  }, [idea, ideaIndex, context.query, context.profile, context.reportId, onCache]);
 
   // Opening is the trigger. A cached post is already the initial state, so this
   // only ever fires for an idea that has not been drafted yet.
@@ -147,11 +210,12 @@ function DraftBody({
 
   return (
     <>
-      <DialogHeader className="border-b px-6 py-5 text-left">
-        <DialogTitle className="pr-8 text-base leading-snug font-semibold">
+      <DialogHeader className="gap-1.5 border-b px-6 py-5 text-left">
+        <span className="h-quiet">Your LinkedIn draft</span>
+        <DialogTitle className="pr-8 text-[1.0625rem] leading-snug font-semibold tracking-[-0.014em]">
           {idea.title}
         </DialogTitle>
-        <DialogDescription className="text-xs">
+        <DialogDescription className="text-xs leading-relaxed">
           Written from this idea and the posts behind it. Edit it to sound like you before
           publishing.
         </DialogDescription>
@@ -160,7 +224,14 @@ function DraftBody({
       <div className="max-h-[52svh] overflow-y-auto px-6 py-5">
         {state.phase === "loading" ? (
           <div className="flex flex-col gap-3" aria-busy="true">
-            <p className="text-sm text-muted-foreground" role="status">
+            <p
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+              role="status"
+            >
+              <span aria-hidden="true" className="relative flex size-2">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-[var(--brand)] opacity-60" />
+                <span className="relative inline-flex size-2 rounded-full bg-[var(--brand)]" />
+              </span>
               Writing your post…
             </p>
             {[92, 78, 96, 64, 88, 71].map((width, index) => (
@@ -174,18 +245,40 @@ function DraftBody({
         ) : state.phase === "error" ? (
           <div
             role="alert"
-            className="rounded-xl border border-destructive/40 bg-destructive/8 px-4 py-3"
+            className="rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3"
           >
             <p className="text-sm leading-relaxed text-foreground">{state.message}</p>
           </div>
         ) : (
-          // A publish-look preview: the model's line breaks are the post's line
-          // breaks, so they are preserved exactly rather than collapsed.
-          <article className="surface-hush px-5 py-5">
-            <p className="text-[0.9375rem] leading-relaxed whitespace-pre-wrap text-foreground">
-              {state.post}
-            </p>
-          </article>
+          // Editable in place, styled as the post rather than as a form field:
+          // nobody publishes a first draft untouched, and making them copy it
+          // out to change one line is a step this dialog can simply absorb.
+          // Copy takes whatever is in here, edits included.
+          <div className="surface-hush px-5 py-5 transition-colors focus-within:border-[var(--brand-line)]">
+            <label htmlFor="draft-editor" className="sr-only">
+              Your draft post, editable
+            </label>
+            <textarea
+              id="draft-editor"
+              ref={editorRef}
+              value={state.post}
+              onChange={(event) => {
+                setState({ phase: "ready", post: event.target.value });
+                setCopied(false);
+              }}
+              // Cached on blur rather than on every keystroke: reopening the
+              // card should return the edited post, without re-rendering the
+              // whole grid behind the dialog once per character. The same
+              // moment is when the edit goes to the database, for a report
+              // that has one.
+              onBlur={(event) => {
+                onCache(event.target.value);
+                persist(event.target.value);
+              }}
+              spellCheck
+              className="block w-full resize-none border-0 bg-transparent p-0 text-[0.9375rem] leading-[1.65] whitespace-pre-wrap text-foreground outline-none focus-visible:outline-none"
+            />
+          </div>
         )}
 
         {copyError ? (
@@ -195,24 +288,40 @@ function DraftBody({
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-t px-6 py-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t bg-[var(--hush)] px-6 py-4">
         <button
           type="button"
           onClick={() => void copy()}
           disabled={state.phase !== "ready"}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-45"
+          className="flex h-9 items-center gap-1.5 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/85 disabled:opacity-45 disabled:hover:bg-primary"
         >
+          {copied ? (
+            <Check aria-hidden="true" strokeWidth={2.5} className="size-3.5" />
+          ) : (
+            <Copy aria-hidden="true" strokeWidth={2} className="size-3.5" />
+          )}
           {copied ? "Copied" : "Copy post"}
         </button>
         <button
           type="button"
           onClick={regenerate}
           disabled={state.phase === "loading"}
-          className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-secondary disabled:opacity-45"
+          className="flex h-9 items-center gap-1.5 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors hover:bg-secondary disabled:opacity-45"
         >
+          <RotateCw aria-hidden="true" strokeWidth={2} className="size-3.5" />
           {state.phase === "error" ? "Try again" : "Regenerate"}
         </button>
-        <span aria-live="polite" className="ml-auto text-xs text-muted-foreground">
+
+        {/* The report promises the sources behind the idea, so the dialog has
+            to carry them: the card that opened it is now behind an overlay. */}
+        {citations.length > 0 ? (
+          <span className="flex items-center gap-1.5">
+            <span className="h-quiet">Sources</span>
+            <EvidencePills citations={citations} label="Source" />
+          </span>
+        ) : null}
+
+        <span aria-live="polite" className="num ml-auto text-xs text-muted-foreground">
           {copied
             ? "Copied to your clipboard"
             : state.phase === "ready"
@@ -228,6 +337,7 @@ function DraftBody({
 
 export function DraftDialog({
   idea,
+  ideaIndex,
   ideaKey,
   context,
   cached,
@@ -235,6 +345,8 @@ export function DraftDialog({
   onClose,
 }: {
   idea: ContentIdea | null;
+  /** Position of the open idea in the report. Null when nothing is open. */
+  ideaIndex: number | null;
   /** Identity of the open idea, so each open is its own mount. */
   ideaKey: string | null;
   context: DraftContext;
@@ -246,12 +358,13 @@ export function DraftDialog({
     <Dialog open={idea !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         showCloseButton
-        className="max-h-[88svh] gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        className="max-h-[88svh] gap-0 overflow-hidden rounded-2xl p-0 shadow-[var(--lift-3)] sm:max-w-2xl"
       >
         {idea ? (
           <DraftBody
             key={ideaKey ?? idea.title}
             idea={idea}
+            ideaIndex={ideaIndex ?? 0}
             context={context}
             cached={cached}
             onCache={onCache}

@@ -66,6 +66,14 @@ class TestSentimentBreakdown:
         assert result["classified"] == 0
         assert result["percentages"] == {"pos": 0, "neu": 0, "neg": 0}
 
+    def test_nothing_classified_is_flagged_so_a_renderer_can_say_so(self):
+        # All-zero percentages and "0% of everything" look identical in a chart, and
+        # only one of them is honest.
+        assert stats.sentiment_breakdown([], n_items=10)["none_classified"] is True
+        assert stats.sentiment_breakdown(
+            [{"i": 1, "s": "pos"}], n_items=10
+        )["none_classified"] is False
+
     def test_percentages_ignore_unclassified_items(self):
         result = stats.sentiment_breakdown([{"i": 1, "s": "pos"}], n_items=100)
         assert result["percentages"]["pos"] == 100
@@ -125,9 +133,20 @@ class TestTrendBuckets:
         now = datetime.now(timezone.utc)
         posts = [_post(int(now.timestamp())), _post(int((now - timedelta(days=40)).timestamp()))]
         buckets = stats.trend_buckets(posts, max_days=30)
-        assert len(buckets) == 30
+        # A 30-day window reaches back across 31 calendar dates: today and the 30
+        # days before it. Capping at 30 dropped the oldest day of every full window.
+        assert len(buckets) == 31
         assert buckets[-1][1] == 1  # the newest post survives
         assert sum(count for _, count in buckets) == 1  # the 40-day-old one falls outside
+
+    def test_a_full_window_keeps_its_oldest_day(self):
+        now = datetime.now(timezone.utc)
+        posts = [
+            _post(int((now - timedelta(days=offset)).timestamp())) for offset in (0, 7)
+        ]
+        buckets = stats.trend_buckets(posts, max_days=7)
+        assert len(buckets) == 8
+        assert buckets[0][1] == 1 and buckets[-1][1] == 1
 
     def test_no_posts_means_no_trend(self):
         assert stats.trend_buckets([]) == []
@@ -139,7 +158,25 @@ class TestTrendBuckets:
 class TestEngagementAndDates:
     def test_totals_survive_bad_values(self):
         posts = [_post(1700000000, score=10, comments=2), {"score": None, "comments": "x"}]
-        assert stats.engagement_totals(posts) == {"score": 10, "comments": 2}
+        totals = stats.engagement_totals(posts)
+        assert totals["score"] == 10 and totals["comments"] == 2
+        assert totals["analysed"] == {"upvotes": 0, "comments": 0}
+
+    def test_the_analysed_sample_is_counted_separately_from_the_pool(self):
+        posts = [_post(1700000000, score=10, comments=2), _post(1700000001, score=5, comments=1)]
+        items = [
+            posts[0],
+            {"kind": "comment", "score": 4},
+            {"kind": "comment", "score": 3},
+        ]
+        totals = stats.engagement_totals(posts, items)
+        # The pool is both posts; the sample is one post and two comments, whose
+        # upvotes count and whose (absent) reply counts do not.
+        assert totals["score"] == 15 and totals["comments"] == 3
+        assert totals["analysed"] == {"upvotes": 17, "comments": 2}
+
+    def test_no_analysed_sample_still_reports_zeroes_not_a_missing_key(self):
+        assert stats.engagement_totals([])["analysed"] == {"upvotes": 0, "comments": 0}
 
     def test_date_range_reports_actual_coverage(self):
         posts = [_post(1700000000), _post(1700200000)]
@@ -204,3 +241,115 @@ class TestCitations:
     def test_no_indices_gives_no_citations(self):
         assert stats.citations_for([], self._items()) == []
         assert stats.citations_for(None, self._items()) == []
+
+
+class TestCitationQuality:
+    """Two rules decide which candidates survive: one source per thread, and an
+    item with nothing to quote only when there is nothing better."""
+
+    @staticmethod
+    def _post(index, thread, body="A real body with something to say in it.", comments=4):
+        return {
+            "kind": "post", "id": "p{}".format(index), "title": "Post {}".format(index),
+            "body": body, "comments": comments, "score": 10, "subreddit": "x",
+            "date": "2026-07-20",
+            "url": "https://reddit.com/r/x/comments/{}/slug/".format(thread),
+        }
+
+    @staticmethod
+    def _comment(index, thread, body="A reply worth reading.", score=5):
+        return {
+            "kind": "comment", "id": "c{}".format(index), "title": "", "body": body,
+            "score": score, "subreddit": "x", "date": "2026-07-20",
+            "url": "https://reddit.com/r/x/comments/{}/slug/c{}/".format(thread, index),
+        }
+
+    def test_a_post_and_its_own_comments_count_as_one_source(self):
+        items = [self._post(1, "t1"), self._comment(2, "t1"), self._post(3, "t2")]
+        citations = stats.citations_for([1, 2, 3], items)
+        assert [citation["index"] for citation in citations] == [1, 3]
+
+    def test_two_comments_from_the_same_thread_collapse_to_the_first(self):
+        items = [self._comment(1, "t1"), self._comment(2, "t1")]
+        assert len(stats.citations_for([1, 2], items)) == 1
+
+    def test_thread_key_reads_the_permalink_and_falls_back_to_the_id(self):
+        assert stats.thread_key(self._post(1, "abc123")) == "abc123"
+        assert stats.thread_key({"id": "Xyz", "url": "https://example.test/x"}) == "xyz"
+        assert stats.thread_key({}) == ""
+
+    def test_a_thin_item_yields_to_a_better_candidate(self):
+        thin = {
+            "kind": "post", "id": "p1", "title": "Link drop", "body": "", "comments": 0,
+            "score": 900, "subreddit": "x", "date": "",
+            "url": "https://reddit.com/r/x/comments/t1/slug/",
+        }
+        items = [thin, self._post(2, "t2"), self._post(3, "t3")]
+        citations = stats.citations_for([1, 2, 3], items, limit=2)
+        assert [citation["index"] for citation in citations] == [2, 3]
+
+    def test_a_thin_item_is_still_cited_when_it_is_all_there_is(self):
+        thin = {
+            "kind": "post", "id": "p1", "title": "Link drop", "body": "", "comments": 0,
+            "score": 1, "subreddit": "x", "date": "",
+            "url": "https://reddit.com/r/x/comments/t1/slug/",
+        }
+        assert [c["index"] for c in stats.citations_for([1], [thin])] == [1]
+
+
+class TestCitationExcerpts:
+    """The excerpt is the evidence a draft is written from, so it carries the real
+    text rather than a label for a link."""
+
+    POST = {
+        "kind": "post", "id": "p1", "title": "How do you price a retainer",
+        "body": "We quoted 20 hours and delivered 65 last quarter.",
+        "comments": 3, "score": 10, "subreddit": "x", "date": "2026-07-20",
+        "url": "https://reddit.com/r/x/comments/t1/slug/",
+    }
+
+    def test_a_post_excerpt_carries_its_title_and_body(self):
+        excerpt = stats.citations_for([1], [self.POST])[0]["excerpt"]
+        assert "How do you price a retainer" in excerpt
+        assert "delivered 65" in excerpt
+
+    def test_replies_from_the_same_thread_are_folded_in(self):
+        comments = [
+            {"kind": "comment", "body": "Charge for discovery separately.", "score": 40,
+             "url": "https://reddit.com/r/x/comments/t1/slug/c1/"},
+            {"kind": "comment", "body": "Cap the revisions in writing.", "score": 20,
+             "url": "https://reddit.com/r/x/comments/t1/slug/c2/"},
+            {"kind": "comment", "body": "Ignored, lowest score.", "score": 1,
+             "url": "https://reddit.com/r/x/comments/t1/slug/c3/"},
+            {"kind": "comment", "body": "From a different thread entirely.", "score": 99,
+             "url": "https://reddit.com/r/x/comments/t2/slug/c4/"},
+        ]
+        excerpt = stats.citations_for([1], [self.POST], comments=comments)[0]["excerpt"]
+        assert "Charge for discovery separately." in excerpt
+        assert "Cap the revisions in writing." in excerpt
+        assert "Ignored, lowest score." not in excerpt
+        assert "different thread" not in excerpt
+
+    def test_a_comment_excerpt_is_its_own_body_and_nothing_else(self):
+        comment = {
+            "kind": "comment", "id": "c1", "title": "", "body": "Just my two cents.",
+            "score": 3, "subreddit": "x", "date": "",
+            "url": "https://reddit.com/r/x/comments/t1/slug/c1/",
+        }
+        assert stats.citations_for([1], [comment])[0]["excerpt"] == "Just my two cents."
+
+    def test_an_excerpt_falls_back_to_the_title_when_there_is_no_body(self):
+        post = dict(self.POST, body="")
+        assert stats.citations_for([1], [post])[0]["excerpt"] == self.POST["title"]
+
+    def test_an_excerpt_is_capped_and_whitespace_normalised(self):
+        post = dict(self.POST, body="word \n\n  spaced " + "x" * 2000)
+        excerpt = stats.citations_for([1], [post])[0]["excerpt"]
+        assert len(excerpt) <= stats.EXCERPT_MAX_CHARS
+        assert "word spaced" in excerpt
+        assert "\n" not in excerpt
+
+    def test_the_text_field_is_unchanged_by_the_excerpt(self):
+        citation = stats.citations_for([1], [self.POST])[0]
+        assert citation["text"] == self.POST["title"]
+        assert citation["excerpt"] != citation["text"]

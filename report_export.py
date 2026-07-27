@@ -18,22 +18,66 @@ import stats
 SENTIMENT_ORDER = ("pos", "neu", "neg")
 SENTIMENT_TITLES = {"pos": "Positive", "neu": "Neutral", "neg": "Negative"}
 _FILENAME_SAFE = re.compile(r"[^a-z0-9]+")
+# What a finished stem has to look like, checked once at the end of
+# filename_stem as a second, independent guarantee alongside the per-piece
+# scrubbing above it: this is the value a Content-Disposition header trusts
+# outright, and a header that reflects an attacker-chosen newline or quote can
+# inject a second header or field.
+_FILENAME_STEM_SAFE = re.compile(r"^[a-z0-9-]+$")
 # Long enough to recognise the run, short enough to survive email clients and
 # filesystems that truncate.
 MAX_FILENAME_QUERY_CHARS = 40
 
 
-def filename_stem(bundle: dict) -> str:
-    """`content-ideas-ai-automation-2026-07-26`, safe on every filesystem."""
+def filename_stem(bundle: dict, kind: str = "") -> str:
+    """`content-ideas-ai-automation-2026-07-26-ideas`, safe on every filesystem
+    and header.
+
+    `kind` names which artefact this is ("ideas", "posts", "report") and is
+    appended to the stem. Two exports of the same report can share an
+    extension, so without it the ideas CSV and the posts CSV download under one
+    identical name. It is scrubbed like every other piece, and the finished stem
+    is checked against _FILENAME_STEM_SAFE either way, so a caller cannot widen
+    the character set the Content-Disposition header ends up trusting.
+    """
     query = str(bundle.get("inputs", {}).get("query") or "report").lower()
     slug = _FILENAME_SAFE.sub("-", query[:MAX_FILENAME_QUERY_CHARS]).strip("-")
-    date = str(bundle.get("generated_at", ""))[:10] or "report"
-    return "content-ideas-{}-{}".format(slug or "report", date)
+    raw_date = str(bundle.get("generated_at", ""))[:10] or "report"
+    date = _FILENAME_SAFE.sub("-", raw_date.lower()).strip("-") or "report"
+    suffix = _FILENAME_SAFE.sub("-", str(kind or "").lower()).strip("-")
+    stem = "content-ideas-{}-{}".format(slug or "report", date)
+    if suffix:
+        stem = "{}-{}".format(stem, suffix)
+    if _FILENAME_STEM_SAFE.match(stem):
+        return stem
+    return "report-{}".format(suffix) if suffix else "report"
+
+
+# Markdown control characters that let inline text break out of its context:
+# `|` breaks a table cell, `\n` forges a new block, and `< > [ ] (` can open a
+# link/image/HTML tag. Escaped wherever LLM- or Reddit-sourced text lands.
+_MARKDOWN_SPECIAL_CHARS = (("<", "\\<"), (">", "\\>"), ("[", "\\["), ("]", "\\]"), ("(", "\\("))
+_BARE_URL = re.compile(r"https?://[^\s)>\]]+")
+
+
+def _defang_urls(text: str) -> str:
+    """Wrap bare URLs in backticks so a Markdown renderer treats them as
+    literal text instead of auto-linking them. Headings and claims here are
+    LLM- or Reddit-sourced, and an auto-linked URL there is one more surface
+    for a spoofed link to look like a real citation."""
+    return _BARE_URL.sub(lambda match: "`{}`".format(match.group(0)), text)
 
 
 def _escape(text) -> str:
-    """Neutralise pipes so a title cannot break out of a Markdown table cell."""
-    return str(text or "").replace("|", "\\|").replace("\n", " ").strip()
+    """Neutralise Markdown control characters and defang bare URLs, so text
+    that came from an LLM or from Reddit cannot break out of a table cell,
+    forge a heading or link, or get auto-linked as if it were a citation."""
+    cleaned = str(text or "").replace("\n", " ").strip()
+    cleaned = _defang_urls(cleaned)
+    cleaned = cleaned.replace("|", "\\|")
+    for char, escaped in _MARKDOWN_SPECIAL_CHARS:
+        cleaned = cleaned.replace(char, escaped)
+    return cleaned
 
 
 def _citation_links(citations: Sequence[dict]) -> str:
@@ -97,7 +141,7 @@ def report_markdown(bundle: dict) -> str:
 
     add("## Executive summary")
     add("")
-    add(analysis.get("executive_summary") or "No summary was produced for this run.")
+    add(_escape(analysis.get("executive_summary")) or "No summary was produced for this run.")
     add("")
 
     add("## Sample")
@@ -107,11 +151,29 @@ def report_markdown(bundle: dict) -> str:
     add("| Posts analysed | {} |".format(_sample_line(sample, "posts")))
     add("| Comments analysed | {} |".format(_sample_line(sample, "comments")))
     add("| Actual date range | {} |".format(date_range.get("label", "n/a")))
-    add(
-        "| Total engagement | {} upvotes · {} comments |".format(
-            _thousands(engagement.get("score", 0)), _thousands(engagement.get("comments", 0))
+    analysed_engagement = engagement.get("analysed")
+    if isinstance(analysed_engagement, dict):
+        # stats.engagement.analysed (once present) covers only the items the
+        # model actually analysed; the headline figure should match what the
+        # rest of the report is about, with the larger fetched-pool total
+        # kept as a clearly-labeled secondary figure rather than dropped.
+        add(
+            "| Total engagement (analysed) | {} upvotes · {} comments |".format(
+                _thousands(analysed_engagement.get("upvotes", 0)),
+                _thousands(analysed_engagement.get("comments", 0)),
+            )
         )
-    )
+        add(
+            "| Total engagement (fetched pool) | {} upvotes · {} comments |".format(
+                _thousands(engagement.get("score", 0)), _thousands(engagement.get("comments", 0))
+            )
+        )
+    else:
+        add(
+            "| Total engagement | {} upvotes · {} comments |".format(
+                _thousands(engagement.get("score", 0)), _thousands(engagement.get("comments", 0))
+            )
+        )
     add("")
 
     add("## Communities analysed")
@@ -143,12 +205,12 @@ def report_markdown(bundle: dict) -> str:
         add("")
     for topic in topics:
         share = "" if low_data else ", {}% of the conversation".format(_round_share(topic.get("share", 0)))
-        add("### {}{}".format(topic.get("label", "Topic"), share))
+        add("### {}{}".format(_escape(topic.get("label", "Topic")), share))
         add("")
         add("{} items{}".format(topic.get("count", 0), "" if low_data else " in this sample"))
         add("")
         if topic.get("finding"):
-            add(topic["finding"])
+            add(_escape(topic["finding"]))
             add("")
         for citation in topic.get("citations", []):
             add("- [{}]({}) · {} · {} upvotes".format(
@@ -159,7 +221,9 @@ def report_markdown(bundle: dict) -> str:
 
     add("## Sentiment")
     add("")
-    if low_data:
+    if sentiment.get("classified", 0) == 0:
+        add("No items could be classified for tone in this run.")
+    elif low_data:
         add("Counts across {} classified items: {} positive, {} neutral, {} negative.".format(
             sentiment.get("classified", 0), counts.get("pos", 0), counts.get("neu", 0), counts.get("neg", 0)
         ))
@@ -185,7 +249,7 @@ def report_markdown(bundle: dict) -> str:
             add("None identified in this sample.")
             add("")
         for entry in entries:
-            add("- **{}**".format(entry.get("text", "")))
+            add("- **{}**".format(_escape(entry.get("text", ""))))
             links = _citation_links(entry.get("citations", []))
             if links:
                 add("  - Evidence: {}".format(links))
@@ -194,23 +258,23 @@ def report_markdown(bundle: dict) -> str:
     add("## Content ideas")
     add("")
     for index, idea in enumerate(analysis.get("content_ideas", []), 1):
-        add("### {}. {}".format(index, idea.get("title", "")))
+        add("### {}. {}".format(index, _escape(idea.get("title", ""))))
         add("")
         if idea.get("hook"):
             # The hook is the line they actually publish, so it is quoted verbatim
             # rather than paraphrased into a bullet.
             add("> **“{}”**".format(_escape(idea["hook"])))
             add("")
-        add("**Format:** {}".format(idea.get("format", "")))
+        add("**Format:** {}".format(_escape(idea.get("format", ""))))
         if idea.get("angle"):
             add("")
-            add("**Angle:** {}".format(idea["angle"]))
+            add("**Angle:** {}".format(_escape(idea["angle"])))
         if idea.get("addresses"):
             add("")
-            add("**Addresses:** {}".format(idea["addresses"]))
+            add("**Addresses:** {}".format(_escape(idea["addresses"])))
         if idea.get("rationale"):
             add("")
-            add("**Why it lands:** {}".format(idea["rationale"]))
+            add("**Why it lands:** {}".format(_escape(idea["rationale"])))
         links = _citation_links(idea.get("citations", []))
         if links:
             add("")
@@ -230,8 +294,12 @@ def report_markdown(bundle: dict) -> str:
     # Named differently from the "Communities analysed" section above on purpose:
     # that section lists everything discovery picked, this lists what produced data.
     add("- Communities read: {}".format(subs or "none"))
-    add("- Discovery: the communities were chosen by the model from your query, then "
-        "checked to exist and be public before being read.")
+    if inputs.get("discovery") == "manual":
+        add("- Discovery: you chose these communities directly; they were checked to "
+            "exist and be public before being read.")
+    else:
+        add("- Discovery: the communities were chosen by the model from your query, then "
+            "checked to exist and be public before being read.")
     add("- Requested window: last {} days".format(
         inputs.get("days", reddit_data.FETCH_WINDOW_DAYS)))
     add("- Actual coverage: {}".format(date_range.get("label", "n/a")))
@@ -241,8 +309,8 @@ def report_markdown(bundle: dict) -> str:
         sample.get("comments_fetched", 0), sample.get("comments_analysed", 0)))
     selection = sample.get("selection", {})
     if selection.get("method") == "relevance+engagement":
-        add("- Selection: every candidate was rated for relevance to your search by the "
-            "model ({} items rated), then ranked in code by relevance, community "
+        add("- Selection: the {} highest-scoring candidates were rated for relevance to "
+            "your search by the model, then ranked in code by relevance, community "
             "engagement and recency, with no single community taking more than half "
             "the sample while others had items to offer.".format(selection.get("triaged", 0)))
     elif selection.get("method") == "relevance-off":
@@ -297,12 +365,27 @@ def _thousands(value) -> str:
         return "0"
 
 
+# CSV formula injection: a cell starting with any of these opens a formula in
+# Excel/Sheets/LibreOffice when the file is opened, and Reddit/LLM text is not
+# trusted to avoid them. Prefixing with a single quote forces the cell back to
+# literal text; this is the standard mitigation (OWASP's CSV Injection guidance
+# names this exact character set).
+_CSV_FORMULA_PREFIX_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe_cell(value):
+    text = "" if value is None else str(value)
+    if text and text[0] in _CSV_FORMULA_PREFIX_CHARS:
+        return "'" + text
+    return text
+
+
 def _csv(header: Sequence[str], rows: Sequence[Sequence]) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-    writer.writerow(header)
+    writer.writerow([_csv_safe_cell(cell) for cell in header])
     for row in rows:
-        writer.writerow(row)
+        writer.writerow([_csv_safe_cell(cell) for cell in row])
     return buffer.getvalue()
 
 

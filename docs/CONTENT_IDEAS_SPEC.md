@@ -3,8 +3,10 @@
 > **Historical document.** This spec describes bundle v2. Since then, v3 removed
 > the platform input and v4 removed the time-window input (the app always fetches
 > the last 30 days) and replaced newest-first sampling with relevance-triaged
-> selection (`analysis.rank_items` / `analysis.rate_relevance`). Where this
-> document and the code disagree, the code and README are current.
+> selection (`analysis.rank_items` / `analysis.rate_relevance`). The engine
+> quality pass is described in the **v5 addendum at the bottom of this file**,
+> which is the current description of the Python layer. Where this document and
+> the code disagree, the code, the v5 addendum and the README are current.
 
 The app pivots from "brand research over manually-picked subreddits" to
 "content-idea generation from a free-text query, with automatic subreddit
@@ -411,3 +413,225 @@ and no-CDN rules from Addendum 2.
 - Design polish within Streamlit's constraints: `.streamlit/config.toml`
   theme (accent, fonts), refined CSS block in app.py (typography scale,
   card/badge polish, spacing rhythm, hero header). No new dependencies.
+
+## Addendum 4 (2026-07-27): engine quality pass (v5 of the Python layer)
+
+An audit of the engine found a set of correctness, cost and output-quality
+defects. Everything below is implemented and covered by tests. The bundle stays
+at `bundle_version: 4`: the frontend, the API's `/api/sample` gate and the
+export layer all key off that number, and nothing here removes or renames a
+field they already read. Every change is additive.
+
+### New and changed bundle fields
+
+```
+inputs.content_type   "text" | "carousel" | "video" | "article" | null
+inputs.discovery      "manual" | "model"     who chose the communities
+analysis.report_title short plain title, <= 70 chars, never markdown
+stats.engagement.analysed  {"upvotes": int, "comments": int}
+stats.sentiment.none_classified  bool
+models                every model this run used, sorted
+model_label           display names of all of them, joined with " and "
+*.citations[*].excerpt  whitespace-normalised evidence, <= 600 chars
+posts[*].body / comments[*].body / items[*].body  truncated to ~300 chars
+```
+
+`bundle["model"]` still exists and now names the synthesis model (the call whose
+words a reader judges), falling back to classification's.
+
+### Inputs
+
+- `validate_inputs(query, profile, days, subreddits, relevance_filter,
+  content_type)`. `content_type` is one of `text`, `carousel`, `video`,
+  `article`, case-insensitive, `None`/empty meaning a mix. Anything else is a
+  friendly error.
+- `subreddits` accepts the comma-separated string as before, and now also a JSON
+  list of strings (joined with commas). A list containing a bool or a number is
+  rejected rather than coerced, as is a bare number or bool.
+- The time-range error sentence is generated from `TIME_WINDOWS`, so it cannot
+  drift from the allowed set. Non-integral days (7.9) are rejected; `14.0` is not.
+- `relevance_filter` accepts real booleans and the unambiguous strings
+  (`true/false/1/0/yes/no/on/off`). `bool("false")` is True, which used to switch
+  a setting the user turned off back on; anything ambiguous is now an error.
+
+### Cancellation and deadlines
+
+`run_report(..., cancel: threading.Event | None = None, deadline: float | None
+= None)`, both keyword-only. `deadline` is an absolute `time.monotonic()` value.
+
+- Checked at every stage boundary: start, after discovery, before each community
+  fetch, before classification, before synthesis.
+- A set `cancel` event raises `pipeline.RunCancelled`, which carries no
+  user-facing message because the only thing that sets it is the client going
+  away. The API layer swallows it.
+- A passed `deadline` raises `pipeline.RunError` with a sentence the user can act
+  on.
+- `DEADLINE_RESERVE_SECONDS = 60` is held back for classification and synthesis.
+  Once the clock is inside the reserve, no new community is fetched (a notice
+  says so) and the run analyses what it already has. The reserved deadline is
+  also passed down to `discovery.discover` / `discovery.manual` (stop checking
+  candidates) and to `reddit_data.fetch_posts` / `fetch_comments` (stop paging,
+  keep the pages already fetched). Injected fakes that predate the parameter are
+  detected by signature and called without it.
+
+### Selection and triage
+
+- `TRIAGE_PREVIEW_CHARS` 100 -> 300: 100 characters is a headline and half a
+  sentence, which is not enough text to judge relevance on.
+- `TRIAGE_BATCH_SIZE` 250 -> 120, and the real batch size is now computed from
+  `TRIAGE_BUDGET_SHARE` (previously a constant nobody consulted) so one call
+  always fits its share of the budget.
+- Triage output reservation is 45 tokens per item, the figure measured for the
+  sibling classification call, rather than an unsourced 30.
+- `TRIAGE_MAX_POSTS/COMMENTS` stay at 400 each. Covering the whole realistic pool
+  (up to 2,000 posts and 1,200 comments) would mean ~27 sequential model calls,
+  which no request budget survives. **Instead, untriaged items are their own tier:
+  `UNTRIAGED_WEIGHT = 0.35`, below a model-rated 1 (0.55) and above a rated 0
+  (backfill).** An item nobody looked at no longer ranks as if a model had called
+  it adjacent.
+- Relevance ratings are keyed by `relevance_key(kind, item, position)`, a
+  `(kind, id-or-#position)` tuple, in both `_select_sample` and `rank_items`. The
+  raw id collided across the post and comment namespaces and collapsed every
+  id-less item onto one key.
+- `_fair_order(*tiers)` shares one prefix cap and one count across the eligible
+  and backfill tiers. Ordering each tier separately let a community that filled
+  the eligible tier restart at zero and take the head of the backfill tier.
+- `reddit_data.fetch_comments` stores `id = comment_id or permalink`, so an
+  id-less comment has an identity.
+
+### Model layer
+
+- A response stopped by a content filter (`finish_reason` containing SAFETY,
+  PROHIBITED_CONTENT, RECITATION, BLOCKLIST or SPII, or a non-empty
+  `prompt_feedback.block_reason`) fails immediately with "Some of the discussion
+  in these communities could not be analysed. Try different communities."
+  Retrying a filter decision spends a minute reaching the same refusal and then
+  reports something permanent as temporary.
+- The `_token_limit` module global is gone. A payload rejection shaves a budget
+  local to that one run (`classify_sample` -> `fit_sample(budget=...)`) instead of
+  permanently shrinking every later run in the process and racing between two
+  concurrent ones. `ensure_token_limit` (a no-op stub from the Groq era) is
+  deleted, as are `reddit_data.SubredditCheck` and `validate_subreddit`, which
+  nothing outside their own tests called.
+- `sanitize_classification` rejects a model topic claiming id 0. Zero is the
+  prompt's "fits no topic" sentinel, and a topic holding it would collect every
+  unassigned item. Items with `t: 0` stay unassigned, as intended.
+- `strip_markdown` additionally strips `*emphasis*` / `**bold**`, bare URLs and
+  bare domains (TLD list, so "Node.js" and "v3.5" survive). Nothing legitimate in
+  a hook, a finding or a topic label contains a link.
+
+### Output quality
+
+- Content ideas: the prompt asks for 12 to 15 (was 8 to 12). The arithmetic is in
+  the comment on `MIN_CONTENT_IDEAS`: ~5,000 output tokens against a 24,000
+  ceiling. The sanitiser accepts 8 to 20 and warns below 8.
+- Hook rules in the synthesis prompt: the "[Problem]? [Imperative]." template is
+  banned by name; every hook must carry a number, a phrase quoted from the
+  evidence, or a concrete named situation; three good and three bad examples are
+  shown. At most 2 of the 15 ideas may name the user's own product or brand.
+- `content_type`, when set, forces every idea's `format` to one label
+  (`text` -> "Text post", `carousel` -> "Carousel (PDF)", `video` -> "Video
+  script", `article` -> "Long-form article") in the prompt and again in the
+  sanitiser. Unset keeps the mixed-format menu.
+- `report_title`: asked for in the prompt, sanitised to <= 70 chars at a word
+  boundary, falling back to the first 60 characters of the query at a word
+  boundary.
+- Claims: anything under `MIN_CLAIM_CHARS = 25` is dropped ("Pricing" is a
+  category, not a finding), and questions are deduped against pain points by a
+  case/punctuation-insensitive fingerprint, because the model files the same
+  sentence under both headings.
+- Draft posts (`analysis.draft_post`): the prompt forbids inventing statistics,
+  studies, named tools, companies or personal anecdotes, requires every specific
+  to come from the supplied excerpts, and tells the model to write an opinion
+  piece rather than invent data when the excerpts have no specifics. The format
+  now shapes the output: carousel -> slide-by-slide ("Slide 1:"), video -> beats,
+  article -> structured sections, poll -> question plus options, text -> the
+  previous behaviour. Word bands follow the format. Evidence excerpts are carried
+  at 600 characters, matching the new citation excerpts.
+
+### Citations and numbers
+
+- `stats.citations_for(indices, items, limit, comments=None)` gains `excerpt`
+  (the item's body, plus up to two top replies from the same thread for a post,
+  falling back to the title, whitespace-normalised, <= 600 chars). The existing
+  `text` field is unchanged.
+- One thread may only be cited once: a post and two comments from under it are
+  one conversation being counted three times (the shipped sample proves it).
+  `stats.thread_key` reads the thread id out of the permalink.
+- An item with no body and no replies is cited only when nothing better is left.
+- `trend_buckets` caps at `max_days + 1`: a 7-day window spans 8 calendar dates,
+  and capping at 7 dropped the oldest day of every full window.
+- `engagement_totals(posts, items=None)` reports the analysed sample separately.
+- `sentiment_breakdown` sets `none_classified` so a renderer can say "no items
+  could be classified for tone in this run" instead of drawing an empty chart.
+
+### Robustness
+
+- `reddit_data._safe_int` coerces every numeric field from the archive. The
+  archive is a community mirror, not a typed API, and one stringly-typed score
+  used to take down a whole fetch.
+- A comments fetch that fails no longer discards the posts already fetched for
+  that community; a notice says the replies are missing.
+- An exception whose message is empty no longer raises IndexError while being
+  formatted into a notice.
+- An empty community list before fetching raises its own RunError rather than the
+  "we could not read anything from (nothing)" one.
+- `run_report` takes a `manual=` injection hook alongside `discover=`, so manual
+  mode is testable the same way discovery is. Monkeypatching
+  `pipeline.discovery.manual` still works.
+
+## Addendum 5 (2026-07-27): content type becomes a multi-select
+
+The advanced "Content type" setting now takes any subset of the five formats
+instead of exactly one. Picking two is a normal thing to want (a carousel and a
+poll, say), and the single select made it impossible to ask for.
+
+### Request
+
+- `content_types: string[]`, a subset of `text`, `carousel`, `video`, `poll`,
+  `article`. Order carries no meaning and duplicates are collapsed. Absent, `[]`
+  or all five all mean the same thing: a mix, chosen per idea.
+- `content_type: str` is still accepted and reads as a one-item list, because
+  shared links and stored history written before this change replay it. The two
+  fields add up when both arrive.
+- `validate_inputs(query, profile, days, subreddits, relevance_filter,
+  content_types, content_type)` returns `content_types` as a sorted list. An
+  unrecognised name is a friendly error that quotes the value back
+  (`We do not offer a content type called "reel". ...`); a value that is neither
+  a list nor a name, and a non-string inside the list, are rejected by shape
+  rather than coerced.
+
+### Bundle
+
+- `inputs.content_types` is a sorted list, written only when the run was pinned
+  to a real subset. A mixed run carries no such key at all.
+- `inputs.content_type` is no longer written. Readers still accept it and render
+  it as a list of one, since saved history is full of it.
+
+### Synthesis
+
+- One chosen type behaves exactly as before: every idea comes back in that
+  format, stated in the prompt and enforced in `sanitize_synthesis`.
+- Two or more: the prompt lists only those labels, tells the model every idea has
+  to use one of them, and asks for the ideas to be spread roughly evenly across
+  them. `sanitize_synthesis(raw, n_items, topics, query, content_types, profile)`
+  coerces any idea whose format is outside the set to the chosen format used
+  least so far, ties broken by menu order, which keeps the promise and pulls the
+  spread back towards even.
+- `analysis.chosen_formats(content_types)` maps wire values to idea-format
+  labels and silently drops anything unknown: validation belongs to the input
+  layer, and an unrecognised value should leave the ideas alone.
+- Draft posts are unchanged. They have always read the format off the individual
+  idea, so a mixed set drafts each idea in its own shape.
+
+### Frontend
+
+- A `fieldset` with a `legend` and five labelled checkboxes replaces the select.
+  None ticked means any.
+- The collapsed advanced-settings summary names a single format and counts
+  several ("2 content types").
+- The URL parameter `type` is comma-separated (`?type=text,poll`). A legacy
+  single value parses without a special case, because splitting one name yields
+  that name.
+- The methodology row lists the formats the ideas were written for, reading
+  `inputs.content_types` and falling back to the legacy `inputs.content_type`.

@@ -5,6 +5,9 @@ venv/
 *.pyc
 .streamlit/secrets.toml
 .pytest_cache/
+service-account.json
+*-key.json
+*credentials*.json
 
 # Next.js frontend
 node_modules/
@@ -20,3 +23,8 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 .env*
+
+# Agent tooling (machine-local)
+.claude/
+.agents/
+skills-lock.json

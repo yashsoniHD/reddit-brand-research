@@ -87,15 +87,17 @@ function SourceTable({
 
   return (
     <div>
+      {/* The table scrolls inside its own container: the page must never gain a
+          horizontal scrollbar because of a wide data grid. */}
       <div className="overflow-x-auto rounded-xl border bg-card">
         <table className="w-full min-w-[44rem] text-left text-sm">
-          <thead>
+          <thead className="bg-[var(--hush)]">
             <tr className="border-b">
               {columns.map((column) => (
                 <th
                   key={column.key}
                   scope="col"
-                  className={`px-3 py-2 font-medium ${column.numeric ? "text-right" : ""}`}
+                  className={`px-3 py-2.5 font-medium ${column.numeric ? "text-right" : ""}`}
                   aria-sort={
                     sortKey === column.key
                       ? direction === "asc"
@@ -107,17 +109,21 @@ function SourceTable({
                   <button
                     type="button"
                     onClick={() => toggle(column.key)}
-                    className="inline-flex items-center gap-1 rounded text-xs tracking-wide text-muted-foreground uppercase hover:text-foreground"
+                    className={`inline-flex items-center gap-1 rounded text-[0.6875rem] font-semibold tracking-[0.075em] uppercase transition-colors hover:text-foreground ${
+                      sortKey === column.key
+                        ? "text-[var(--brand-ink)]"
+                        : "text-muted-foreground"
+                    }`}
                   >
                     {column.label}
-                    <span aria-hidden="true" className="text-[10px]">
+                    <span aria-hidden="true" className="text-[9px]">
                       {sortKey === column.key ? (direction === "asc" ? "▲" : "▼") : ""}
                     </span>
                   </button>
                 </th>
               ))}
-              <th scope="col" className="px-3 py-2 text-right">
-                <span className="text-xs tracking-wide text-muted-foreground uppercase">
+              <th scope="col" className="px-3 py-2.5 text-right">
+                <span className="text-[0.6875rem] font-semibold tracking-[0.075em] text-muted-foreground uppercase">
                   Link
                 </span>
               </th>
@@ -125,13 +131,16 @@ function SourceTable({
           </thead>
           <tbody>
             {shown.map((item) => (
-              <tr key={`${item.kind}-${item.id}`} className="border-b last:border-b-0">
+              <tr
+                key={`${item.kind}-${item.id}`}
+                className="border-b transition-colors last:border-b-0 hover:bg-[var(--hush)]"
+              >
                 {columns.map((column) => (
                   <td
                     key={column.key}
-                    className={`px-3 py-2 align-top ${
-                      column.numeric ? "text-right tabular-nums" : ""
-                    } ${column.wide ? "max-w-[28rem] min-w-[18rem]" : "whitespace-nowrap"}`}
+                    className={`px-3 py-2.5 align-top text-[0.8125rem] leading-relaxed ${
+                      column.numeric ? "num text-right" : ""
+                    } ${column.wide ? "max-w-[28rem] min-w-[18rem]" : "whitespace-nowrap text-muted-foreground"}`}
                   >
                     {column.key === "text"
                       ? truncate(item.title || item.body, 220)
@@ -140,17 +149,19 @@ function SourceTable({
                         : String(cellValue(item, column.key))}
                   </td>
                 ))}
-                <td className="px-3 py-2 text-right align-top whitespace-nowrap">
+                <td className="px-3 py-2.5 text-right align-top whitespace-nowrap">
                   {item.url ? (
                     <a
                       href={item.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       title={`Open on Reddit: ${truncate(item.title || item.body, 80)}`}
-                      className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground"
+                      className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
                       aria-label={`Open on Reddit: ${truncate(item.title || item.body, 80)}`}
                     >
-                      <span aria-hidden="true">&nearr;</span>
+                      {/* The named entity does not resolve in JSX, so the
+                          character itself is the only reliable arrow. */}
+                      <span aria-hidden="true">{"↗"}</span>
                     </a>
                   ) : null}
                 </td>
@@ -164,12 +175,12 @@ function SourceTable({
         <button
           type="button"
           onClick={() => setVisible(visible + PAGE)}
-          className="mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-secondary"
+          className="num mt-3 h-9 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors hover:border-[var(--brand-line)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
         >
           Show {Math.min(PAGE, sorted.length - visible)} more of {sorted.length}
         </button>
       ) : (
-        <p className="mt-3 text-xs text-muted-foreground">
+        <p className="num mt-3 text-xs text-muted-foreground">
           Showing all {sorted.length} rows.
         </p>
       )}
@@ -178,27 +189,34 @@ function SourceTable({
 }
 
 export function SourceData({ bundle }: { bundle: Bundle }) {
+  const posts = bundle.posts ?? [];
+  const comments = bundle.comments ?? [];
+
   return (
     <div>
-      <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+      <p className="mb-4 text-xs leading-relaxed text-muted-foreground">
         Every post and comment the report was built from. Sort any column, open any row
         on Reddit.
       </p>
       <Tabs defaultValue="posts">
-        <TabsList>
-          <TabsTrigger value="posts">Posts ({bundle.posts.length})</TabsTrigger>
-          <TabsTrigger value="comments">Comments ({bundle.comments.length})</TabsTrigger>
+        <TabsList className="h-9 rounded-lg">
+          <TabsTrigger value="posts" className="num rounded-md px-3">
+            Posts ({posts.length})
+          </TabsTrigger>
+          <TabsTrigger value="comments" className="num rounded-md px-3">
+            Comments ({comments.length})
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="posts" className="mt-4">
           <SourceTable
-            rows={bundle.posts}
+            rows={posts}
             columns={POST_COLUMNS}
             emptyMessage="No posts were fetched for this run."
           />
         </TabsContent>
         <TabsContent value="comments" className="mt-4">
           <SourceTable
-            rows={bundle.comments}
+            rows={comments}
             columns={COMMENT_COLUMNS}
             emptyMessage="No comments were fetched for this run."
           />

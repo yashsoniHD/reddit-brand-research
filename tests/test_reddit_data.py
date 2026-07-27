@@ -74,96 +74,28 @@ class TestParseSubredditInput:
             reddit_data.parse_subreddit_input("productivity, not a name")
 
 
-class TestValidateSubreddit:
-    """`subreddit` is an exact match on this API and `subreddit_prefix` is the prefix
-    search, so validation and suggestions are two different requests."""
+class TestSafeInt:
+    """Every number in an archive record goes through this. The archive is a
+    community mirror, not a typed API, so any field can arrive as anything."""
 
-    @staticmethod
-    def _router(monkeypatch, exact=(), prefix=None):
-        prefix = prefix or {}
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (5, 5), ("5", 5), (5.9, 5), ("5.9", 5), (" 7 ", 7), (-3, -3),
+            (None, 0), ("", 0), ("bogus", 0), ([], 0), ({}, 0),
+            (True, 0), (False, 0),
+        ],
+    )
+    def test_coerces_anything_without_raising(self, raw, expected):
+        assert reddit_data._safe_int(raw) == expected
 
-        def fake_request(url, params, **kwargs):
-            if "subreddit_prefix" in params:
-                return _FakeResponse({"data": prefix.get(params["subreddit_prefix"], [])})
-            return _FakeResponse({"data": list(exact)})
-
-        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
-
-    def test_exact_match_returns_canonical_casing(self, monkeypatch):
-        self._router(monkeypatch, exact=[{"display_name": "Productivity"}])
-        check = reddit_data.validate_subreddit("productivity")
-        assert check.exists and check.name == "Productivity" and check.checked
-
-    def test_missing_community_returns_popular_prefix_suggestions(self, monkeypatch):
-        self._router(
-            monkeypatch,
-            exact=[],
-            prefix={"productivit": [
-                {"display_name": "productivity", "subreddit_type": "public"},
-                {"display_name": "productivitycafe", "subreddit_type": "public"},
-                {"display_name": "productivityapps", "subreddit_type": "public"},
-                {"display_name": "productivityextra", "subreddit_type": "public"},
-            ]},
-        )
-        check = reddit_data.validate_subreddit("productivit")
-        assert not check.exists
-        assert check.suggestions == ["productivity", "productivitycafe", "productivityapps"]
-
-    def test_falls_back_to_a_stem_when_the_typo_is_mid_word(self, monkeypatch):
-        self._router(
-            monkeypatch,
-            exact=[],
-            prefix={"skinca": [{"display_name": "SkincareAddiction", "subreddit_type": "public"}]},
-        )
-        check = reddit_data.validate_subreddit("skincareaddictoin")
-        assert check.suggestions == ["SkincareAddiction"]
-
-    def test_private_and_adult_communities_are_not_suggested(self, monkeypatch):
-        self._router(
-            monkeypatch,
-            exact=[],
-            prefix={"someth": [
-                {"display_name": "somethingPrivate", "subreddit_type": "private"},
-                {"display_name": "somethingAdult", "subreddit_type": "public", "over18": True},
-                {"display_name": "somethingFine", "subreddit_type": "public"},
-            ]},
-        )
-        assert reddit_data.validate_subreddit("somethingelse").suggestions == ["somethingFine"]
-
-    def test_empty_result_is_not_found(self, monkeypatch):
-        self._router(monkeypatch, exact=[], prefix={})
-        check = reddit_data.validate_subreddit("nosuchsubredditxyz")
-        assert not check.exists and check.suggestions == []
-
-    def test_near_miss_results_do_not_count_as_an_exact_match(self, monkeypatch):
-        self._router(monkeypatch, exact=[{"display_name": "productivitycafe"}], prefix={})
-        assert not reddit_data.validate_subreddit("productivity").exists
-
-    def test_lookup_failure_fails_open(self, monkeypatch):
-        def explode(*args, **kwargs):
-            raise reddit_data.requests.ConnectionError("down")
-
-        monkeypatch.setattr(reddit_data, "_request_page", explode)
-        check = reddit_data.validate_subreddit("productivity")
-        assert check.exists and not check.checked
-
-    def test_suggestion_lookup_failure_still_reports_not_found(self, monkeypatch):
-        calls = {"n": 0}
-
-        def fake_request(url, params, **kwargs):
-            calls["n"] += 1
-            if "subreddit_prefix" in params:
-                raise reddit_data.requests.ConnectionError("down")
-            return _FakeResponse({"data": []})
-
-        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
-        check = reddit_data.validate_subreddit("something")
-        assert not check.exists and check.suggestions == [] and check.checked
+    def test_honours_a_custom_default(self):
+        assert reddit_data._safe_int("nope", default=-1) == -1
 
 
 class TestLookupSubreddit:
-    """Unlike `validate_subreddit`, this must tell "does not exist" apart from
-    "could not check" — discovery treats those two cases very differently."""
+    """This has to tell "does not exist" apart from "could not check": discovery
+    treats those two cases very differently."""
 
     @staticmethod
     def _router(monkeypatch, exact=()):
@@ -259,6 +191,64 @@ class TestFetchPosts:
         with pytest.raises(RuntimeError):
             reddit_data.fetch_posts("x", 7)
 
+    def test_stringly_typed_numbers_do_not_break_a_fetch(self, monkeypatch):
+        page = {
+            "data": [
+                {"id": "a", "title": "Real post", "selftext": "body", "score": "12",
+                 "num_comments": None, "permalink": "/r/x/comments/a/",
+                 "created_utc": "1700000000", "subreddit": "x"},
+                {"id": "b", "title": "Second", "selftext": "body", "score": {},
+                 "num_comments": 3.7, "permalink": "/r/x/comments/b/",
+                 "created_utc": "bogus", "subreddit": "x"},
+            ]
+        }
+        monkeypatch.setattr(reddit_data, "_request_page", lambda *a, **k: _FakeResponse(page))
+        posts = reddit_data.fetch_posts("x", 7)
+        assert posts[0]["score"] == 12 and posts[0]["comments"] == 0
+        assert posts[0]["created_utc"] == 1700000000
+        assert posts[1]["score"] == 0 and posts[1]["comments"] == 3
+        assert posts[1]["created_utc"] == 0 and posts[1]["date"] == ""
+
+    def test_a_deadline_already_past_stops_after_the_first_page(self, monkeypatch):
+        calls = {"n": 0}
+        page = {
+            "data": [
+                {"id": "p{}".format(i), "title": "Post {}".format(i), "selftext": "body",
+                 "permalink": "/r/x/comments/p{}/".format(i),
+                 "created_utc": 1700000000 + i, "subreddit": "x"}
+                for i in range(reddit_data.PAGE_SIZE)
+            ]
+        }
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse(page)
+
+        monkeypatch.setattr(reddit_data, "_request_page", counting)
+        posts = reddit_data.fetch_posts("x", 7, deadline=reddit_data.time.monotonic() - 1)
+        # The first page still runs: an empty result is worse than a partial one.
+        assert calls["n"] == 1
+        assert len(posts) == reddit_data.PAGE_SIZE
+
+    def test_a_generous_deadline_pages_normally(self, monkeypatch):
+        calls = {"n": 0}
+        page = {
+            "data": [
+                {"id": "p{}".format(i), "title": "Post {}".format(i), "selftext": "body",
+                 "permalink": "/r/x/comments/p{}/".format(i),
+                 "created_utc": 1700000000 + i, "subreddit": "x"}
+                for i in range(reddit_data.PAGE_SIZE)
+            ]
+        }
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse(page)
+
+        monkeypatch.setattr(reddit_data, "_request_page", counting)
+        reddit_data.fetch_posts("x", 7, deadline=reddit_data.time.monotonic() + 3600)
+        assert calls["n"] == reddit_data.MAX_POST_PAGES
+
 
 class TestFetchComments:
     def test_skips_deleted_and_returns_newest_first(self, monkeypatch):
@@ -283,6 +273,22 @@ class TestFetchComments:
 
         monkeypatch.setattr(reddit_data, "_request_page", explode)
         assert reddit_data.fetch_comments("x", 7) == []
+
+    def test_a_comment_with_no_id_is_identified_by_its_permalink(self, monkeypatch):
+        # An empty id used to be stored verbatim, so every id-less comment shared one
+        # identity: one relevance rating, applied to all of them.
+        page = {
+            "data": [
+                {"body": "first", "permalink": "/r/x/comments/p/c1/",
+                 "created_utc": 1700000000, "subreddit": "x"},
+                {"body": "second", "permalink": "/r/x/comments/p/c2/",
+                 "created_utc": 1700000001, "subreddit": "x"},
+            ]
+        }
+        monkeypatch.setattr(reddit_data, "_request_page", lambda *a, **k: _FakeResponse(page))
+        comments = reddit_data.fetch_comments("x", 7)
+        ids = [comment["id"] for comment in comments]
+        assert all(ids) and len(set(ids)) == 2
 
     def test_respects_the_limit(self, monkeypatch):
         page = {

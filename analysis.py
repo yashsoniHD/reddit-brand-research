@@ -70,7 +70,6 @@ TRIAGE_BUDGET_SHARE = 0.10
 CLASSIFY_BUDGET_SHARE = 0.50
 SYNTHESIS_BUDGET_SHARE = 0.40
 CHARS_PER_TOKEN = 4
-_token_limit: Optional[int] = None
 
 # ── Sample shaping ────────────────────────────────────────────────────────────
 MAX_POSTS_ANALYSED = 150
@@ -93,11 +92,46 @@ MIN_TOPICS = 4
 MAX_TOPICS = 6
 MAX_PAIN_POINTS = 5
 MAX_QUESTIONS = 5
-MIN_CONTENT_IDEAS = 8
-MAX_CONTENT_IDEAS = 12
+# A claim shorter than this is a category, not a finding: "Pricing", "Tools",
+# "Time". The report is worth reading only when every line says something.
+MIN_CLAIM_CHARS = 25
+# The ideas are the product, so the run asks for as many as the budget allows.
+# Arithmetic, in the style of _classification_output_tokens: a pretty-printed idea
+# object (six string fields, one small index array) measures around 250 output
+# tokens, so 15 ideas cost ~3,750. Add the rest of the payload (6 topic findings at
+# ~80, 5 pain points and 5 questions at ~60, a summary at ~120, a title at ~20) for
+# roughly 5,000 output tokens against SYNTHESIS_MAX_TOKENS of 24,000, which leaves
+# about 19,000 for reasoning. Unused output reservation is free, so 15 is safe.
+MIN_CONTENT_IDEAS = 12
+MAX_CONTENT_IDEAS = 15
+# What the sanitiser will accept back, as opposed to what the prompt asks for. A
+# model that returns 16 usable ideas should not have four thrown away.
+SANITIZE_MAX_CONTENT_IDEAS = 20
+SANITIZE_MIN_CONTENT_IDEAS = 8
+# A report title has to fit a heading and a browser tab.
+MAX_REPORT_TITLE_CHARS = 70
+FALLBACK_TITLE_CHARS = 60
 # A hook is the first line of a post or script: past ~120 characters it stops being
 # a hook and starts being the post.
 MAX_HOOK_CHARS = 120
+# Two ideas whose hooks open on the same 40 characters read as one idea printed
+# twice, however differently they finish. The prompt bans it; this is what
+# enforces it when the model does it anyway.
+HOOK_STEM_CHARS = 40
+# A run of the user's own self-description, repeated verbatim inside a hook, is
+# the model reading the brief back rather than quoting the community. Both
+# thresholds have to be met, so a hook and a profile that happen to share one
+# long word or one short phrase are left alone: the point is to catch
+# "I run a Notion template shop for freelance designers." as an opening line,
+# not to police vocabulary.
+PROFILE_ECHO_MIN_CHARS = 12
+PROFILE_ECHO_MIN_WORDS = 3
+# The other half of the same guard. A word the user capitalised in the middle of
+# their own sentence is a name: their brand, their product, or the tool they sell
+# around. Those are exactly the words that must never turn up inside a hook, and
+# a live run put "My Notion template ... keeps me sane" in one. Sentence-initial
+# words are ignored, because a capital there means nothing.
+BRAND_TOKEN_MIN_CHARS = 4
 LOW_DATA_THRESHOLD = 10
 
 # ── Selection tuning ──────────────────────────────────────────────────────────
@@ -109,6 +143,10 @@ RECENCY_HALF_LIFE_DAYS = 8
 # 0 gates an item out of the main tier entirely; 1 keeps the maybe-relevant
 # majority competitive without letting it beat a clearly on-topic item.
 RELEVANCE_WEIGHTS = {2: 1.0, 1: 0.55, 0: 0.0}
+# An item the triage never saw is not the same as one the model looked at and
+# called adjacent. It sits in its own tier below every rated item, because an
+# unrated item beside a rated-1 item silently claims a judgement nobody made.
+UNTRIAGED_WEIGHT = 0.35
 # A zero-engagement item is quiet, not worthless: without a floor, a brand-new
 # on-topic post scores 0 and loses to any off-window viral one.
 ENGAGEMENT_FLOOR = 0.25
@@ -119,10 +157,25 @@ FAIRNESS_SHARE = 0.5
 # this short cannot carry the idea on its own either.
 SUBSTANCE_MIN_BODY_CHARS = 15
 SUBSTANCE_MIN_TITLE_CHARS = 40
+# How much of the fetched pool the triage call covers. A full run can fetch up to
+# 500 posts and 300 comments per community across 4 communities, so covering the
+# whole pool would mean roughly 27 sequential model calls and several minutes of
+# latency, which no serverless request budget survives. So the pool is capped at
+# its strongest candidates by base score, and everything the triage never saw
+# ranks in its own UNTRIAGED_WEIGHT tier rather than being quietly treated as if a
+# model had rated it 1.
 TRIAGE_MAX_POSTS = 400
 TRIAGE_MAX_COMMENTS = 400
-TRIAGE_PREVIEW_CHARS = 100
-TRIAGE_BATCH_SIZE = 250
+# 100 characters is a headline and half a sentence, which is not enough text to
+# judge relevance on; 300 reaches the point of most Reddit posts. The batch size
+# comes down to match so a batch still fits TRIAGE_BUDGET_SHARE of the budget.
+TRIAGE_PREVIEW_CHARS = 300
+TRIAGE_BATCH_SIZE = 120
+# Measured the same way as _classification_output_tokens: Gemini pretty-prints, so
+# each {"i": n, "r": n} costs four indented lines, and the sibling classification
+# call measures 45 tokens per labelled item. The earlier figure of 30 was carried
+# over from nothing in particular.
+TRIAGE_OUTPUT_TOKENS_PER_ITEM = 45
 TRIAGE_MAX_TOKENS = 12000
 
 # ── Formats ───────────────────────────────────────────────────────────────────
@@ -131,6 +184,39 @@ TRIAGE_MAX_TOKENS = 12000
 # keeps ideas publishable: left to itself the model returns "Blog post" and
 # "Newsletter", which nobody can publish as written.
 IDEA_FORMATS = ("Text post", "Carousel (PDF)", "Poll", "Long-form article", "Video script")
+# When the user picks content types, every idea comes back in one of those formats.
+# These keys are the wire values pipeline.validate_inputs accepts.
+CONTENT_TYPE_FORMATS = {
+    "text": "Text post",
+    "carousel": "Carousel (PDF)",
+    "video": "Video script",
+    "poll": "Poll",
+    "article": "Long-form article",
+}
+# Both spellings of every format the user can ask for, so an idea the model
+# labelled "carousel" is recognised as the "Carousel (PDF)" that was requested
+# rather than coerced away from the format it already has.
+_FORMAT_ALIASES = {}
+for _key, _label in CONTENT_TYPE_FORMATS.items():
+    _FORMAT_ALIASES[_key] = _label
+    _FORMAT_ALIASES[_label.lower()] = _label
+
+
+def chosen_formats(content_types: Optional[Sequence[str]]) -> List[str]:
+    """The idea-format labels behind a content-type selection, in menu order.
+
+    Unknown values are dropped rather than refused: validation is the input
+    layer's job, and an unrecognised type here should leave the ideas alone
+    instead of pinning them to something nobody asked for.
+    """
+    wanted = {
+        str(value).strip().lower()
+        for value in (content_types or [])
+        if str(value).strip()
+    }
+    return [
+        label for key, label in CONTENT_TYPE_FORMATS.items() if key in wanted
+    ]
 
 # ── Draft posts ───────────────────────────────────────────────────────────────
 # Long enough to say something, short enough to survive the feed's "see more" fold.
@@ -140,7 +226,48 @@ DRAFT_MAX_HASHTAGS = 3
 # Enough evidence to give the post real substance, capped because the draft should
 # read as one person's point of view, not a literature review.
 DRAFT_MAX_EVIDENCE = 6
-DRAFT_EVIDENCE_CHARS = 400
+# Matches the citation excerpts the report now carries, so a draft sees the whole
+# excerpt it was given rather than the first two thirds of it.
+DRAFT_EVIDENCE_CHARS = 600
+# A carousel, a script and an article are not the same artefact as a text post, so
+# the draft call writes each one in its own shape and to its own length.
+DRAFT_FORMAT_RULES = {
+    "Carousel (PDF)": (
+        "Write this as slide-by-slide carousel copy. Start every slide on its own "
+        'line with "Slide 1:", "Slide 2:" and so on, 6 to 9 slides in total. Slide 1 '
+        "is the hook and nothing else. Each middle slide carries one idea in at most "
+        "25 words. The last slide asks for a reply."
+    ),
+    "Video script": (
+        "Write this as a short video script. Open with the hook as spoken words, then "
+        'label each beat on its own line ("Beat 1:", "Beat 2:" and so on), 4 to 6 '
+        "beats. Write what is said, not camera directions. End on a spoken question."
+    ),
+    "Long-form article": (
+        "Write this as a structured long-form article. Open with the hook, then 4 to 6 "
+        "short sections, each introduced by a plain one-line heading with no markdown "
+        "or numbering. Close with a short section that invites a reply."
+    ),
+    "Poll": (
+        "Write this as a poll post: open with the hook, then two or three sentences of "
+        "context, then the poll question on its own line, then two to four options, each "
+        'on its own line prefixed with "Option:". Close with one line asking people to '
+        "vote and to say in the comments why they chose what they chose."
+    ),
+    "Text post": (
+        "Write this as a plain feed post: short paragraphs of one to three sentences, "
+        "separated by a blank line, because a wall of text does not get read."
+    ),
+}
+# (minimum, maximum) words per format. A carousel and a script are counted in
+# slides and beats, so their word bands are wider than a single text post's.
+DRAFT_FORMAT_WORDS = {
+    "Carousel (PDF)": (110, 260),
+    "Video script": (150, 300),
+    "Long-form article": (350, 650),
+    "Poll": (80, 180),
+    "Text post": (DRAFT_MIN_WORDS, DRAFT_MAX_WORDS),
+}
 # Thinking stays on for drafting, so this covers the model's reasoning as well as a
 # 220-word post.
 DRAFT_MAX_TOKENS = 8000
@@ -166,8 +293,17 @@ _API_DISABLED = (
 _INCOMPLETE = "The analysis came back incomplete. Please retry."
 _UNAVAILABLE = "The analysis service is temporarily unavailable. Please try again in a moment."
 _DRAFT_FAILED = "We could not draft that post. Please try again."
+# A safety block is a property of the text we sent, not a flaky call, so retrying
+# it three times spends 90 seconds arriving at the same refusal.
+_CONTENT_BLOCKED = (
+    "Some of the discussion in these communities could not be analysed. Try "
+    "different communities."
+)
 
 _MARKDOWN_LINK_PATTERN = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+# Paired markdown emphasis only. A lone asterisk is far more likely to be "$5 * 3"
+# than a formatting slip, and stripping those would corrupt real content.
+_EMPHASIS_PATTERN = re.compile(r"(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1")
 # Em (U+2014) and en (U+2013) dashes, written as escapes so this file stays free of
 # the characters it exists to remove. A spaced dash reads as a clause break, so a
 # comma keeps the sentence running; a tight one is usually a range or a compound
@@ -179,6 +315,17 @@ _QUOTA_PATTERN = re.compile(
 )
 _RESET_HINT_PATTERN = re.compile(r"try again in\s+((?:\d+h)?(?:\d+m)?(?:[\d.]+s)?)", re.IGNORECASE)
 _TRAILING_COMMA_PATTERN = re.compile(r",\s*([}\]])")
+# Nothing legitimate in a hook, a finding or a topic label contains a link, and a
+# model echoing one out of a Reddit body is how a report ends up advertising
+# somebody else's site. Full URLs go first, then bare domains, matched against a
+# TLD list so "Node.js", "v3.5" and "i.e." survive untouched.
+_BARE_URL_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_BARE_DOMAIN_PATTERN = re.compile(
+    r"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
+    r"\.(?:com|net|org|io|co|ai|dev|app|so|xyz|me|us|uk|edu|gov|info|blog|shop|store|news)"
+    r"\b(?:/\S*)?",
+    re.IGNORECASE,
+)
 _client = None
 
 
@@ -209,18 +356,16 @@ def estimate_tokens(text: str) -> int:
 
 
 def token_budget() -> int:
-    """Usable tokens per request, after the refit ladder has had any say."""
-    return int((_token_limit or DEFAULT_TOKEN_BUDGET) * BUDGET_SAFETY)
+    """Usable tokens per request.
 
-
-def ensure_token_limit() -> int:
-    """Kept as a no-op stub so callers written against the old provider still work.
-
-    Groq published a per-key token ceiling that was worth probing for before sizing a
-    sample. Vertex does not, so there is nothing to learn and nothing to spend a
-    round trip on; the configured budget is the answer.
+    A single value for the whole process. When one run's prompt is rejected as too
+    large, that run shaves its own copy of this number and refits (see
+    classify_sample); it does not shrink the budget for every other run in the
+    worker, which is what a module-level "learned limit" used to do. Two concurrent
+    reports would race on it, and one oversized sample would permanently shrink
+    every later report in the same process.
     """
-    return _token_limit or DEFAULT_TOKEN_BUDGET
+    return int(DEFAULT_TOKEN_BUDGET * BUDGET_SAFETY)
 
 
 def _retry_wait_seconds(exc: Exception, attempt: int) -> float:
@@ -381,6 +526,32 @@ def _finish_reason(response: Any) -> str:
     return str(getattr(candidates[0], "finish_reason", "") or "UNKNOWN")
 
 
+_BLOCKING_FINISH_REASONS = ("SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "SPII")
+
+
+def _block_reason(response: Any, finish: str) -> str:
+    """Why a content filter stopped this call, or "" when nothing did.
+
+    Two places carry it. `finish_reason` covers a candidate the filter killed after
+    generation started, and `prompt_feedback.block_reason` covers a prompt the
+    filter refused before it started. Either way the model will refuse the same text
+    on every attempt, so this is the one failure in this function that must not be
+    retried: three attempts spend a minute reaching the same answer, and the user
+    ends up reading "temporarily unavailable" about something permanent.
+    """
+    for marker in _BLOCKING_FINISH_REASONS:
+        if marker in finish.upper():
+            return marker
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback is None:
+        return ""
+    reason = str(getattr(feedback, "block_reason", "") or "").strip()
+    # The SDK reports "BLOCK_REASON_UNSPECIFIED" for a prompt nothing blocked.
+    if not reason or reason.upper().endswith("UNSPECIFIED") or reason == "0":
+        return ""
+    return reason
+
+
 def _response_text(response: Any, label: str, finish: str) -> str:
     """The model's text, or an empty string when the call produced nothing usable.
 
@@ -476,6 +647,10 @@ def _chat_json(
                 logger.warning("%s transient API error (attempt %s): %s", label, attempt + 1, exc)
         else:
             finish = _finish_reason(response)
+            blocked = _block_reason(response, finish)
+            if blocked:
+                logger.error("%s was stopped by a content filter (%s)", label, blocked)
+                raise ValueError(_CONTENT_BLOCKED)
             content = _response_text(response, label, finish)
             parsed = _parse_json_object(content)
             if parsed is not None:
@@ -542,8 +717,6 @@ def quota_message(exc: Exception) -> Optional[str]:
 # relevance rating fed in from rate_relevance, and even that arrives as plain
 # integers the code is free to distrust.
 
-_BARE_URL_PATTERN = re.compile(r"https?://\S+")
-
 
 def _engagement_raw(item: dict) -> float:
     """Log-damped engagement, so 4000 upvotes beats 400 without drowning it."""
@@ -601,76 +774,104 @@ def _base_scores(items: Sequence[dict], now: float) -> List[float]:
     return scores
 
 
-def _fair_order(scored: List[Tuple[float, dict]]) -> List[dict]:
-    """Order best-first so that every prefix respects the fairness cap.
+def _fair_order(*tiers: Sequence[Tuple[float, dict]]) -> List[dict]:
+    """Order best-first so that every prefix of the whole result respects the cap.
 
     Greedy: always take the best-scored head of a community that is still under
     the cap for the next prefix; when every community with items left is capped
     (only possible when one community is all that remains), take the best anyway.
     Prefix safety is the point: fit_sample slices this list at whatever rung the
     token budget allows, and the slice has to be as fair as the whole.
-    """
-    queues: Dict[str, List[Tuple[float, int, dict]]] = {}
-    for position, (score, item) in enumerate(scored):
-        subreddit = str((item or {}).get("subreddit") or "")
-        # position keeps the sort stable and fully deterministic on ties.
-        queues.setdefault(subreddit, []).append((score, position, item))
-    for queue in queues.values():
-        queue.sort(key=lambda entry: (-entry[0], entry[1]))
-        queue.reverse()  # pop() from the end is the best remaining
 
+    Tiers are emitted in order (no item from a later tier ever outranks one from an
+    earlier tier) but the cap and the running counts are SHARED across all of them.
+    Ordering each tier separately and concatenating breaks the guarantee at the
+    seam: a community that filled the whole eligible tier starts the backfill tier
+    with a count of zero and can take the next several slots unopposed.
+    """
     picked: List[dict] = []
     counts: Dict[str, int] = {}
-    while any(queues.values()):
-        cap = max(1, math.ceil(FAIRNESS_SHARE * (len(picked) + 1)))
-        heads = [
-            (queue[-1][0], queue[-1][1], subreddit)
-            for subreddit, queue in queues.items()
-            if queue
-        ]
-        allowed = [head for head in heads if counts.get(head[2], 0) < cap]
-        score, position, subreddit = max(
-            allowed or heads, key=lambda head: (head[0], -head[1])
-        )
-        picked.append(queues[subreddit].pop()[2])
-        counts[subreddit] = counts.get(subreddit, 0) + 1
+
+    for tier in tiers:
+        queues: Dict[str, List[Tuple[float, int, dict]]] = {}
+        for position, (score, item) in enumerate(tier):
+            subreddit = str((item or {}).get("subreddit") or "")
+            # position keeps the sort stable and fully deterministic on ties.
+            queues.setdefault(subreddit, []).append((score, position, item))
+        for queue in queues.values():
+            queue.sort(key=lambda entry: (-entry[0], entry[1]))
+            queue.reverse()  # pop() from the end is the best remaining
+
+        while any(queues.values()):
+            cap = max(1, math.ceil(FAIRNESS_SHARE * (len(picked) + 1)))
+            heads = [
+                (queue[-1][0], queue[-1][1], subreddit)
+                for subreddit, queue in queues.items()
+                if queue
+            ]
+            allowed = [head for head in heads if counts.get(head[2], 0) < cap]
+            score, position, subreddit = max(
+                allowed or heads, key=lambda head: (head[0], -head[1])
+            )
+            picked.append(queues[subreddit].pop()[2])
+            counts[subreddit] = counts.get(subreddit, 0) + 1
     return picked
+
+
+def relevance_key(kind: str, item: dict, position: int) -> Tuple[str, str]:
+    """Namespaced identity for one item's relevance rating.
+
+    A post and a comment can carry the same raw id (they live in different
+    namespaces on Reddit and the archive does not disambiguate them), and the
+    archive sometimes gives us an item with neither an id nor a permalink, which
+    collapses every such item onto the empty-string key. Both cases hand one item's
+    rating to a different item. The kind plus the item's position in its own pool
+    is unique in a way the raw id is not.
+    """
+    ident = str((item or {}).get("id") or "").strip()
+    kind = "comment" if kind == "comment" else "post"
+    return (kind, ident or "#{}".format(position))
 
 
 def rank_items(
     posts: Sequence[dict],
     comments: Sequence[dict],
-    relevance: Optional[Dict[str, int]] = None,
+    relevance: Optional[Dict[Tuple[str, str], int]] = None,
     now: Optional[float] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Fully order both pools, best candidates first.
 
-    `relevance` maps item id -> 0..2 from the triage call; items it does not
-    cover count as 1 (maybe relevant), so a failed or partial triage degrades
-    the ranking instead of the run. Items rated 0, and posts with no substance,
-    drop to a backfill tier below everything eligible: still available when a
-    quiet topic needs them, never ahead of anything actually on-topic.
+    `relevance` maps relevance_key(kind, item, position) -> 0..2 from the triage
+    call. Items it does not cover are untriaged and rank in their own tier below
+    every rated item (UNTRIAGED_WEIGHT), so a partial triage degrades the ranking
+    instead of quietly promoting unrated items to the same footing as ones a model
+    actually looked at and called adjacent. Items rated 0, and posts with no
+    substance, drop to a backfill tier below everything eligible: still available
+    when a quiet topic needs them, never ahead of anything actually on-topic.
     """
     relevance = relevance or {}
     timestamp = time.time() if now is None else now
 
-    def ordered(items: Sequence[dict], substance_check: bool) -> List[dict]:
+    def ordered(items: Sequence[dict], kind: str, substance_check: bool) -> List[dict]:
         items = [item for item in items if isinstance(item, dict)]
         base = _base_scores(items, timestamp)
         eligible: List[Tuple[float, dict]] = []
         backfill: List[Tuple[float, dict]] = []
-        for item, score in zip(items, base):
-            rating = relevance.get(str(item.get("id") or ""), 1)
-            weight = RELEVANCE_WEIGHTS.get(rating, RELEVANCE_WEIGHTS[1])
+        for position, (item, score) in enumerate(zip(items, base)):
+            rating = relevance.get(relevance_key(kind, item, position))
+            if rating is None:
+                weight = UNTRIAGED_WEIGHT
+            else:
+                weight = RELEVANCE_WEIGHTS.get(rating, RELEVANCE_WEIGHTS[1])
             if weight <= 0 or (substance_check and not _has_substance(item)):
                 # Ranked by base score alone: relevance said no, so it no longer
                 # gets a say in how the leftovers are ordered.
                 backfill.append((score, item))
             else:
                 eligible.append((weight * score, item))
-        return _fair_order(eligible) + _fair_order(backfill)
+        return _fair_order(eligible, backfill)
 
-    return ordered(posts, True), ordered(comments, False)
+    return ordered(posts, "post", True), ordered(comments, "comment", False)
 
 
 # ── Selection: relevance triage ───────────────────────────────────────────────
@@ -715,7 +916,25 @@ def _triage_prompt(items: Sequence[dict], query: str, profile: str, start: int) 
 def _triage_output_tokens(n_items: int) -> int:
     """Room for one pretty-printed {"i", "r"} object per item, padded the same
     way as _classification_output_tokens and for the same reason."""
-    return min(TRIAGE_MAX_TOKENS, 30 * max(1, n_items) + 300)
+    return min(TRIAGE_MAX_TOKENS, TRIAGE_OUTPUT_TOKENS_PER_ITEM * max(1, n_items) + 300)
+
+
+def _triage_batch_size(query: str, profile: str) -> int:
+    """Items per triage call, sized so one call fits its share of the budget.
+
+    TRIAGE_BUDGET_SHARE existed as a constant nobody consulted, which is how a
+    preview-length change can silently push a batch past what the request will
+    take. The arithmetic: each listed item costs its preview plus its numbering
+    and kind tag, and reserves TRIAGE_OUTPUT_TOKENS_PER_ITEM for the rating that
+    comes back. Whatever is left of the share after the fixed instructions decides
+    how many items fit, capped at TRIAGE_BATCH_SIZE so a huge budget does not
+    produce one enormous call.
+    """
+    allowance = int(token_budget() * TRIAGE_BUDGET_SHARE)
+    overhead = estimate_tokens(_triage_prompt([], query, profile, 1)) + 100
+    per_item = TRIAGE_PREVIEW_CHARS // CHARS_PER_TOKEN + 8 + TRIAGE_OUTPUT_TOKENS_PER_ITEM
+    fits = (allowance - overhead) // max(1, per_item)
+    return max(1, min(TRIAGE_BATCH_SIZE, int(fits)))
 
 
 def _sanitize_ratings(raw: dict, batch_size: int, start: int) -> Dict[int, int]:
@@ -764,9 +983,10 @@ def rate_relevance(
     ratings: Dict[int, int] = {}
     batches = 0
     failures = 0
+    batch_size = _triage_batch_size(query, profile)
 
-    for offset in range(0, len(items), TRIAGE_BATCH_SIZE):
-        batch = items[offset : offset + TRIAGE_BATCH_SIZE]
+    for offset in range(0, len(items), batch_size):
+        batch = items[offset : offset + batch_size]
         start = offset + 1
         batches += 1
         try:
@@ -891,7 +1111,13 @@ def strip_markdown(value: Any) -> str:
     """Flatten model text so it cannot inject images or links into the report.
 
     An LLM summarising Reddit will happily echo `![](http://…)` from a post body;
-    rendered unescaped in Streamlit that becomes remote content in our UI.
+    rendered unescaped that becomes remote content in our UI. Bare URLs and bare
+    domains go the same way: nothing legitimate in a hook, a finding or a topic
+    label contains a link, so anything that looks like one was lifted out of a
+    Reddit post and is not ours to republish.
+
+    Emphasis markers go too. `**bold**` renders as literal asterisks in a report
+    that does not parse markdown, and as unexpected formatting in one that does.
 
     Em and en dashes are normalised out here too. The prompts forbid them, but a
     prompt rule is a request and this is the enforcement: every string the model
@@ -900,6 +1126,11 @@ def strip_markdown(value: Any) -> str:
     """
     text = "" if value is None else str(value)
     text = _MARKDOWN_LINK_PATTERN.sub(r"\1", text)
+    text = _BARE_URL_PATTERN.sub("", text)
+    text = _BARE_DOMAIN_PATTERN.sub("", text)
+    # Twice, so "**bold _and_ italic**" loses both layers.
+    for _ in range(2):
+        text = _EMPHASIS_PATTERN.sub(r"\2", text)
     text = _SPACED_DASH_PATTERN.sub(", ", text)
     text = _BARE_DASH_PATTERN.sub("-", text)
     return " ".join(text.split()).strip()
@@ -940,6 +1171,13 @@ def sanitize_classification(raw: Any, n_items: int) -> dict:
             continue
         topic_id = topic.get("id")
         topic_id = topic_id if isinstance(topic_id, int) and not isinstance(topic_id, bool) else position
+        if topic_id == 0:
+            # 0 is the prompt's "this item fits no topic" sentinel. A topic that
+            # claims it would collect every unassigned item in the sample, so the
+            # topic is dropped rather than renumbered: renumbering it onto a free id
+            # would hand it the sentinel's items anyway.
+            logger.info("classification proposed a topic with the reserved id 0; dropped")
+            continue
         if topic_id in declared_indices:
             continue
         declared_indices[topic_id] = _valid_indices(topic.get("item_indices"), n_items)
@@ -989,18 +1227,48 @@ def sanitize_classification(raw: Any, n_items: int) -> dict:
     return {"topics": resolved, "item_sentiments": sentiments}
 
 
-def _sanitize_claims(raw: Any, n_items: int, cap: int) -> List[dict]:
+_CLAIM_NOISE_PATTERN = re.compile(r"[^a-z0-9 ]+")
+
+
+def _claim_fingerprint(text: str) -> str:
+    """What two claims have to share to count as the same claim.
+
+    Case, punctuation and a trailing question mark are all the difference between
+    the pain point "people cannot price retainers" and the question "People cannot
+    price retainers?", which the model returns in both lists often enough that a
+    report ships the same sentence twice under two headings.
+    """
+    return " ".join(_CLAIM_NOISE_PATTERN.sub(" ", text.lower()).split())
+
+
+def _sanitize_claims(
+    raw: Any, n_items: int, cap: int, seen: Optional[set] = None
+) -> List[dict]:
+    """Coerce a claim list, dropping anything too thin or already said.
+
+    `seen` is a fingerprint set the caller owns, so questions can be deduped
+    against the pain points that were sanitised before them.
+    """
     claims = []
+    fingerprints = seen if seen is not None else set()
     for entry in raw or []:
         if isinstance(entry, str):
             entry = {"text": entry, "item_indices": []}
         if not isinstance(entry, dict):
             continue
         text = strip_markdown(entry.get("text"))
-        if not text:
+        if len(text) < MIN_CLAIM_CHARS:
+            # "Pricing" is a category, not a finding. A claim this short cannot
+            # carry evidence and reads as filler next to the ones that can.
             continue
+        fingerprint = _claim_fingerprint(text)
+        if not fingerprint or fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
         claims.append({"text": text, "item_indices": _valid_indices(entry.get("item_indices"), n_items)})
-    return claims[:cap]
+        if len(claims) >= cap:
+            break
+    return claims
 
 
 def _match_topic_descriptions(raw_entries: Any, topics: Sequence[dict]) -> dict:
@@ -1049,38 +1317,198 @@ def _match_topic_descriptions(raw_entries: Any, topics: Sequence[dict]) -> dict:
     return descriptions
 
 
-def sanitize_synthesis(raw: Any, n_items: int, topics: Sequence[dict] = ()) -> dict:
-    """Coerce call 2's output; drop anything that cannot be rendered honestly."""
+def _trim_to_words(text: str, limit: int) -> str:
+    """Cut to at most `limit` characters without leaving half a word behind."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,.;:-")
+
+
+_HOOK_NOISE_PATTERN = re.compile(r"[^a-z0-9]+")
+
+
+def _hook_words(text: Any) -> List[str]:
+    """A hook flattened to bare lowercase words, so punctuation and casing
+    cannot hide a repeat."""
+    return [word for word in _HOOK_NOISE_PATTERN.sub(" ", str(text or "").lower()).split() if word]
+
+
+def _hook_stem(hook: str) -> str:
+    """The opening of a hook, flattened, for spotting two ideas that start the same."""
+    return " ".join(_hook_words(hook))[:HOOK_STEM_CHARS]
+
+
+def _echoes(hook: str, source: str) -> bool:
+    """True when `hook` repeats a long verbatim run of words from `source`.
+
+    Used against the user's profile only. The query is deliberately left out:
+    the words of the question are the subject everybody in the sample is
+    talking about, so a good hook about scope creep will legitimately contain
+    "scope creep", and rejecting that would cost more ideas than it saved. The
+    profile is a different case, because nothing a Redditor said can contain
+    the user's own description of their business.
+    """
+    words = _hook_words(hook)
+    source_text = " {} ".format(" ".join(_hook_words(source)))
+    if len(words) < PROFILE_ECHO_MIN_WORDS or not source_text.strip():
+        return False
+    for start in range(len(words)):
+        # Longest run first, and stop as soon as the runs get too short to
+        # count, because everything after that point is shorter still.
+        for end in range(len(words), start + PROFILE_ECHO_MIN_WORDS - 1, -1):
+            run = " ".join(words[start:end])
+            if len(run) < PROFILE_ECHO_MIN_CHARS:
+                break
+            if " {} ".format(run) in source_text:
+                return True
+    return False
+
+
+_SENTENCE_END_PATTERN = re.compile(r"[.!?:;]$")
+
+
+def brand_tokens(profile: str) -> set:
+    """Names the user gave for themselves: their brand, product or tool.
+
+    A word they capitalised mid-sentence is a name, and nothing else in an
+    ordinary sentence is. The first word of each sentence is skipped because a
+    capital there carries no information, and short words are skipped because
+    an initialism of two or three letters collides with too much ordinary text.
+
+    Deliberately narrow, at the cost of missing a brand that only ever appears
+    as the first word of a sentence ("Ledgerly is bookkeeping software."). The
+    prompt is the primary defence here; this is the backstop for the shape a
+    profile usually takes, and a backstop that started deleting good ideas
+    because somebody wrote a capital letter would be worse than the gap.
+    """
+    tokens = set()
+    previous_ends_sentence = True
+    for raw in str(profile or "").split():
+        word = raw.strip("\"'()[[],")
+        stripped = word.rstrip(".,!?:;")
+        starts_sentence = previous_ends_sentence
+        previous_ends_sentence = bool(_SENTENCE_END_PATTERN.search(word))
+        if starts_sentence:
+            continue
+        if len(stripped) < BRAND_TOKEN_MIN_CHARS or not stripped[:1].isupper():
+            continue
+        if not stripped.replace("-", "").isalnum():
+            continue
+        tokens.add(stripped.lower())
+    return tokens
+
+
+def report_title_from_query(query: str) -> str:
+    """The title a report falls back to when the model does not supply a usable one."""
+    text = strip_markdown(query)
+    if not text:
+        return "Content ideas from Reddit"
+    return _trim_to_words(text, FALLBACK_TITLE_CHARS)
+
+
+def sanitize_synthesis(
+    raw: Any,
+    n_items: int,
+    topics: Sequence[dict] = (),
+    query: str = "",
+    content_types: Optional[Sequence[str]] = None,
+    profile: str = "",
+) -> dict:
+    """Coerce call 2's output; drop anything that cannot be rendered honestly.
+
+    Two of those drops are about hooks specifically, because the hook is the
+    part a user publishes verbatim. An idea whose hook opens on the same forty
+    characters as an earlier one is the same idea twice, and an idea whose hook
+    repeats the user's own description of themselves is the brief read back as
+    if a stranger had said it. Both are banned in the prompt; this is the
+    backstop for when the model does it anyway.
+    """
     raw = raw if isinstance(raw, dict) else {}
     descriptions = _match_topic_descriptions(raw.get("topic_descriptions"), topics)
+    # When the user asked for particular content types, those are the formats,
+    # whatever the model wrote in the field. Nothing else in the report would
+    # honour a stray "Poll" among fourteen carousels. An idea outside the set
+    # goes to the chosen format used least so far, which both keeps the promise
+    # and pulls the spread back towards even.
+    allowed_formats = chosen_formats(content_types)
+    format_counts = {label: 0 for label in allowed_formats}
+
+    def pinned_format(value: str) -> str:
+        if not allowed_formats:
+            return value
+        label = _FORMAT_ALIASES.get(value.strip().lower(), "")
+        if label not in format_counts:
+            label = min(
+                allowed_formats, key=lambda name: (format_counts[name], allowed_formats.index(name))
+            )
+        format_counts[label] += 1
+        return label
 
     ideas = []
+    hook_stems: set = set()
+    names = brand_tokens(profile)
     for entry in raw.get("content_ideas") or []:
         if not isinstance(entry, dict):
             continue
         title = strip_markdown(entry.get("title"))
         if not title:
             continue
+        # A missing hook is not worth dropping a whole idea over; the report
+        # renders it only when there is one. A repeated or brief-echoing hook is
+        # a different matter, and takes its idea down with it: the hook is the
+        # reason the idea is on the page.
+        hook = strip_markdown(entry.get("hook"))[:MAX_HOOK_CHARS].strip()
+        if hook:
+            stem = _hook_stem(hook)
+            if stem in hook_stems:
+                logger.info("dropped an idea whose hook repeats an earlier one: %r", hook)
+                continue
+            if _echoes(hook, profile):
+                logger.info("dropped an idea whose hook echoes the user profile: %r", hook)
+                continue
+            named = names.intersection(_hook_words(hook))
+            if named:
+                logger.info(
+                    "dropped an idea whose hook names the user's own %s: %r",
+                    ", ".join(sorted(named)), hook,
+                )
+                continue
+            hook_stems.add(stem)
         ideas.append(
             {
                 "title": title,
-                # A missing hook is not worth dropping a whole idea over; the report
-                # renders it only when there is one.
-                "hook": strip_markdown(entry.get("hook"))[:MAX_HOOK_CHARS].strip(),
-                "format": strip_markdown(entry.get("format")) or "Content",
+                "hook": hook,
+                "format": pinned_format(
+                    strip_markdown(entry.get("format")) or "Content"
+                ),
                 "angle": strip_markdown(entry.get("angle")),
                 "rationale": strip_markdown(entry.get("rationale")),
                 "addresses": strip_markdown(entry.get("addresses")),
                 "item_indices": _valid_indices(entry.get("item_indices"), n_items),
             }
         )
+    ideas = ideas[:SANITIZE_MAX_CONTENT_IDEAS]
+
+    title = _trim_to_words(strip_markdown(raw.get("report_title")), MAX_REPORT_TITLE_CHARS)
+
+    # One fingerprint set across both lists: the model reliably files the same
+    # sentence as a pain point and again as a question, and a report that says the
+    # same thing twice under two headings looks unread.
+    claimed: set = set()
+    pain_points = _sanitize_claims(raw.get("pain_points"), n_items, MAX_PAIN_POINTS, claimed)
+    questions = _sanitize_claims(raw.get("questions"), n_items, MAX_QUESTIONS, claimed)
 
     return {
+        "report_title": title or report_title_from_query(query),
         "executive_summary": strip_markdown(raw.get("executive_summary")),
         "topic_descriptions": descriptions,
-        "pain_points": _sanitize_claims(raw.get("pain_points"), n_items, MAX_PAIN_POINTS),
-        "questions": _sanitize_claims(raw.get("questions"), n_items, MAX_QUESTIONS),
-        "content_ideas": ideas[:MAX_CONTENT_IDEAS],
+        "pain_points": pain_points,
+        "questions": questions,
+        "content_ideas": ideas,
     }
 
 
@@ -1172,6 +1600,53 @@ def _synthesis_listing_indices(
     return sorted(ordered)
 
 
+_HOOK_RULES = """- "hook" is the literal first line of the post or script, at most {max_hook}
+  characters, written to stop a professional feed scroll. Not a description of the
+  hook, the words themselves. Use the community's own language, never "In today's post".
+- Every hook must contain at least one of these three things: a specific number, a
+  short phrase quoted from the evidence, or a concrete named situation. A hook with
+  none of them is a slogan and will be rejected.
+- A hook is ONE voice. Either it is what a person in these communities said, or it is
+  your own observation. Never a quotation with a second sentence bolted onto it.
+- NEVER append a promise, an instruction, a reassurance or an offer to a quote.
+  These exact shapes are banned, and so is every variation of them:
+    [Quote]. It doesn't have to be.
+    [Quote]. Here's how.
+    [Quote]. Explore these alternatives.
+    [Quote]. There is a better way.
+  If you have quoted somebody, the hook ends where their words end.
+- NEVER write a hook as a question followed by an instruction, an offer or a promise.
+  "[Problem]? [Do this]." is banned in every form. The mechanical test: if a hook
+  contains a question mark, that question mark must be the LAST character of the
+  hook. These all fail it and are all banned:
+    Struggling with X? Here is how.
+    Clients ask for one quick change? Here's how I stop scope creep.
+    Client asked for a partial refund? Here's my contract clause.
+    How do you design for someone who cannot decide? My process.
+- A hook may never end on a fragment that promises the answer, wherever in the hook
+  it appears and whether or not a question came before it. "My process." /
+  "Here's how." / "Here's my template." / "Here is what I do." / "My system." are
+  banned, and so is every phrasing like them. State the thing, do not advertise it.
+- The brand, product, service or tool of the person you are writing for may never
+  appear inside a hook, in any voice: not quoted, not as "my [product]", not as a
+  passing mention of the tool they sell. A hook that names it reads as though a
+  stranger on Reddit endorsed them, which is a quote nobody said. If the idea is
+  about their product, that belongs in "angle" and "rationale". Never in "hook".
+- A hook may never restate the research question, and may never repeat back the
+  self-description of the person you are writing for. Both of those are the brief.
+  The brief is not an opening line and nobody on Reddit ever said it.
+- Every hook must open on different words. No two hooks in this response may begin
+  with the same phrase, and no two may be one sentence with two different endings.
+- Good hooks, because each one is a scene or a number a real person could have lived:
+    I lost four projects to the same eight seconds of silence.
+    250 cold emails last quarter. One reply worth having.
+    Unlimited revisions is not standard. It is just unpriced.
+- Bad hooks, because each one could top any post about anything:
+    Struggling to price your work? Here is the fix.
+    Want more clients? Read this.
+    Tired of scope creep? Try these three steps."""
+
+
 def _synthesis_prompt(
     items: Sequence[dict],
     topics: Sequence[dict],
@@ -1179,6 +1654,7 @@ def _synthesis_prompt(
     profile: str,
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
+    content_types: Optional[Sequence[str]] = None,
 ) -> str:
     topic_lines = []
     for topic in topics:
@@ -1208,6 +1684,29 @@ def _synthesis_prompt(
     if profile:
         profile_line = "\nThey describe themselves as: {}\n".format(profile)
 
+    allowed_formats = chosen_formats(content_types)
+    if len(allowed_formats) == 1:
+        format_rule = (
+            '- "format" must be exactly "{}" for EVERY idea. They asked for that one '
+            "format, so write every idea to work in it.".format(allowed_formats[0])
+        )
+    elif allowed_formats:
+        format_rule = (
+            '- "format" must be exactly one of these {n} labels: {labels}. They asked '
+            "for those formats and no others, so every idea has to work in one of "
+            "them. Spread the ideas roughly evenly across the {n} formats rather than "
+            "writing most of them in one, and pick the format that suits each "
+            "idea.".format(n=len(allowed_formats), labels=", ".join(allowed_formats))
+        )
+    else:
+        format_rule = '- "format" must be exactly one of these: {}'.format(
+            ", ".join(IDEA_FORMATS)
+        )
+
+    own_brand = "their own product or brand"
+    if profile:
+        own_brand = "their own product, brand or service"
+
     return """You are a content strategist for someone growing an audience on LinkedIn.
 
 They are researching: {query}
@@ -1225,6 +1724,7 @@ position in the research sample:
 Return ONLY a JSON object with exactly these keys:
 
 {{
+  "report_title": "...",
   "executive_summary": "...",
   "topic_descriptions": [{{"id": 1, "label": "<exact label>", "finding": "..."}}],
   "pain_points": [{{"text": "...", "item_indices": [4, 9]}}],
@@ -1235,6 +1735,9 @@ Return ONLY a JSON object with exactly these keys:
 }}
 
 Rules:
+- "report_title": a plain title for this report, at most {max_title} characters.
+  Name the subject the way the people in these communities would, not the way a
+  consultant would. No markdown, no colon-heavy headline formula, no quotation marks.
 - "executive_summary": 2-3 sentences naming the single most important takeaway for
   their content strategy, what this evidence says they should be posting about.
   Lead with the insight, not with "This report shows".
@@ -1245,13 +1748,17 @@ Rules:
   wrong topic makes the whole report wrong. "finding" is 1-2 sentences stating what
   the evidence SHOWS. Never restate the label. Never say "this topic is about".
 - "pain_points": the {max_pain} most concrete frustrations, in the community's own
-  terms. Not categories, specific problems.
+  terms. Not categories, specific problems. Each one at least a full clause.
 - "questions": the {max_q} questions people are actually asking, phrased as questions.
-- "content_ideas": {min_ideas} to {max_ideas} posts they could publish.
-- "hook" is the literal first line of the post or script, at most {max_hook}
-  characters, written to stop a professional feed scroll. Not a description of the
-  hook, the words themselves. Use the community's own language, never "In today's post".
-- "format" must be exactly one of these: {formats}
+  A question must not restate a pain point you already listed; if the only thing you
+  can write is the same sentence with a question mark, give a different question.
+- "content_ideas": {min_ideas} to {max_ideas} posts they could publish. No two may
+  make the same point in different words.
+{hook_rules}
+- At most 2 of the {max_ideas} ideas may name {own_brand}. Every other idea has to
+  earn attention from the insight itself, because a feed full of product mentions
+  gets scrolled past.
+{format_rule}
 - "angle" is the specific take in one sentence. "addresses" names the pain point or
   topic it answers. "rationale" is one sentence on why this audience would engage.
 - Every "item_indices" must contain 1-3 item numbers taken from the numbered list
@@ -1272,8 +1779,10 @@ No markdown fences, no commentary. JSON only.""".format(
         max_q=MAX_QUESTIONS,
         min_ideas=MIN_CONTENT_IDEAS,
         max_ideas=MAX_CONTENT_IDEAS,
-        max_hook=MAX_HOOK_CHARS,
-        formats=", ".join(IDEA_FORMATS),
+        max_title=MAX_REPORT_TITLE_CHARS,
+        hook_rules=_HOOK_RULES.format(max_hook=MAX_HOOK_CHARS),
+        format_rule=format_rule,
+        own_brand=own_brand,
     )
 
 
@@ -1330,10 +1839,14 @@ def classify_items(
     return result
 
 
-def _triage_pool(items: Sequence[dict], scores: Sequence[float], cap: int) -> List[dict]:
-    """The strongest candidates by base score, worth spending a triage call on."""
+def _triage_pool(items: Sequence[dict], scores: Sequence[float], cap: int) -> List[int]:
+    """Positions of the strongest candidates by base score, worth a triage call.
+
+    Positions rather than items, because the position in the source pool is half of
+    the key a rating is filed under (see relevance_key).
+    """
     paired = sorted(zip(scores, range(len(items))), key=lambda entry: (-entry[0], entry[1]))
-    return [items[index] for _, index in paired[:cap]]
+    return [index for _, index in paired[:cap]]
 
 
 def _select_sample(
@@ -1353,29 +1866,38 @@ def _select_sample(
     comments = [item for item in comments or [] if isinstance(item, dict)]
     now = time.time()
 
-    pool = _triage_pool(posts, _base_scores(posts, now), TRIAGE_MAX_POSTS) + _triage_pool(
+    post_positions = _triage_pool(posts, _base_scores(posts, now), TRIAGE_MAX_POSTS)
+    comment_positions = _triage_pool(
         comments, _base_scores(comments, now), TRIAGE_MAX_COMMENTS
     )
+    pool = [posts[index] for index in post_positions] + [
+        comments[index] for index in comment_positions
+    ]
+    # Parallel to `pool`: the key each pooled item's rating gets filed under, built
+    # from the item's position in its OWN pool rather than in the merged one.
+    pool_keys = [relevance_key("post", posts[index], index) for index in post_positions] + [
+        relevance_key("comment", comments[index], index) for index in comment_positions
+    ]
     ratings = rate_relevance(pool, query, profile) if query else None
 
     if ratings is None:
-        relevance: Optional[Dict[str, int]] = None
+        relevance: Optional[Dict[Tuple[str, str], int]] = None
         selection = {
             "method": "deterministic-fallback",
             "triaged": 0,
             "relevance_counts": {"0": 0, "1": 0, "2": 0},
         }
     else:
-        relevance = {
-            str(item.get("id") or ""): rating
-            for item, rating in ((pool[position - 1], value) for position, value in ratings.items())
-        }
+        relevance = {}
         counts = {"0": 0, "1": 0, "2": 0}
-        for value in ratings.values():
+        for position, value in ratings.items():
+            if not (1 <= position <= len(pool_keys)):
+                continue
+            relevance[pool_keys[position - 1]] = value
             counts[str(value)] += 1
         selection = {
             "method": "relevance+engagement",
-            "triaged": len(ratings),
+            "triaged": len(relevance),
             "relevance_counts": counts,
         }
 
@@ -1403,9 +1925,13 @@ def classify_sample(
     # is used, never the ranking itself.
     ranked_posts, ranked_comments, selection = _select_sample(posts, comments, query, profile)
 
-    global _token_limit
+    # Local to this run on purpose. A rejection tells us this prompt was too big for
+    # the provider right now, which is not a reason to shrink every other report the
+    # process will ever produce, and a module-level version of this number races
+    # between two concurrent runs.
+    budget = token_budget()
     for attempt in range(MAX_REFIT_ATTEMPTS):
-        items, preview_chars = fit_sample(ranked_posts, ranked_comments, subreddits)
+        items, preview_chars = fit_sample(ranked_posts, ranked_comments, subreddits, budget)
         try:
             classification = classify_items(items, subreddits, preview_chars)
             classification["capacity_limited"] = is_capacity_limited(items, preview_chars, posts, comments)
@@ -1418,10 +1944,10 @@ def classify_sample(
                     "now. Please try again in a moment."
                 )
             # A rejection means the provider counts this prompt as bigger than our
-            # estimate did, so the budget is shaved and the ladder tried again a rung
-            # or two lower. It survives the process, so a second run starts smaller.
-            _token_limit = int((_token_limit or DEFAULT_TOKEN_BUDGET) * 0.75)
-            logger.warning("refitting sample against a %s token budget", _token_limit)
+            # estimate did, so this run's budget is shaved and the ladder is tried
+            # again a rung or two lower.
+            budget = int(budget * 0.75)
+            logger.warning("refitting sample against a %s token budget", budget)
 
     raise ValueError(_UNAVAILABLE)
 
@@ -1433,12 +1959,18 @@ def synthesize(
     profile: str,
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
+    content_types: Optional[Sequence[str]] = None,
 ) -> dict:
     """Call 2: turn the labels into publishable content ideas with evidence."""
-    logger.info("synthesising ideas for %r", query)
+    logger.info(
+        "synthesising ideas for %r (content types: %s)",
+        query, ", ".join(content_types or []) or "any",
+    )
     try:
         raw, model = _chat_json(
-            _synthesis_prompt(items, topics, query, profile, subreddits, preview_chars),
+            _synthesis_prompt(
+                items, topics, query, profile, subreddits, preview_chars, content_types
+            ),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
         )
@@ -1448,15 +1980,20 @@ def synthesize(
         # was rejected for what we sent, and cutting the model's room to answer would
         # trade a rejection for a truncated, unparseable one.
         raw, model = _chat_json(
-            _synthesis_prompt(items, topics, query, profile, subreddits, 90),
+            _synthesis_prompt(items, topics, query, profile, subreddits, 90, content_types),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
         )
-    result = sanitize_synthesis(raw, len(items), topics)
+    result = sanitize_synthesis(raw, len(items), topics, query, content_types, profile)
     result["model"] = model
     matched = len(result["topic_descriptions"])
     if topics and matched < len(topics):
         logger.warning("only %s of %s topics came back with a finding", matched, len(topics))
+    if len(result["content_ideas"]) < SANITIZE_MIN_CONTENT_IDEAS:
+        logger.warning(
+            "synthesis returned only %s usable ideas, below the floor of %s",
+            len(result["content_ideas"]), SANITIZE_MIN_CONTENT_IDEAS,
+        )
     logger.info(
         "synthesis: %s topic findings, %s pain points, %s questions, %s ideas",
         matched,
@@ -1469,19 +2006,12 @@ def synthesize(
 
 # ── Draft post ────────────────────────────────────────────────────────────────
 _HASHTAG_LINE_PATTERN = re.compile(r"^#\w[\w-]*(\s+#\w[\w-]*)*$")
-# Paired markdown emphasis only. A lone asterisk is far more likely to be "$5 * 3"
-# than a formatting slip, and stripping those would corrupt real content.
-_EMPHASIS_PATTERN = re.compile(r"(\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\1")
 _LIST_MARKER_PATTERN = re.compile(r"^\s*(?:[#>]+|[-*+]|\d+[.)])\s+")
 
 
 def _sanitize_post_line(line: str) -> str:
     """One line of a draft, flattened but not merged into its neighbours."""
-    text = _LIST_MARKER_PATTERN.sub("", line)
-    # Twice, so "**bold _and_ italic**" loses both layers.
-    for _ in range(2):
-        text = _EMPHASIS_PATTERN.sub(r"\2", text)
-    return strip_markdown(text)
+    return strip_markdown(_LIST_MARKER_PATTERN.sub("", line))
 
 
 def _cap_hashtags(lines: List[str]) -> List[str]:
@@ -1527,6 +2057,29 @@ def sanitize_post(value: Any) -> str:
     return "\n".join(_cap_hashtags(kept))
 
 
+# LinkedIn's own poll UI refuses more than four options, so a fifth one is not a
+# stylistic slip, it is a draft that cannot be posted as written.
+DRAFT_MAX_POLL_OPTIONS = 4
+
+
+def _cap_poll_options(post: str) -> str:
+    """Drop any "Option:" line past the fourth so a poll draft stays postable.
+
+    The prompt asks for two to four options, but the model sometimes overshoots.
+    Non-option lines and the order of everything kept are left untouched.
+    """
+    lines = post.split("\n")
+    kept: List[str] = []
+    options_seen = 0
+    for line in lines:
+        if line.startswith("Option:"):
+            options_seen += 1
+            if options_seen > DRAFT_MAX_POLL_OPTIONS:
+                continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _evidence_lines(evidence: Sequence[Any]) -> str:
     lines = []
     for raw in list(evidence or [])[:DRAFT_MAX_EVIDENCE]:
@@ -1536,9 +2089,26 @@ def _evidence_lines(evidence: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+def _draft_format(idea: dict) -> str:
+    """The idea's format, normalised to one this module knows how to write."""
+    wanted = strip_markdown((idea or {}).get("format")).lower()
+    for label in DRAFT_FORMAT_RULES:
+        if label.lower() == wanted:
+            return label
+    # A partial match covers "Carousel" for "Carousel (PDF)" and similar near
+    # misses; anything else is written as a plain feed post.
+    for label in DRAFT_FORMAT_RULES:
+        head = label.split(" (")[0].lower()
+        if wanted and (wanted.startswith(head) or head.startswith(wanted)):
+            return label
+    return "Text post"
+
+
 def _draft_prompt(idea: dict, evidence: Sequence[Any], query: str, profile: str) -> str:
     idea = idea if isinstance(idea, dict) else {}
     excerpts = _evidence_lines(evidence)
+    fmt = _draft_format(idea)
+    min_words, max_words = DRAFT_FORMAT_WORDS[fmt]
 
     context = []
     if query:
@@ -1583,11 +2153,19 @@ Return ONLY a JSON object with exactly this key:
 Rules for "post":
 - Open with the given opening line. You may sharpen its wording, but keep its promise
   and keep it as the first line.
-- {min_words} to {max_words} words. Short paragraphs of one to three sentences,
-  separated by a blank line, because a wall of text does not get read in a feed.
-  Use "\\n\\n" between paragraphs inside the JSON string.
+- {format_rule}
+- {min_words} to {max_words} words in total. Use "\\n\\n" between blocks inside the
+  JSON string, because a wall of text does not get read in a feed.
 - Make one point and support it with something concrete from the excerpts: a number, a
   named situation, a real objection. Cut every sentence that could apply to any topic.
+- EVERY specific claim must come from the excerpts above. Never invent a statistic, a
+  percentage, a survey, a study, a named tool, a named company, a client story or a
+  personal anecdote that is not in them. If you cannot point to the line in the
+  excerpts that a sentence came from, do not write that sentence.
+- If the excerpts have no concrete specifics to draw on, write a clear, opinionated
+  piece from the angle instead. A strong opinion is honest. An invented number is not.
+- Do not put numbers on things the excerpts did not count. No "3 out of 4", no
+  "most people", no "studies show".
 - End with one line that invites a reply, phrased as a genuine question rather than
   "What do you think?".
 - Then at most {max_hashtags} hashtags on the final line. Zero is fine.
@@ -1601,8 +2179,9 @@ No markdown fences, no commentary. JSON only.""".format(
         context=context_block or "  (no extra context given)",
         brief="\n".join(brief) or "  (no idea details given)",
         excerpts=excerpts or "  (no excerpts available)",
-        min_words=DRAFT_MIN_WORDS,
-        max_words=DRAFT_MAX_WORDS,
+        format_rule=DRAFT_FORMAT_RULES[fmt],
+        min_words=min_words,
+        max_words=max_words,
         max_hashtags=DRAFT_MAX_HASHTAGS,
     )
 
@@ -1628,12 +2207,20 @@ def draft_post(
         logger.error("draft came back with no usable text")
         raise ValueError(_DRAFT_FAILED)
 
+    fmt = _draft_format(idea or {})
+    if fmt == "Poll":
+        capped = _cap_poll_options(post)
+        if capped != post:
+            logger.info("trimmed a poll draft down to %s options", DRAFT_MAX_POLL_OPTIONS)
+            post = capped
+
     words = len(post.split())
-    if not DRAFT_MIN_WORDS * 0.7 <= words <= DRAFT_MAX_WORDS * 1.3:
+    min_words, max_words = DRAFT_FORMAT_WORDS[fmt]
+    if not min_words * 0.7 <= words <= max_words * 1.3:
         # Worth knowing about, not worth refusing: a post 20 words over still reads
         # fine, and the user can see the length for themselves.
         logger.info("draft length %s words is outside the %s to %s target",
-                    words, DRAFT_MIN_WORDS, DRAFT_MAX_WORDS)
+                    words, min_words, max_words)
     logger.info("draft complete with %s: %s words, %s lines",
                 model, words, post.count("\n") + 1)
     return {"post": post}

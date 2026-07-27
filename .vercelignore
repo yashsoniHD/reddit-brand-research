@@ -10,6 +10,9 @@ __pycache__
 .env
 .env.local
 .env*.local
+service-account.json
+*-key.json
+*credentials*.json
 .remember
 .claude
 # Local interpreter pin only; shipping it makes Vercel try to install

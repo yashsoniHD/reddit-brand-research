@@ -19,10 +19,11 @@ function ClaimList({ title, claims }: { title: string; claims: Claim[] }) {
           {claims.map((claim, index) => (
             <li
               key={`${index}-${claim.text}`}
-              className="border-b border-border/60 py-2.5 text-sm leading-relaxed text-foreground last:border-b-0"
+              // A brand tick on the left edge marks each claim as a cited
+              // finding rather than as an opinion the report is offering.
+              className="relative border-b py-3 pl-4 text-[0.9375rem] leading-relaxed text-foreground last:border-b-0 before:absolute before:top-[1.3em] before:left-0 before:size-1.5 before:rounded-full before:bg-[var(--brand)] before:content-['']"
             >
-              {claim.text}{" "}
-              <EvidencePills citations={claim.citations} label="Source" />
+              {claim.text} <EvidencePills citations={claim.citations} label="Source" />
             </li>
           ))}
         </ul>
@@ -39,7 +40,7 @@ export function ClaimColumns({
   questions: Claim[];
 }) {
   return (
-    <div className="grid gap-8 md:grid-cols-2">
+    <div className="grid gap-8 md:grid-cols-2 md:gap-10">
       <ClaimList title="Pain points" claims={painPoints} />
       <ClaimList title="Questions being asked" claims={questions} />
     </div>

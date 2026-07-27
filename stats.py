@@ -7,14 +7,27 @@ is unit-testable and none of it can be hallucinated.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 SENTIMENT_KEYS = ("pos", "neu", "neg")
 SENTIMENT_LABELS = {"pos": "Positive", "neu": "Neutral", "neg": "Negative"}
 MAX_CITATIONS_PER_CLAIM = 3
 EXCERPT_LENGTH = 140
+# The evidence a draft is written from, and what a reader sees when they hover a
+# citation. Long enough to carry the point of a post plus a reply or two, short
+# enough that six of them do not become the whole prompt.
+EXCERPT_MAX_CHARS = 600
+# Replies from the same thread that get folded into a post's excerpt. Two is the
+# difference between "here is a post" and "here is a conversation".
+MAX_EXCERPT_REPLIES = 2
 SECONDS_PER_DAY = 86400
+
+# Reddit permalinks are /r/<sub>/comments/<thread>/<slug>/[<comment>]/, so the
+# segment after "comments" identifies the thread for a post and for every comment
+# under it alike.
+_THREAD_ID_PATTERN = re.compile(r"/comments/([A-Za-z0-9_]+)")
 
 
 # ── Percentages ───────────────────────────────────────────────────────────────
@@ -61,6 +74,11 @@ def sentiment_breakdown(item_sentiments: Sequence[dict], n_items: int) -> dict:
         "percentages": largest_remainder_percentages(counts),
         "classified": classified,
         "unclassified": max(0, n_items - classified),
+        # All-zero percentages and "0% positive, 0% neutral, 0% negative" are the
+        # same picture to a renderer, and only one of them is true. This flag lets
+        # the report say "no items could be classified for tone" instead of drawing
+        # an empty chart that looks like a finding.
+        "none_classified": classified == 0,
     }
 
 
@@ -108,7 +126,9 @@ def trend_buckets(posts: Sequence[dict], max_days: int = 30) -> List[Tuple[str, 
 
     Sized by the dates the fetch really returned rather than by a requested
     window, so the chart never ends in a run of fake zeros the archive's lag
-    would produce. Capped at max_days buckets, keeping the newest.
+    would produce. Capped at max_days + 1 buckets, keeping the newest: a 7-day
+    window reaches back across 8 calendar dates (today plus the seven before it),
+    so capping at 7 silently dropped the oldest day of every full window.
     """
     dates = []
     for post in posts or []:
@@ -123,7 +143,7 @@ def trend_buckets(posts: Sequence[dict], max_days: int = 30) -> List[Tuple[str, 
 
     newest = datetime.strptime(max(dates), "%Y-%m-%d").date()
     oldest = datetime.strptime(min(dates), "%Y-%m-%d").date()
-    span = min((newest - oldest).days + 1, max(1, int(max_days)))
+    span = min((newest - oldest).days + 1, max(1, int(max_days)) + 1)
     window = [(newest - timedelta(days=offset)) for offset in range(span - 1, -1, -1)]
     buckets = {day.strftime("%Y-%m-%d"): 0 for day in window}
 
@@ -135,17 +155,42 @@ def trend_buckets(posts: Sequence[dict], max_days: int = 30) -> List[Tuple[str, 
 
 
 # ── Totals and ranges ─────────────────────────────────────────────────────────
-def engagement_totals(posts: Sequence[dict]) -> dict:
+def _int_or_zero(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def engagement_totals(posts: Sequence[dict], items: Optional[Sequence[dict]] = None) -> dict:
+    """Upvotes and comment counts across the fetched pool, and across the sample.
+
+    Two different numbers that a report has to keep apart. The pool totals say how
+    much conversation the run read; the `analysed` totals say how much of it the
+    findings actually rest on, which is the honest denominator for anything the
+    model concluded. `items` is the analysed sample (posts and comments together),
+    so its upvotes include comment scores.
+    """
     total_score = 0
     total_comments = 0
     for post in posts or []:
         post = post or {}
-        try:
-            total_score += int(post.get("score") or 0)
-            total_comments += int(post.get("comments") or 0)
-        except (TypeError, ValueError):
-            continue
-    return {"score": total_score, "comments": total_comments}
+        total_score += _int_or_zero(post.get("score"))
+        total_comments += _int_or_zero(post.get("comments"))
+
+    analysed_score = 0
+    analysed_comments = 0
+    for item in items or []:
+        item = item or {}
+        analysed_score += _int_or_zero(item.get("score"))
+        if item.get("kind") != "comment":
+            analysed_comments += _int_or_zero(item.get("comments"))
+
+    return {
+        "score": total_score,
+        "comments": total_comments,
+        "analysed": {"upvotes": analysed_score, "comments": analysed_comments},
+    }
 
 
 def actual_date_range(posts: Sequence[dict]) -> dict:
@@ -199,51 +244,140 @@ def data_lag_hours(newest_ts: int) -> float:
 
 
 # ── Citations ─────────────────────────────────────────────────────────────────
+def _flat(text) -> str:
+    return " ".join(str(text or "").split())
+
+
 def _display_text(item: dict) -> str:
     title = (item.get("title") or "").strip()
     if title:
         return title
-    body = " ".join((item.get("body") or "").split())
+    body = _flat(item.get("body"))
     if len(body) > EXCERPT_LENGTH:
         return body[:EXCERPT_LENGTH].rstrip() + "…"
     return body or "(no text)"
+
+
+def thread_key(item: dict) -> str:
+    """Which Reddit thread this item belongs to.
+
+    A post and three comments from under it are one conversation, not four
+    independent sources, and citing all four makes a claim look four times better
+    evidenced than it is. Falls back to the item's own id so an item with an
+    unparseable URL is still deduped against itself and nothing else.
+    """
+    item = item or {}
+    match = _THREAD_ID_PATTERN.search(str(item.get("url") or ""))
+    if match:
+        return match.group(1).lower()
+    ident = str(item.get("id") or "").strip().lower()
+    return ident or str(item.get("url") or "").strip().lower()
+
+
+def replies_by_thread(comments: Sequence[dict]) -> Dict[str, List[dict]]:
+    """Fetched comments grouped by thread, best first, for excerpt building."""
+    grouped: Dict[str, List[dict]] = {}
+    for comment in comments or []:
+        if not isinstance(comment, dict):
+            continue
+        key = thread_key(comment)
+        if key:
+            grouped.setdefault(key, []).append(comment)
+    for entries in grouped.values():
+        entries.sort(key=lambda entry: -_int_or_zero(entry.get("score")))
+    return grouped
+
+
+def excerpt_for(item: dict, replies: Sequence[dict] = ()) -> str:
+    """Enough of the real conversation to write from, capped at EXCERPT_MAX_CHARS.
+
+    A citation's `text` is a label for a link. This is the evidence itself: what the
+    person actually wrote, plus the best couple of replies when the item is a post
+    and we fetched its thread. The draft call is grounded on these, so a citation
+    with a one-line label and no excerpt is a citation a draft can only guess at.
+    """
+    item = item or {}
+    body = _flat(item.get("body"))
+    title = _flat(item.get("title"))
+
+    if item.get("kind") == "comment":
+        parts = [body or title]
+    else:
+        parts = [part for part in (title, body) if part]
+        for reply in list(replies or [])[:MAX_EXCERPT_REPLIES]:
+            text = _flat((reply or {}).get("body"))
+            if text:
+                parts.append("Reply: {}".format(text))
+
+    excerpt = " ".join(part for part in parts if part).strip()
+    if len(excerpt) > EXCERPT_MAX_CHARS:
+        excerpt = excerpt[: EXCERPT_MAX_CHARS - 1].rstrip() + "…"
+    return excerpt
+
+
+def _is_thin(item: dict) -> bool:
+    """An item with nothing to quote: no body, and nobody replied to it."""
+    item = item or {}
+    if _flat(item.get("body")):
+        return False
+    if item.get("kind") == "comment":
+        return True
+    return _int_or_zero(item.get("comments")) == 0
 
 
 def citations_for(
     indices: Sequence[int],
     items: Sequence[dict],
     limit: int = MAX_CITATIONS_PER_CLAIM,
+    comments: Optional[Sequence[dict]] = None,
 ) -> List[dict]:
     """Resolve model-supplied item indices into real, linkable sources.
 
-    Text and URLs come from our fetched data, never from model output, so a
-    citation can never point at something that does not exist.
+    Text, excerpts and URLs come from our fetched data, never from model output, so
+    a citation can never point at something that does not exist. `comments` is the
+    full fetched comment pool, used only to find replies worth folding into a post's
+    excerpt; leaving it out costs the replies, nothing else.
+
+    Two quality rules decide which of the candidates survive. One thread may only
+    appear once, because a post and two comments from under it are one conversation
+    being counted three times. And an item with no body and no replies is cited only
+    when there is nothing better left, because "0 comments, no text" is a link a
+    reader learns nothing from.
     """
-    citations = []
-    seen = set()
+    replies = replies_by_thread(comments)
+    strong: List[dict] = []
+    thin: List[dict] = []
+    seen_indices = set()
+    seen_threads = set()
+
     for index in indices or []:
         # bool is an int subclass, and True would silently resolve to item 1.
         if isinstance(index, bool) or not isinstance(index, int):
             continue
         if not (1 <= index <= len(items)):
             continue
-        if index in seen:
+        if index in seen_indices:
             continue
-        seen.add(index)
+        seen_indices.add(index)
         item = items[index - 1] or {}
         if not item.get("url"):
             continue
-        citations.append(
-            {
-                "index": index,
-                "text": _display_text(item),
-                "url": item.get("url", ""),
-                "date": item.get("date", ""),
-                "score": item.get("score", 0),
-                "type": item.get("kind", "post"),
-                "subreddit": item.get("subreddit", ""),
-            }
-        )
-        if len(citations) >= limit:
+        key = thread_key(item)
+        if key and key in seen_threads:
+            continue
+        seen_threads.add(key)
+        citation = {
+            "index": index,
+            "text": _display_text(item),
+            "excerpt": excerpt_for(item, replies.get(key, ())),
+            "url": item.get("url", ""),
+            "date": item.get("date", ""),
+            "score": item.get("score", 0),
+            "type": item.get("kind", "post"),
+            "subreddit": item.get("subreddit", ""),
+        }
+        (thin if _is_thin(item) else strong).append(citation)
+        if len(strong) >= limit:
             break
-    return citations
+
+    return (strong + thin)[:limit]

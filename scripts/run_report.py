@@ -1,6 +1,6 @@
 """Run the real pipeline from a terminal: end-to-end check and sample generator.
 
-Exercises exactly the code path the Streamlit app uses, with no Streamlit involved.
+Exercises exactly the code path the web app uses, with no web app involved.
 
     python scripts/run_report.py \
         --query "Productivity struggles freelance designers have juggling multiple clients" \
@@ -9,6 +9,7 @@ Exercises exactly the code path the Streamlit app uses, with no Streamlit involv
 
 Pass --subreddits to skip discovery entirely and analyse specific communities instead,
 which is useful for deterministic regeneration and for debugging one community.
+Pass --content-types to keep every idea inside the formats you name.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,6 +49,15 @@ def main() -> int:
         help="comma-separated subreddit names; when given, discovery is skipped entirely "
              "and these communities are analysed directly",
     )
+    parser.add_argument(
+        "--content-types", dest="content_types", nargs="+",
+        choices=list(pipeline.CONTENT_TYPES),
+        help="keep every idea inside these formats (advanced; default a mix)",
+    )
+    parser.add_argument(
+        "--timeout", type=float,
+        help="seconds before the run stops starting new work and reports what it has",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -57,12 +68,14 @@ def main() -> int:
         args.query, args.profile,
         days=args.days, subreddits=args.subreddits,
         relevance_filter=not args.no_relevance,
+        content_types=args.content_types,
     )
     if checked["errors"]:
         for error in checked["errors"]:
             print("input error: {}".format(error))
         return 2
 
+    deadline = None if args.timeout is None else time.monotonic() + args.timeout
     try:
         bundle = pipeline.run_report(
             checked["query"],
@@ -70,7 +83,9 @@ def main() -> int:
             days=checked["days"],
             subreddits=checked["subreddits"],
             relevance_filter=checked["relevance_filter"],
+            content_types=checked["content_types"],
             progress=lambda message: print("  · {}".format(message)),
+            deadline=deadline,
         )
     except pipeline.RunError as exc:
         print("run failed: {}".format(exc))
@@ -97,8 +112,12 @@ def main() -> int:
     sentiment = bundle["stats"]["sentiment"]
     print("\n--- end-to-end summary ---")
     print("bundle version:      {}".format(bundle["bundle_version"]))
+    print("report title:        {}".format(bundle["analysis"]["report_title"]))
     print("query:               {}".format(bundle["inputs"]["query"]))
-    print("communities:         {}".format(", ".join(bundle["inputs"]["subreddits"])))
+    print("content types:       {}".format(
+        ", ".join(bundle["inputs"].get("content_types") or []) or "a mix"))
+    print("communities:         {} (chosen: {})".format(
+        ", ".join(bundle["inputs"]["subreddits"]), bundle["inputs"]["discovery"]))
     print("communities found:   {}".format(
         ", ".join("r/{}".format(c["name"]) for c in bundle["discovery"]["communities"])))
     print("posts fetched:       {}".format(sample["posts_fetched"]))
@@ -112,6 +131,8 @@ def main() -> int:
     print("pain points:         {}".format(len(bundle["analysis"]["pain_points"])))
     print("questions:           {}".format(len(bundle["analysis"]["questions"])))
     print("content ideas:       {}".format(len(bundle["analysis"]["content_ideas"])))
+    print("analysed engagement: {}".format(bundle["stats"]["engagement"]["analysed"]))
+    print("models used:         {}".format(", ".join(bundle["models"])))
     print("markdown chars:      {}".format(len(markdown)))
     print("elapsed:             {}s".format(bundle["elapsed_seconds"]))
     return 0

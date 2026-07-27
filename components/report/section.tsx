@@ -1,3 +1,5 @@
+import { ChevronRight } from "lucide-react";
+
 /**
  * The research zone's building blocks.
  *
@@ -18,18 +20,24 @@ export function Section({
 }) {
   return (
     <section id={id} className="scroll-mt-8">
-      <h3 className="h-section text-foreground">{title}</h3>
-      {description ? (
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
-      ) : null}
-      <div className="mt-3">{children}</div>
+      <div className="flex flex-col gap-1">
+        <h3 className="h-section text-foreground">{title}</h3>
+        {description ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      <div className="mt-3.5">{children}</div>
     </section>
   );
 }
 
 /** The muted line under a section that qualifies what the numbers mean. */
 export function Note({ children }: { children: React.ReactNode }) {
-  return <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{children}</p>;
+  return (
+    <p className="mt-3 border-t pt-3 text-xs leading-relaxed text-muted-foreground">
+      {children}
+    </p>
+  );
 }
 
 /** A collapsed-by-default block, used for source data and methodology. */
@@ -43,20 +51,21 @@ export function Drawer({
   children: React.ReactNode;
 }) {
   return (
-    <details className="surface-hush group px-5 py-4">
-      <summary className="flex cursor-pointer list-none items-center gap-2 marker:hidden">
-        <span
+    <details className="surface-hush group px-5 py-4 transition-colors open:bg-card">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 marker:hidden">
+        <ChevronRight
           aria-hidden="true"
-          className="text-xs text-muted-foreground transition-transform duration-200 group-open:rotate-90"
-        >
-          &rsaquo;
-        </span>
+          strokeWidth={2.25}
+          className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90"
+        />
         <span className="h-section text-foreground">{summary}</span>
         {hint ? (
-          <span className="ml-auto text-xs text-muted-foreground">{hint}</span>
+          <span className="num ml-auto truncate pl-3 text-xs text-muted-foreground">
+            {hint}
+          </span>
         ) : null}
       </summary>
-      <div className="mt-4">{children}</div>
+      <div className="mt-4 border-t pt-4">{children}</div>
     </details>
   );
 }

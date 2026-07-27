@@ -1,7 +1,10 @@
 import { EvidencePills } from "@/components/report/evidence-pills";
-import { Section } from "@/components/report/section";
+import { Note, Section } from "@/components/report/section";
 import { shareText } from "@/lib/format";
 import type { Bundle } from "@/lib/types";
+
+/** Below this the shares clearly do not account for the whole sample. */
+const FULL_COVERAGE = 99;
 
 /**
  * Topic volume and the finding behind each one, in one block.
@@ -30,7 +33,18 @@ export function Topics({ bundle }: { bundle: Bundle }) {
   const ordered = [...topics].sort(
     (a, b) => measure(b.share, b.count) - measure(a.share, a.count),
   );
-  const max = Math.max(...ordered.map((topic) => measure(topic.share, topic.count)), 1);
+  // Counts have no natural ceiling, so those bars stay relative to the biggest
+  // one. Shares do: the bar for 17% is 17% of the track, because a bar scaled to
+  // the largest topic silently turns "17% of the conversation" into "the leader",
+  // which is a different and much bolder claim than the data supports.
+  const countMax = Math.max(...ordered.map((topic) => topic.count), 1);
+  const widthFor = (share: number, count: number) =>
+    lowData
+      ? Math.max(1.5, (count / countMax) * 100)
+      : Math.min(100, Math.max(1.5, share));
+
+  const totalShare = ordered.reduce((sum, topic) => sum + (Number(topic.share) || 0), 0);
+  const partialCoverage = !lowData && totalShare < FULL_COVERAGE;
 
   return (
     <Section
@@ -43,22 +57,20 @@ export function Topics({ bundle }: { bundle: Bundle }) {
     >
       <ul className="flex list-none flex-col gap-0 p-0">
         {ordered.map((topic) => {
-          const value = measure(topic.share, topic.count);
-          const width = Math.max(1.5, (value / max) * 100);
+          const width = widthFor(topic.share, topic.count);
           const valueLabel = lowData
             ? `${topic.count} ${topic.count === 1 ? "item" : "items"}`
             : `${shareText(topic.share)}%`;
 
           return (
-            <li
-              key={String(topic.id)}
-              className="border-b border-border/60 py-3 last:border-b-0"
-            >
+            <li key={String(topic.id)} className="border-b py-3.5 last:border-b-0">
               <div className="flex items-baseline justify-between gap-4">
-                <span className="text-sm leading-snug font-medium text-foreground">
+                <span className="text-sm leading-snug font-semibold text-foreground">
                   {topic.label}
                 </span>
-                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                {/* The measure is the point of the row, so it is sized like a
+                    number rather than like a caption. */}
+                <span className="num shrink-0 text-[0.9375rem] font-semibold text-foreground">
                   {valueLabel}
                 </span>
               </div>
@@ -66,33 +78,41 @@ export function Topics({ bundle }: { bundle: Bundle }) {
               {/* One series, so no legend: the section title names the measure,
                   and every bar is directly labelled above it. */}
               <div
-                className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full"
+                className="mt-2 h-2 w-full overflow-hidden rounded-full"
                 style={{ background: "var(--viz-track)" }}
                 role="img"
                 aria-label={`${topic.label}: ${valueLabel}`}
               >
                 <div
-                  className="h-full rounded-r-[4px]"
+                  className="h-full rounded-full"
                   style={{ width: `${width}%`, background: "var(--viz-accent)" }}
                 />
               </div>
 
               {topic.finding ? (
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                <p className="mt-2.5 max-w-[78ch] text-[0.8125rem] leading-relaxed text-muted-foreground">
                   {topic.finding}{" "}
-                  <EvidencePills citations={topic.citations} label="Source" />
+                  <EvidencePills citations={topic.citations ?? []} label="Source" />
                 </p>
               ) : (
                 <EvidencePills
-                  citations={topic.citations}
+                  citations={topic.citations ?? []}
                   label="Source"
-                  className="mt-2"
+                  className="mt-2.5"
                 />
               )}
             </li>
           );
         })}
       </ul>
+
+      {partialCoverage ? (
+        <Note>
+          Bars are drawn to the full width of the section, so a topic at 20% fills a fifth
+          of it. These shares add up to {shareText(totalShare)}%: smaller topics are not
+          shown.
+        </Note>
+      ) : null}
     </Section>
   );
 }

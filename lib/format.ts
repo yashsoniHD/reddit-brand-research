@@ -26,6 +26,36 @@ export function truncate(text: string | undefined | null, limit: number): string
   return `${flat.slice(0, limit).trimEnd()}…`;
 }
 
+/**
+ * Cut to a length without splitting a word.
+ *
+ * `truncate` is for labels, where a hard cut mid-word is acceptable noise. This
+ * one is for headings, where "Productivity struggles freelance desig…" reads as
+ * a bug rather than as an abbreviation.
+ */
+export function truncateWords(text: string | undefined | null, limit: number): string {
+  const flat = String(text ?? "").split(/\s+/).filter(Boolean).join(" ");
+  if (flat.length <= limit) return flat;
+  const cut = flat.slice(0, limit);
+  const lastSpace = cut.lastIndexOf(" ");
+  // A single word longer than the limit has no boundary to fall back to.
+  const body = lastSpace > limit * 0.5 ? cut.slice(0, lastSpace) : cut;
+  return `${body.replace(/[,;:.\-–]+$/, "").trimEnd()}…`;
+}
+
+export const REPORT_TITLE_CHARS = 72;
+
+/**
+ * The heading a report is filed under: the engine's generated title when there
+ * is one, otherwise the query itself, cut at a word.
+ */
+export function reportTitle(bundle: Bundle): string {
+  const generated = String(bundle.analysis?.report_title ?? "").trim();
+  if (generated) return truncateWords(generated, REPORT_TITLE_CHARS);
+  const query = String(bundle.inputs?.query ?? "").trim();
+  return query ? truncateWords(query, REPORT_TITLE_CHARS) : "Content ideas report";
+}
+
 /** 12.5 stays 12.5, 12.0 becomes 12. */
 export function shareText(value: number | undefined | null): string {
   const number = Number(value);
@@ -43,6 +73,20 @@ export function runLabel(bundle: Bundle): string {
     query = `${query.slice(0, MAX_LABEL_QUERY_CHARS - 1).trimEnd()}…`;
   }
   return query;
+}
+
+/** Where a saved report lives. One definition, so the route, the copy button
+ *  and the history drawer cannot disagree about it. */
+export function reportPath(reportId: string): string {
+  return `/r/${reportId}`;
+}
+
+/** The link to hand somebody else. Falls back to the bare path when there is
+ *  no window to read an origin from, which only happens on the server. */
+export function reportUrl(reportId: string): string {
+  const path = reportPath(reportId);
+  if (typeof window === "undefined") return path;
+  return new URL(path, window.location.origin).toString();
 }
 
 /** A stable identity for a bundle, used as a history key. */

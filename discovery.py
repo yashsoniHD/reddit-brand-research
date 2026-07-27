@@ -16,6 +16,7 @@ model-fallback and error-message behaviour as the two main calls.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Callable, List, Optional, Sequence
 
 import analysis
@@ -120,12 +121,18 @@ No markdown fences, no commentary. JSON only.""".format(
     )
 
 
+def _out_of_time(deadline: Optional[float]) -> bool:
+    """True once the caller's clock has run out (absolute time.monotonic())."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
 def discover(
     query: str,
     profile: str = "",
     *,
     chat: Optional[Callable] = None,
     lookup: Optional[Callable] = None,
+    deadline: Optional[float] = None,
 ) -> dict:
     """Pick the communities this run will read, or raise ValueError with a message.
 
@@ -135,8 +142,12 @@ def discover(
     search that was actually run rather than only its winners.
 
     `chat` and `lookup` are injection points, exactly like the callables
-    `pipeline.run_report` takes, so tests and Streamlit caching can substitute
+    `pipeline.run_report` takes, so tests and cached wrappers can substitute
     their own without this module importing either.
+
+    `deadline` is an absolute time.monotonic() value. Past it, the remaining
+    candidates are left unchecked rather than spending the run's last seconds on
+    lookups for communities it will not have time to read.
     """
     chat = chat or analysis.chat_json
     lookup = lookup or reddit_data.lookup_subreddit
@@ -169,6 +180,12 @@ def discover(
     for candidate in candidates:
         if len(communities) >= MAX_COMMUNITIES:
             break
+        if _out_of_time(deadline):
+            logger.warning(
+                "out of time after %s candidates; keeping the %s already checked",
+                attempted, len(communities),
+            )
+            break
         attempted += 1
         try:
             found = lookup(candidate["name"])
@@ -188,7 +205,7 @@ def discover(
             {
                 "name": found.get("name") or candidate["name"],
                 "reason": candidate["reason"],
-                "subscribers": int(found.get("subscribers") or 0),
+                "subscribers": reddit_data._safe_int(found.get("subscribers")),
                 "checked": True,
             }
         )
@@ -216,7 +233,12 @@ def discover(
     }
 
 
-def manual(names: Sequence[str], *, lookup: Optional[Callable] = None) -> dict:
+def manual(
+    names: Sequence[str],
+    *,
+    lookup: Optional[Callable] = None,
+    deadline: Optional[float] = None,
+) -> dict:
     """A discovery result for communities the user picked themselves.
 
     Same shape as discover(), no model call. Each name is looked up so the report
@@ -231,14 +253,20 @@ def manual(names: Sequence[str], *, lookup: Optional[Callable] = None) -> dict:
         subscribers = 0
         display = name
         checked = False
-        try:
-            found = lookup(name)
-        except RuntimeError as exc:
-            logger.warning("could not check manually chosen r/%s: %s", name, exc)
-            found = None
+        found = None
+        if _out_of_time(deadline):
+            # The name still goes in: the user chose it, and the fetch stage is what
+            # actually needs the time. Only the cosmetic lookup is skipped.
+            logger.info("out of time; skipping the lookup for manually chosen r/%s", name)
+        else:
+            try:
+                found = lookup(name)
+            except RuntimeError as exc:
+                logger.warning("could not check manually chosen r/%s: %s", name, exc)
+                found = None
         if found:
             display = found.get("name") or name
-            subscribers = int(found.get("subscribers") or 0)
+            subscribers = reddit_data._safe_int(found.get("subscribers"))
             checked = True
         communities.append(
             {

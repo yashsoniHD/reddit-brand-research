@@ -1,12 +1,11 @@
 """Data layer for Reddit Brand Research.
 
 This is the ONLY module that knows where the Reddit data comes from. It currently
-reads the public Arctic Shift archive. To swap the source, reimplement the four
+reads the public Arctic Shift archive. To swap the source, reimplement the
 public functions below and keep their return shapes identical:
 
     normalize_subreddit(raw)            -> str
     parse_subreddit_input(raw)          -> list[str]
-    validate_subreddit(name)            -> SubredditCheck
     lookup_subreddit(name)              -> Optional[dict]
     fetch_posts(subreddit, days)        -> list[dict]
     fetch_comments(subreddit, days)     -> list[dict]
@@ -20,7 +19,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import List, NamedTuple, Optional
+from typing import List, Optional
 
 import requests
 
@@ -35,8 +34,9 @@ SUBREDDITS_ENDPOINT = f"{_API_ROOT}/subreddits/search"
 SOURCE_NAME = "Arctic Shift archive"
 
 # ── Request tuning ────────────────────────────────────────────────────────────
-# There is no user-facing time window: every run reads the last 30 days and the
-# selection layer decides what is worth analysing from that pool.
+# The default and the maximum: a run reads the last 30 days unless the caller asks
+# for a shorter range in the advanced settings (pipeline.TIME_WINDOWS), and the
+# selection layer decides what is worth analysing out of whatever that returns.
 FETCH_WINDOW_DAYS = 30
 PAGE_SIZE = 100
 MAX_POST_PAGES = 5            # 5 x 100 = 500 posts ceiling
@@ -55,11 +55,7 @@ SECONDS_PER_DAY = 86400
 MAX_SUBREDDITS = 4
 MIN_SUBREDDIT_LENGTH = 3
 MAX_SUBREDDIT_LENGTH = 21
-MAX_SUGGESTIONS = 3
-SUGGESTION_FETCH_LIMIT = 10
-# A typo past the first few characters ("skincareaddictoin") has no useful prefix, so
-# suggestions fall back to a stem of the name.
-SUGGESTION_STEM_LENGTH = 6
+LOOKUP_FETCH_LIMIT = 10
 
 _PREFIX_PATTERN = re.compile(
     r"^(https?://)?(www\.|old\.|new\.)?(reddit\.com)?/?(r/)?", re.IGNORECASE
@@ -69,22 +65,6 @@ _DELETED_BODIES = {"[removed]", "[deleted]", ""}
 
 # User-facing messages (complete sentences, no status codes, no URLs).
 _UNAVAILABLE = "The Reddit data service is temporarily unavailable. Please try again in a moment."
-
-
-class SubredditCheck(NamedTuple):
-    """Result of a subreddit existence check.
-
-    exists      True when the community was found (or when the check was skipped).
-    name        Canonical casing to use from here on.
-    suggestions Prefix matches to offer the user when `exists` is False.
-    checked     False when the lookup itself failed and validation was skipped
-                (fail-open), so callers can avoid claiming the name is verified.
-    """
-
-    exists: bool
-    name: str
-    suggestions: List[str] = []
-    checked: bool = True
 
 
 # ── Input normalisation ───────────────────────────────────────────────────────
@@ -193,15 +173,35 @@ def _clean_text(value) -> str:
     return (str(value) if value is not None else "").strip()
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Every number in an archive record, coerced without ever raising.
+
+    The archive is a community mirror of Reddit, not a typed API: a score arrives as
+    null, a string, a float or missing entirely depending on when the row was
+    captured. `int(raw.get("score") or 0)` looked total and was not, and one
+    stringly-typed field on one post used to take down a whole fetch.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def _is_deleted(text: str) -> bool:
     return text.strip().lower() in _DELETED_BODIES
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+# ── Lookup ────────────────────────────────────────────────────────────────────
 def _search_subreddits(params: dict) -> List[dict]:
     """Raises requests.RequestException / ValueError so callers can fail open."""
     resp = _request_page(
-        SUBREDDITS_ENDPOINT, dict(params, limit=SUGGESTION_FETCH_LIMIT),
+        SUBREDDITS_ENDPOINT, dict(params, limit=LOOKUP_FETCH_LIMIT),
         timeout=VALIDATION_TIMEOUT_SECONDS,
     )
     if resp.status_code >= 400:
@@ -210,67 +210,16 @@ def _search_subreddits(params: dict) -> List[dict]:
     return [entry for entry in results if isinstance(entry, dict)]
 
 
-def _suggestions_for(name: str) -> List[str]:
-    """Popular public communities starting with the name, or with a stem of it.
-
-    `subreddit` is an exact match on this API; `subreddit_prefix` is the prefix
-    search. Results arrive ordered by subscriber count, so the first few are the
-    ones a user is most likely to have meant.
-    """
-    queries = [name]
-    if len(name) > SUGGESTION_STEM_LENGTH:
-        queries.append(name[:SUGGESTION_STEM_LENGTH])
-
-    for query in queries:
-        try:
-            results = _search_subreddits({"subreddit_prefix": query})
-        except (requests.RequestException, ValueError):
-            return []
-        names = [
-            _clean_text(entry.get("display_name"))
-            for entry in results
-            if entry.get("subreddit_type") in (None, "public", "restricted")
-            and not entry.get("over18")
-            and _clean_text(entry.get("display_name"))
-            and _clean_text(entry.get("display_name")).lower() != name.lower()
-        ]
-        if names:
-            return names[:MAX_SUGGESTIONS]
-    return []
-
-
-def validate_subreddit(name: str) -> SubredditCheck:
-    """Check a community exists, because the archive answers 200 + empty for typos.
-
-    Fails OPEN: if the lookup itself breaks, return exists=True/checked=False and
-    let the fetch decide, rather than blocking the user on our own outage.
-    """
-    try:
-        results = _search_subreddits({"subreddit": name})
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("subreddit validation skipped for %s: %s", name, exc)
-        return SubredditCheck(exists=True, name=name, suggestions=[], checked=False)
-
-    for entry in results:
-        display = _clean_text(entry.get("display_name"))
-        if display and display.lower() == name.lower():
-            return SubredditCheck(exists=True, name=display, suggestions=[], checked=True)
-
-    return SubredditCheck(
-        exists=False, name=name, suggestions=_suggestions_for(name), checked=True
-    )
-
-
 def lookup_subreddit(name: str) -> Optional[dict]:
     """Everything discovery needs to judge a candidate community in one lookup.
 
-    `validate_subreddit` answers a yes/no question and deliberately fails open, which
-    hides the difference between "this community does not exist" and "we could not
-    check". Discovery has to tell those apart (the first means drop the candidate, the
-    second means trust the model and let the fetch decide) and it also needs the
-    subscriber count and the private/over-18 flags. So this returns the metadata,
-    returns None for a name the archive does not know, and raises RuntimeError when
-    the lookup service itself failed.
+    The archive answers 200 with an empty list for a name that does not exist, so
+    existence has to be checked rather than assumed. Discovery has to tell "this
+    community does not exist" apart from "we could not check" (the first means drop
+    the candidate, the second means trust the model and let the fetch decide), and
+    it also needs the subscriber count and the private/over-18 flags. So this
+    returns the metadata, returns None for a name the archive does not know, and
+    raises RuntimeError when the lookup service itself failed.
     """
     try:
         results = _search_subreddits({"subreddit": name})
@@ -282,13 +231,9 @@ def lookup_subreddit(name: str) -> Optional[dict]:
         display = _clean_text(entry.get("display_name"))
         if not display or display.lower() != name.lower():
             continue
-        try:
-            subscribers = int(entry.get("subscribers") or 0)
-        except (TypeError, ValueError):
-            subscribers = 0
         return {
             "name": display,
-            "subscribers": max(0, subscribers),
+            "subscribers": max(0, _safe_int(entry.get("subscribers"))),
             "over18": bool(entry.get("over18")),
             # A missing type means the archive did not record one; treat that as
             # public, the same reading `_suggestions_for` takes.
@@ -299,14 +244,34 @@ def lookup_subreddit(name: str) -> Optional[dict]:
 
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
-def fetch_posts(subreddit: str, days: int = FETCH_WINDOW_DAYS) -> List[dict]:
-    """Newest-first posts from the last `days` days, deduped, deleted ones dropped."""
+def _out_of_time(deadline: Optional[float]) -> bool:
+    """True once the caller's clock has run out.
+
+    The deadline is an absolute time.monotonic() value, the same clock the pipeline
+    uses, because a wall clock can step backwards mid-run.
+    """
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def fetch_posts(
+    subreddit: str, days: int = FETCH_WINDOW_DAYS, deadline: Optional[float] = None
+) -> List[dict]:
+    """Newest-first posts from the last `days` days, deduped, deleted ones dropped.
+
+    `deadline` stops paging rather than the whole fetch: whatever pages already came
+    back are still a usable sample, and four pages of a five page fetch is a far
+    better answer than an error page.
+    """
     cutoff = _cutoff_timestamp(days)
     posts: List[dict] = []
     seen_ids = set()
     before = None
 
     for page in range(MAX_POST_PAGES):
+        if page > 0 and _out_of_time(deadline):
+            logger.info("stopping r/%s after %s pages: out of time", subreddit, page)
+            break
+
         params = {"subreddit": subreddit, "limit": PAGE_SIZE, "after": cutoff, "sort": "desc"}
         if before is not None:
             params["before"] = before
@@ -357,10 +322,10 @@ def fetch_posts(subreddit: str, days: int = FETCH_WINDOW_DAYS) -> List[dict]:
                     "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
                     "title": title,
                     "body": "" if _is_deleted(body) else body,
-                    "score": int(raw.get("score") or 0),
-                    "comments": int(raw.get("num_comments") or 0),
+                    "score": _safe_int(raw.get("score")),
+                    "comments": _safe_int(raw.get("num_comments")),
                     "url": f"https://reddit.com{permalink}" if permalink else "",
-                    "created_utc": int(raw.get("created_utc") or 0),
+                    "created_utc": _safe_int(raw.get("created_utc")),
                     "date": _format_date(raw.get("created_utc")),
                 }
             )
@@ -376,7 +341,10 @@ def fetch_posts(subreddit: str, days: int = FETCH_WINDOW_DAYS) -> List[dict]:
 
 
 def fetch_comments(
-    subreddit: str, days: int = FETCH_WINDOW_DAYS, limit: int = DEFAULT_COMMENT_LIMIT
+    subreddit: str,
+    days: int = FETCH_WINDOW_DAYS,
+    limit: int = DEFAULT_COMMENT_LIMIT,
+    deadline: Optional[float] = None,
 ) -> List[dict]:
     """Newest-first comments from the last `days` days, deduped, deleted ones dropped."""
     cutoff = _cutoff_timestamp(days)
@@ -386,6 +354,9 @@ def fetch_comments(
 
     for page in range(MAX_COMMENT_PAGES):
         if len(comments) >= limit:
+            break
+        if page > 0 and _out_of_time(deadline):
+            logger.info("stopping r/%s comments after %s pages: out of time", subreddit, page)
             break
 
         params = {"subreddit": subreddit, "limit": PAGE_SIZE, "after": cutoff, "sort": "desc"}
@@ -428,13 +399,16 @@ def fetch_comments(
             comments.append(
                 {
                     "kind": "comment",
-                    "id": comment_id,
+                    # The dedupe key, not the raw id: a comment the archive gave no
+                    # id for used to be stored with id "", and every such comment
+                    # then shared one relevance rating and one identity downstream.
+                    "id": key,
                     "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
                     "title": "",
                     "body": body,
-                    "score": int(raw.get("score") or 0),
+                    "score": _safe_int(raw.get("score")),
                     "url": f"https://reddit.com{permalink}" if permalink else "",
-                    "created_utc": int(raw.get("created_utc") or 0),
+                    "created_utc": _safe_int(raw.get("created_utc")),
                     "date": _format_date(raw.get("created_utc")),
                 }
             )

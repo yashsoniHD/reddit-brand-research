@@ -237,3 +237,72 @@ class TestManual:
         assert community["name"] == "ghost"
         assert community["checked"] is False
         assert community["subscribers"] == 0
+
+
+class TestDeadline:
+    """A run that has spent its time should not go on checking communities it will
+    never have time to read."""
+
+    @staticmethod
+    def _chat(names):
+        def chat(prompt, max_tokens, label, thinking=True):
+            return {"candidates": [{"name": name, "reason": "r"} for name in names]}, "m"
+
+        return chat
+
+    def test_a_deadline_already_past_stops_the_candidate_checks(self):
+        looked_up = []
+
+        def lookup(name):
+            looked_up.append(name)
+            return {"name": name, "subscribers": 1, "over18": False, "public": True}
+
+        with pytest.raises(ValueError):
+            discovery.discover(
+                "query", chat=self._chat(["one", "two", "three"]), lookup=lookup,
+                deadline=discovery.time.monotonic() - 1,
+            )
+        assert looked_up == []
+
+    def test_a_deadline_reached_partway_keeps_what_was_already_checked(self):
+        clock = {"now": discovery.time.monotonic()}
+        looked_up = []
+
+        def lookup(name):
+            looked_up.append(name)
+            # The clock runs out the moment the first community is in hand.
+            clock["now"] += 100
+            return {"name": name, "subscribers": 1, "over18": False, "public": True}
+
+        original = discovery.time.monotonic
+        try:
+            discovery.time.monotonic = lambda: clock["now"]
+            result = discovery.discover(
+                "query", chat=self._chat(["one", "two", "three"]), lookup=lookup,
+                deadline=clock["now"] + 50,
+            )
+        finally:
+            discovery.time.monotonic = original
+
+        assert looked_up == ["one"]
+        assert [c["name"] for c in result["communities"]] == ["one"]
+
+    def test_a_generous_deadline_changes_nothing(self):
+        def lookup(name):
+            return {"name": name, "subscribers": 1, "over18": False, "public": True}
+
+        result = discovery.discover(
+            "query", chat=self._chat(["one", "two"]), lookup=lookup,
+            deadline=discovery.time.monotonic() + 3600,
+        )
+        assert len(result["communities"]) == 2
+
+    def test_manual_keeps_every_name_even_when_the_clock_has_run_out(self):
+        def lookup(name):
+            raise AssertionError("no lookup once the clock has run out")
+
+        result = discovery.manual(
+            ["one", "two"], lookup=lookup, deadline=discovery.time.monotonic() - 1
+        )
+        assert [c["name"] for c in result["communities"]] == ["one", "two"]
+        assert all(c["checked"] is False for c in result["communities"])

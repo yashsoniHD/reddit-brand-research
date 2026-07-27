@@ -45,7 +45,7 @@ export function ColumnChart({
       <div className="relative">
         <div className="flex gap-3">
           <div
-            className="flex w-8 shrink-0 flex-col justify-between text-right text-[11px] tabular-nums text-muted-foreground"
+            className="num flex w-8 shrink-0 flex-col justify-between text-right text-[11px] text-muted-foreground"
             style={{ height: CHART_HEIGHT }}
             aria-hidden="true"
           >
@@ -93,7 +93,7 @@ export function ColumnChart({
               })}
             </div>
             <div
-              className="mt-2 flex border-t pt-1.5 text-[11px] tabular-nums text-muted-foreground"
+              className="num mt-2 flex border-t pt-1.5 text-[11px] text-muted-foreground"
               style={{ borderColor: "var(--viz-grid)" }}
               aria-hidden="true"
             >
@@ -114,10 +114,9 @@ export function ColumnChart({
           aria-live="polite"
         >
           {activePoint ? (
-            <span>
-              <span className="font-medium">{activePoint.label}</span>
-              {": "}
-              <span className="tabular-nums">{activePoint.value}</span> {valueName}
+            <span className="num inline-flex items-center gap-1.5 rounded-md bg-[var(--brand-soft)] px-2 py-1 text-[var(--brand-ink)]">
+              <span className="font-semibold">{activePoint.label}</span>
+              <span className="font-semibold">{activePoint.value}</span> {valueName}
             </span>
           ) : null}
         </div>
@@ -126,29 +125,40 @@ export function ColumnChart({
       <figcaption className="mt-1 text-xs text-muted-foreground">{caption}</figcaption>
 
       <details className="mt-3">
-        <summary className="cursor-pointer text-xs text-muted-foreground underline-offset-4 hover:underline">
+        <summary className="cursor-pointer text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
           View as a table
         </summary>
-        <table id={tableId} className="mt-2 w-full text-left text-xs">
-          <thead>
-            <tr className="text-muted-foreground">
-              <th scope="col" className="py-1 font-medium">
-                Date
-              </th>
-              <th scope="col" className="py-1 text-right font-medium">
-                {valueName}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map((point) => (
-              <tr key={point.label} className="border-t border-border/60">
-                <td className="py-1">{point.label}</td>
-                <td className="py-1 text-right tabular-nums">{point.value}</td>
+        {/* Long tables get their own scroll container, never the page. */}
+        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border">
+          <table id={tableId} className="w-full text-left text-xs">
+            <thead className="sticky top-0 bg-[var(--hush)]">
+              <tr className="text-muted-foreground">
+                <th
+                  scope="col"
+                  className="px-3 py-2 text-[0.6875rem] font-semibold tracking-[0.075em] uppercase"
+                >
+                  Date
+                </th>
+                <th
+                  scope="col"
+                  className="px-3 py-2 text-right text-[0.6875rem] font-semibold tracking-[0.075em] uppercase"
+                >
+                  {valueName}
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {data.map((point) => (
+                <tr key={point.label} className="border-t">
+                  <td className="num px-3 py-1.5">{point.label}</td>
+                  <td className="num px-3 py-1.5 text-right font-medium">
+                    {point.value}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </details>
     </figure>
   );

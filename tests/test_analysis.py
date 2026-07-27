@@ -150,6 +150,39 @@ class TestSanitizeClassification:
         result = analysis.sanitize_classification(raw, 2)
         assert result["topics"][0]["id"] == 1
 
+    def test_a_topic_claiming_the_reserved_id_zero_is_dropped(self):
+        # 0 is the prompt's "fits no topic" sentinel. A topic that claims it would
+        # collect every unassigned item in the sample.
+        raw = {
+            "topics": [{"id": 0, "label": "Everything else"}, {"id": 1, "label": "Real"}],
+            "items": [
+                {"i": 1, "t": 0, "s": "neu"},
+                {"i": 2, "t": 0, "s": "neu"},
+                {"i": 3, "t": 1, "s": "pos"},
+            ],
+        }
+        result = analysis.sanitize_classification(raw, 3)
+        assert [topic["label"] for topic in result["topics"]] == ["Real"]
+        assert result["topics"][0]["item_indices"] == [3]
+
+    def test_items_marked_t_zero_stay_unassigned(self):
+        raw = {
+            "topics": [{"id": 1, "label": "Real"}],
+            "items": [{"i": 1, "t": 0, "s": "neu"}, {"i": 2, "t": 1, "s": "neu"}],
+        }
+        result = analysis.sanitize_classification(raw, 2)
+        assert result["topics"][0]["item_indices"] == [2]
+        # The unassigned item is still labelled for sentiment; it just has no topic.
+        assert len(result["item_sentiments"]) == 2
+
+    def test_a_topic_with_id_zero_does_not_displace_a_real_topic_one(self):
+        raw = {
+            "topics": [{"id": 0, "label": "Sentinel"}, {"id": 1, "label": "Real"}],
+            "items": [{"i": 1, "t": 1, "s": "neu"}],
+        }
+        result = analysis.sanitize_classification(raw, 2)
+        assert [(t["id"], t["label"]) for t in result["topics"]] == [(1, "Real")]
+
 
 class TestTopicDescriptionMatching:
     """A finding attached to the wrong topic is the worst failure this app can ship:
@@ -250,11 +283,14 @@ class TestSanitizeSynthesis:
                 "junk",
             ],
             "pain_points": [
-                {"text": "Too many tools", "item_indices": [1, 99, "2"]},
+                {"text": "Too many tools to keep track of every week",
+                 "item_indices": [1, 99, "2"]},
                 {"text": None, "item_indices": [1]},
-                "a bare string pain point",
+                "a bare string pain point with enough words in it",
             ],
-            "questions": [{"text": "How do I start?", "item_indices": None}],
+            "questions": [
+                {"text": "How do I start consolidating all of this?", "item_indices": None}
+            ],
             "content_ideas": [
                 {"title": "Guide", "format": None, "angle": "x", "rationale": "y",
                  "addresses": "Too many tools", "item_indices": [2]},
@@ -269,7 +305,8 @@ class TestSanitizeSynthesis:
         assert result["executive_summary"] == "A real takeaway."
         assert result["topic_descriptions"] == {1: "People keep losing context."}
         assert [claim["text"] for claim in result["pain_points"]] == [
-            "Too many tools", "a bare string pain point"
+            "Too many tools to keep track of every week",
+            "a bare string pain point with enough words in it",
         ]
         assert result["pain_points"][0]["item_indices"] == [1]
         assert result["questions"][0]["item_indices"] == []
@@ -292,14 +329,14 @@ class TestSanitizeSynthesis:
 
     def test_claims_are_capped(self):
         raw = {
-            "pain_points": [{"text": "p{}".format(i)} for i in range(20)],
-            "questions": [{"text": "q{}".format(i)} for i in range(20)],
-            "content_ideas": [{"title": "i{}".format(i)} for i in range(20)],
+            "pain_points": [{"text": "A distinct pain point number {}".format(i)} for i in range(20)],
+            "questions": [{"text": "A distinct question number {}?".format(i)} for i in range(20)],
+            "content_ideas": [{"title": "i{}".format(i)} for i in range(30)],
         }
         result = analysis.sanitize_synthesis(raw, 5)
         assert len(result["pain_points"]) == analysis.MAX_PAIN_POINTS
         assert len(result["questions"]) == analysis.MAX_QUESTIONS
-        assert len(result["content_ideas"]) == analysis.MAX_CONTENT_IDEAS
+        assert len(result["content_ideas"]) == analysis.SANITIZE_MAX_CONTENT_IDEAS
 
     def test_no_markdown_link_survives_any_field(self):
         raw = {
@@ -345,6 +382,117 @@ class TestIdeaHookSanitisation:
         assert set(result["content_ideas"][0].keys()) == {
             "title", "hook", "format", "angle", "rationale", "addresses", "item_indices"
         }
+
+
+class TestHookDeduplication:
+    """Two ideas that open on the same words are one idea printed twice, which
+    is exactly what a live run produced: ideas 02 and 14 shared a quote stem."""
+
+    def test_a_second_idea_with_the_same_opening_is_dropped(self):
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "Client feedback arrives in five different places every week."},
+            {"title": "B", "hook": "Client feedback arrives in five different places, and I miss half."},
+            {"title": "C", "hook": "Nobody told me the deadline moved until Friday afternoon."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, n_items=3)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["A", "C"]
+
+    def test_casing_and_punctuation_cannot_hide_a_repeat(self):
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "Unlimited revisions is not standard. It is just unpriced."},
+            {"title": "B", "hook": "UNLIMITED revisions, is not standard: it is never priced."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, n_items=3)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["A"]
+
+    def test_hooks_that_only_diverge_after_the_stem_are_kept(self):
+        # The comparison is the opening, not the whole line: two hooks that
+        # share a common noun but start differently are two ideas.
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "Three clients, one calendar, and no idea who is waiting."},
+            {"title": "B", "hook": "Nobody warned me that one calendar cannot hold three clients."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, n_items=3)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["A", "B"]
+
+    def test_several_ideas_with_no_hook_at_all_are_all_kept(self):
+        # An empty hook has no stem, so it must not collide with the next
+        # empty hook and quietly delete every idea after the first.
+        raw = {"content_ideas": [{"title": "A"}, {"title": "B"}, {"title": "C"}]}
+        result = analysis.sanitize_synthesis(raw, n_items=3)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["A", "B", "C"]
+
+
+class TestHookProfileEcho:
+    """A hook is either the community's voice or the author's. It is never the
+    user's own description of their business, read back as if a Redditor said it."""
+
+    PROFILE = "I run a Notion template shop for freelance designers."
+
+    def test_a_hook_that_repeats_the_profile_is_dropped(self):
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "I run a Notion template shop for freelance designers."},
+            {"title": "B", "hook": "Nobody told me the deadline moved until Friday afternoon."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, profile=self.PROFILE)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["B"]
+
+    def test_a_partial_run_of_the_profile_is_still_an_echo(self):
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "Every Notion template shop I know undercharges by half."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, profile=self.PROFILE)
+        assert result["content_ideas"] == []
+
+    @pytest.mark.parametrize(
+        "hook",
+        [
+            "Four designers, four different setups, and nobody agrees.",
+            "My template broke the moment a second client opened it.",
+            "Freelance work does not fail on skill. It fails on handover.",
+        ],
+    )
+    def test_ordinary_hooks_that_share_a_word_with_the_profile_survive(self, hook):
+        # The threshold is a run of at least three words and twelve characters,
+        # so shared vocabulary alone is never enough to lose an idea.
+        raw = {"content_ideas": [{"title": "A", "hook": hook}]}
+        result = analysis.sanitize_synthesis(raw, 3, profile=self.PROFILE)
+        assert len(result["content_ideas"]) == 1
+
+    def test_a_hook_naming_the_users_own_product_is_dropped(self):
+        # Straight from a live run: the model wrote the user's own product into
+        # a first-person hook, which reads as a testimonial nobody gave.
+        raw = {"content_ideas": [
+            {"title": "A", "hook": "My Notion template for juggling clients keeps me sane."},
+            {"title": "B", "hook": "Three deadlines moved and nobody thought to tell me."},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, profile=self.PROFILE)
+        assert [idea["title"] for idea in result["content_ideas"]] == ["B"]
+
+    def test_brand_tokens_are_the_names_the_user_capitalised_mid_sentence(self):
+        assert analysis.brand_tokens(self.PROFILE) == {"notion"}
+        # A capital at the start of a sentence says nothing, and neither does a
+        # profile written entirely in lower case.
+        assert analysis.brand_tokens("Bookkeeping is what I do all day.") == set()
+        assert analysis.brand_tokens("i run a notion template shop") == set()
+        # Short words are skipped: a three-letter capital collides with too much.
+        assert analysis.brand_tokens("I sell an API course for Django teams.") == {"django"}
+
+    def test_no_profile_means_no_echo_check_at_all(self):
+        raw = {"content_ideas": [{"title": "A", "hook": "I run a Notion template shop."}]}
+        assert len(analysis.sanitize_synthesis(raw, 3)["content_ideas"]) == 1
+
+    def test_the_echo_helper_needs_both_a_word_count_and_a_length(self):
+        assert analysis.PROFILE_ECHO_MIN_WORDS == 3
+        assert analysis.PROFILE_ECHO_MIN_CHARS == 12
+        # Three words but only nine characters: too small to mean anything.
+        assert not analysis._echoes("a b c today", "a b c yesterday")
+        # Three words and twenty-seven characters: a run this long is a quote
+        # of the brief, not a coincidence.
+        assert analysis._echoes(
+            "We asked twelve freelance graphic designers what they charge.",
+            "I coach freelance graphic designers on pricing.",
+        )
 
 
 class TestSynthesisPrompt:
@@ -397,6 +545,370 @@ class TestSynthesisPrompt:
         assert "em dash" in prompt and "en dash" in prompt
 
 
+class TestContentType:
+    """When the user asks for formats, every idea comes back in one of them."""
+
+    def test_the_prompt_names_the_one_format_and_drops_the_menu(self):
+        prompt = analysis._synthesis_prompt(
+            [], [], "q", "", ["x"], content_types=["carousel"]
+        )
+        assert '"Carousel (PDF)" for EVERY idea' in prompt
+        assert "Video script" not in prompt
+
+    def test_no_content_type_keeps_the_full_format_menu(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        for fmt in analysis.IDEA_FORMATS:
+            assert fmt in prompt
+
+    def test_two_content_types_ask_for_both_and_for_an_even_spread(self):
+        prompt = analysis._synthesis_prompt(
+            [], [], "q", "", ["x"], content_types=["poll", "carousel"]
+        )
+        assert "Carousel (PDF)" in prompt and "Poll" in prompt
+        assert "roughly evenly" in prompt
+        # The formats nobody asked for are not on the menu at all.
+        assert "Video script" not in prompt and "Long-form article" not in prompt
+
+    def test_one_content_type_does_not_ask_for_a_spread(self):
+        prompt = analysis._synthesis_prompt(
+            [], [], "q", "", ["x"], content_types=["poll"]
+        )
+        assert "roughly evenly" not in prompt
+
+    def test_the_mixed_menu_does_not_ask_for_a_spread(self):
+        assert "roughly evenly" not in analysis._synthesis_prompt([], [], "q", "", ["x"])
+
+    @pytest.mark.parametrize(
+        "content_type,expected",
+        [("text", "Text post"), ("carousel", "Carousel (PDF)"),
+         ("video", "Video script"), ("poll", "Poll"), ("article", "Long-form article")],
+    )
+    def test_every_idea_is_forced_to_the_chosen_format(self, content_type, expected):
+        raw = {"content_ideas": [
+            {"title": "A", "format": "Newsletter"},
+            {"title": "B", "format": ""},
+            {"title": "C"},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=[content_type])
+        assert [idea["format"] for idea in result["content_ideas"]] == [expected] * 3
+
+    def test_an_unknown_content_type_leaves_the_model_format_alone(self):
+        raw = {"content_ideas": [{"title": "A", "format": "Poll"}]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=["reel"])
+        assert result["content_ideas"][0]["format"] == "Poll"
+
+    def test_an_idea_already_in_a_chosen_format_keeps_it(self):
+        raw = {"content_ideas": [
+            {"title": "A", "format": "Poll"},
+            {"title": "B", "format": "Carousel (PDF)"},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
+        assert [idea["format"] for idea in result["content_ideas"]] == [
+            "Poll", "Carousel (PDF)"
+        ]
+
+    def test_the_model_may_name_a_chosen_format_by_its_wire_value(self):
+        raw = {"content_ideas": [{"title": "A", "format": "carousel"}]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
+        assert result["content_ideas"][0]["format"] == "Carousel (PDF)"
+
+    def test_an_idea_outside_the_set_goes_to_the_least_used_chosen_format(self):
+        # Three carousels and a newsletter: the newsletter becomes the poll,
+        # because that is the chosen format the set has used least.
+        raw = {"content_ideas": [
+            {"title": "A", "format": "Carousel (PDF)"},
+            {"title": "B", "format": "Carousel (PDF)"},
+            {"title": "C", "format": "Carousel (PDF)"},
+            {"title": "D", "format": "Newsletter"},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
+        assert [idea["format"] for idea in result["content_ideas"]] == [
+            "Carousel (PDF)", "Carousel (PDF)", "Carousel (PDF)", "Poll"
+        ]
+
+    def test_a_run_of_unusable_formats_is_spread_across_the_chosen_ones(self):
+        raw = {"content_ideas": [
+            {"title": "i{}".format(i), "format": "Newsletter"} for i in range(4)
+        ]}
+        result = analysis.sanitize_synthesis(
+            raw, 3, content_types=["poll", "text", "video"]
+        )
+        formats = [idea["format"] for idea in result["content_ideas"]]
+        # Menu order breaks the ties, and no format is used twice before every
+        # other chosen one has been used once.
+        assert formats == ["Text post", "Video script", "Poll", "Text post"]
+
+    def test_the_spread_counts_the_formats_the_model_already_chose(self):
+        raw = {"content_ideas": [
+            {"title": "A", "format": "Poll"},
+            {"title": "B", "format": "Poll"},
+            {"title": "C", "format": "Newsletter"},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, content_types=["poll", "text"])
+        assert result["content_ideas"][2]["format"] == "Text post"
+
+    def test_the_map_covers_exactly_the_five_offered_types(self):
+        assert set(analysis.CONTENT_TYPE_FORMATS) == {
+            "text", "carousel", "video", "poll", "article"
+        }
+        for label in analysis.CONTENT_TYPE_FORMATS.values():
+            assert label in analysis.IDEA_FORMATS
+
+    def test_every_idea_format_the_model_may_emit_is_offerable_as_a_content_type(self):
+        # The mixed-mode menu and the content-type selector have to line up: a
+        # format the model is told it may use, but which the user cannot ask
+        # for, is a gap in the selector.
+        assert set(analysis.CONTENT_TYPE_FORMATS.values()) == set(analysis.IDEA_FORMATS)
+
+
+class TestIdeaCount:
+    def test_the_prompt_asks_for_twelve_to_fifteen(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert analysis.MIN_CONTENT_IDEAS == 12 and analysis.MAX_CONTENT_IDEAS == 15
+        assert "12 to 15 posts" in prompt
+
+    def test_the_sanitiser_accepts_a_wider_band_than_the_prompt_asks_for(self):
+        assert analysis.SANITIZE_MIN_CONTENT_IDEAS == 8
+        assert analysis.SANITIZE_MAX_CONTENT_IDEAS == 20
+        raw = {"content_ideas": [{"title": "i{}".format(i)} for i in range(18)]}
+        assert len(analysis.sanitize_synthesis(raw, 3)["content_ideas"]) == 18
+
+    def test_the_synthesis_budget_covers_fifteen_ideas(self):
+        # Roughly 250 output tokens per pretty-printed idea plus the rest of the
+        # payload, all of it well inside the ceiling with room left for reasoning.
+        payload = 250 * analysis.MAX_CONTENT_IDEAS + 80 * analysis.MAX_TOPICS + 1000
+        assert payload < analysis.SYNTHESIS_MAX_TOKENS / 2
+
+
+class TestReportTitle:
+    def test_the_prompt_asks_for_one(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert '"report_title"' in prompt
+
+    def test_a_model_title_is_stripped_and_trimmed_to_a_word_boundary(self):
+        raw = {"report_title": "**How " + "freelancers " * 20 + "price**"}
+        title = analysis.sanitize_synthesis(raw, 3)["report_title"]
+        assert len(title) <= analysis.MAX_REPORT_TITLE_CHARS
+        assert not title.endswith("freelance")
+        assert "*" not in title
+
+    def test_a_missing_title_falls_back_to_the_query(self):
+        result = analysis.sanitize_synthesis({}, 3, query="scope creep on fixed fee projects")
+        assert result["report_title"] == "scope creep on fixed fee projects"
+
+    def test_a_long_query_fallback_stops_at_a_word_boundary(self):
+        query = "how freelance designers handle scope creep on fixed fee client projects"
+        title = analysis.report_title_from_query(query)
+        assert len(title) <= analysis.FALLBACK_TITLE_CHARS
+        assert query.startswith(title)
+        assert title.split()[-1] in query.split()
+
+    def test_no_query_and_no_title_still_gives_something_renderable(self):
+        assert analysis.sanitize_synthesis({}, 3)["report_title"]
+
+    def test_markdown_and_links_never_survive_a_title(self):
+        raw = {"report_title": "[Pricing](http://evil.example) at scale"}
+        assert analysis.sanitize_synthesis(raw, 3)["report_title"] == "Pricing at scale"
+
+
+class TestClaimQuality:
+    def test_a_question_that_restates_a_pain_point_is_dropped(self):
+        raw = {
+            "pain_points": [{"text": "Clients keep adding work after the quote"}],
+            "questions": [
+                {"text": "Clients keep adding work after the quote?"},
+                {"text": "How do you write a scope that survives contact?"},
+            ],
+        }
+        result = analysis.sanitize_synthesis(raw, 3)
+        assert len(result["questions"]) == 1
+        assert result["questions"][0]["text"].startswith("How do you write")
+
+    def test_duplicates_within_one_list_are_dropped_too(self):
+        raw = {"pain_points": [
+            {"text": "Clients keep adding work after the quote"},
+            {"text": "clients keep adding work after the quote."},
+        ]}
+        assert len(analysis.sanitize_synthesis(raw, 3)["pain_points"]) == 1
+
+    def test_a_claim_too_short_to_say_anything_is_dropped(self):
+        raw = {"pain_points": [{"text": "Pricing"}, {"text": "Tools"},
+                               {"text": "Nobody answers a scoping email in under a week"}]}
+        result = analysis.sanitize_synthesis(raw, 3)
+        assert [claim["text"] for claim in result["pain_points"]] == [
+            "Nobody answers a scoping email in under a week"
+        ]
+
+    def test_the_floor_is_a_named_constant_not_a_magic_number(self):
+        assert analysis.MIN_CLAIM_CHARS == 25
+
+
+class TestHookQualityRules:
+    """The hook is the product. These rules are the difference between a report
+    someone publishes from and one they scroll past."""
+
+    def test_the_question_then_command_template_is_banned_by_name(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "[Problem]?" in prompt and "banned" in prompt
+
+    def test_the_prompt_demands_a_number_a_quote_or_a_named_situation(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "a specific number" in prompt
+        assert "quoted from the evidence" in prompt
+        assert "concrete named situation" in prompt
+
+    def test_the_prompt_shows_three_good_and_three_bad_examples(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        good_block = prompt.split("Good hooks")[1].split("Bad hooks")[0]
+        bad_block = prompt.split("Bad hooks")[1].split("\n-")[0]
+        # Examples are the indented lines; the rule sentence around them is not.
+        good = [line for line in good_block.split("\n") if line.startswith("    ")]
+        bad = [line for line in bad_block.split("\n") if line.startswith("    ")]
+        assert len(good) == 3 and len(bad) == 3
+        assert "250 cold emails" in good_block
+        assert "Struggling to price your work?" in bad_block
+
+    def test_the_prompt_caps_how_many_ideas_may_name_the_brand(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "At most 2 of the 15 ideas may name" in prompt
+
+    def test_the_prompt_bans_a_quote_with_a_marketing_tail_bolted_on(self):
+        # The gamed pattern from a live run: a real Reddit line, then a second
+        # sentence selling the post. Named shape by shape so the model cannot
+        # read the rule as being about one phrasing.
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "A hook is ONE voice" in prompt
+        assert "NEVER append a promise, an instruction, a reassurance or an offer" in prompt
+        for tail in ("It doesn't have to be.", "Here's how.", "Explore these alternatives."):
+            assert tail in prompt
+
+    def test_the_prompt_keeps_the_brand_out_of_the_hook_entirely(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "profile text", ["x"])
+        assert "may never" in prompt and "appear inside a hook" in prompt
+        assert 'that belongs in "angle" and "rationale". Never in "hook".' in prompt
+
+    def test_the_prompt_gives_a_mechanical_test_for_the_question_plus_promise(self):
+        # A rule the model can check itself beats a rule it has to interpret,
+        # and interpretation is what produced "[Quote]? Here's my clause."
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "that question mark must be the LAST character" in prompt
+        assert "Here's my contract clause." in prompt
+
+    def test_the_prompt_bans_the_promise_fragment_anywhere_in_a_hook(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "may never end on a fragment that promises the answer" in prompt
+        for fragment in ('"My process."', '"Here\'s how."', '"My system."'):
+            assert fragment in prompt
+
+    def test_the_prompt_bans_restating_the_query_or_the_profile(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "profile text", ["x"])
+        assert "may never restate the research question" in prompt
+        assert "self-description of the person you are writing for" in prompt
+
+    def test_the_prompt_demands_a_distinct_opening_for_every_hook(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        assert "Every hook must open on different words" in prompt
+        assert "No two hooks in this response may begin" in prompt
+
+    def test_no_good_hook_example_models_the_banned_tail(self):
+        # The examples teach harder than the rules do, so none of them may be
+        # a quote with a sales sentence appended.
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
+        good_block = prompt.split("Good hooks")[1].split("Bad hooks")[0]
+        for tail in ("Here is what", "Here is how", "Here's how", "Try these"):
+            assert tail not in good_block
+
+
+class TestStripsUrlsAndEmphasis:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("**bold** claim", "bold claim"),
+            ("an *emphasised* claim", "an emphasised claim"),
+            ("__underlined__ claim", "underlined claim"),
+            ("read https://evil.example/x now", "read now"),
+            ("see www.evil.example for more", "see for more"),
+            ("go to evilsite.com/deals today", "go to today"),
+            ("try Notion.so and Figma.com", "try and"),
+        ],
+    )
+    def test_links_and_emphasis_never_reach_a_report(self, raw, expected):
+        assert analysis.strip_markdown(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Node.js is fine", "version 3.5 shipped", "i.e. this survives", "5 * 3 = 15"],
+    )
+    def test_ordinary_text_that_looks_like_a_domain_survives(self, raw):
+        assert analysis.strip_markdown(raw) == raw
+
+    def test_no_hook_can_smuggle_a_url(self):
+        raw = {"content_ideas": [{"title": "A", "hook": "Read more at scamsite.com/offer"}]}
+        hook = analysis.sanitize_synthesis(raw, 3)["content_ideas"][0]["hook"]
+        assert "scamsite" not in hook and "http" not in hook
+
+
+class TestDraftGrounding:
+    """The draft is the one output a user puts their own name on, so it may not
+    contain a number the evidence did not give it."""
+
+    IDEA = {"title": "Scope creep", "hook": "Twenty hours quoted, sixty five delivered.",
+            "format": "Text post", "angle": "Discovery is the fix.",
+            "addresses": "Losing margin on fixed fee work"}
+
+    def test_the_prompt_forbids_inventing_specifics(self):
+        prompt = analysis._draft_prompt(self.IDEA, ["We quoted 20 hours."], "q", "")
+        for rule in ("Never invent a statistic", "named tool", "personal anecdote",
+                     "must come from the excerpts"):
+            assert rule in prompt
+
+    def test_the_prompt_offers_an_opinion_piece_instead_of_invented_data(self):
+        prompt = analysis._draft_prompt(self.IDEA, [], "q", "")
+        assert "opinionated" in prompt
+        assert "An invented number is not." in prompt
+
+    @pytest.mark.parametrize(
+        "fmt,marker",
+        [
+            ("Carousel (PDF)", "Slide 1:"),
+            ("Video script", "Beat 1:"),
+            ("Long-form article", "structured long-form article"),
+            ("Poll", "poll question"),
+            ("Text post", "short paragraphs"),
+        ],
+    )
+    def test_each_format_gets_its_own_shape(self, fmt, marker):
+        prompt = analysis._draft_prompt(dict(self.IDEA, format=fmt), [], "q", "")
+        assert marker in prompt
+
+    def test_a_poll_draft_asks_for_a_question_bounded_options_and_a_vote_prompt(self):
+        prompt = analysis._draft_prompt(dict(self.IDEA, format="Poll"), [], "q", "")
+        assert "the poll question on its own line" in prompt
+        assert "two to four options" in prompt
+        assert 'prefixed with "Option:"' in prompt
+        assert "vote" in prompt and "comments" in prompt
+        assert "80 to 180 words" in prompt
+
+    def test_an_unknown_format_falls_back_to_a_plain_post(self):
+        prompt = analysis._draft_prompt(dict(self.IDEA, format="Skywriting"), [], "q", "")
+        assert "short paragraphs" in prompt
+
+    def test_a_near_miss_format_name_still_matches(self):
+        assert analysis._draft_format({"format": "Carousel"}) == "Carousel (PDF)"
+
+    def test_the_word_band_follows_the_format(self):
+        article = analysis._draft_prompt(
+            dict(self.IDEA, format="Long-form article"), [], "q", ""
+        )
+        assert "350 to 650 words" in article
+
+    def test_evidence_is_carried_at_full_excerpt_length(self):
+        long_excerpt = "x" * 900
+        lines = analysis._evidence_lines([long_excerpt])
+        assert analysis.DRAFT_EVIDENCE_CHARS == 600
+        assert len(lines) <= analysis.DRAFT_EVIDENCE_CHARS + 6
+
+
 class TestSynthesizePublicCall:
     def test_forwards_query_into_the_prompt_and_sanitises_the_result(self, monkeypatch):
         captured = {}
@@ -417,6 +929,24 @@ class TestSynthesizePublicCall:
         assert "skincare routines" in captured["prompt"]
         assert result["content_ideas"][0]["hook"] == "Stop scrolling"
         assert "platform" not in result["content_ideas"][0]
+
+    def test_the_profile_reaches_the_sanitiser_so_the_echo_guard_is_live(self, monkeypatch):
+        """The guard is worthless if the real call path never hands it a profile."""
+
+        def fake_chat_json(prompt, max_tokens, label):
+            return (
+                {"content_ideas": [
+                    {"title": "Echo", "hook": "I run a Notion template shop for designers."},
+                    {"title": "Real", "hook": "Nobody told me the deadline moved until Friday."},
+                ]},
+                "test-model",
+            )
+
+        monkeypatch.setattr(analysis, "_chat_json", fake_chat_json)
+        result = analysis.synthesize(
+            [], [], "q", "I run a Notion template shop for designers.", ["x"]
+        )
+        assert [idea["title"] for idea in result["content_ideas"]] == ["Real"]
 
 
 class _FakeCandidate:
@@ -585,6 +1115,34 @@ class TestDraftPost:
         lines = analysis._evidence_lines(many)
         assert len(lines.split("\n")) == analysis.DRAFT_MAX_EVIDENCE
 
+    def test_a_poll_draft_with_too_many_options_is_capped_at_four(self, monkeypatch):
+        # LinkedIn's poll UI caps at four options; a live run once produced six, so
+        # this pins the backstop that keeps the first four and drops the rest.
+        post = (
+            "Hook line.\n\nSome context.\n\nWhich do you use?\n"
+            "Option: A\nOption: B\nOption: C\nOption: D\nOption: E\nOption: F\n\n"
+            "Vote and tell me why in the comments."
+        )
+        client = self._client_with({"post": post})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        result = analysis.draft_post(dict(self.IDEA, format="Poll"), self.EVIDENCE, "q", "")
+
+        option_lines = [line for line in result["post"].split("\n") if line.startswith("Option:")]
+        assert option_lines == ["Option: A", "Option: B", "Option: C", "Option: D"]
+        # Everything else in the draft survives untouched.
+        assert "Which do you use?" in result["post"]
+        assert "Vote and tell me why in the comments." in result["post"]
+
+    def test_a_non_poll_draft_with_option_like_lines_is_left_alone(self, monkeypatch):
+        post = "\n".join("Option: {}".format(i) for i in range(6))
+        client = self._client_with({"post": post})
+        monkeypatch.setattr(analysis, "_client", client)
+
+        result = analysis.draft_post(dict(self.IDEA, format="Text post"), self.EVIDENCE, "q", "")
+
+        assert result["post"].count("Option:") == 6
+
 
 class TestChatJsonRetriesMalformedPayloads:
     """Regression coverage for the retryable-JSON-parse path in `_chat_json`.
@@ -665,6 +1223,160 @@ class TestChatJsonRetriesMalformedPayloads:
         # No fake client needed: this exercises _parse_json_object directly, proving
         # the repair pass is only ever consulted after strict json.loads has failed.
         assert analysis._parse_json_object(text) == analysis.json.loads(text)
+
+
+class TestContentFilterIsNotRetried:
+    """A safety block is a property of the text we sent. Retrying it three times
+    spends a minute arriving at the same refusal and then reports it as temporary."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+
+    class _Blocked:
+        """A response the filter stopped: valid object, no usable text."""
+
+        def __init__(self, finish="SAFETY", block_reason=None):
+            self.text = ""
+            self.candidates = [_FakeCandidate(finish)]
+            if block_reason is not None:
+                self.prompt_feedback = type("F", (), {"block_reason": block_reason})()
+
+    @staticmethod
+    def _client_returning(response):
+        class Models:
+            calls = 0
+
+            def generate_content(self, model, contents, config):
+                type(self).calls += 1
+                return response
+
+        return type("C", (), {"models": Models()})()
+
+    @pytest.mark.parametrize("finish", ["SAFETY", "PROHIBITED_CONTENT", "RECITATION",
+                                        "FinishReason.SAFETY"])
+    def test_a_blocking_finish_reason_fails_immediately(self, monkeypatch, finish):
+        client = self._client_returning(self._Blocked(finish))
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.chat_json("prompt", 100, "demo")
+
+        assert str(excinfo.value) == analysis._CONTENT_BLOCKED
+        assert client.models.calls == 1
+
+    def test_a_blocked_prompt_fails_immediately_too(self, monkeypatch):
+        client = self._client_returning(self._Blocked(finish="STOP", block_reason="SAFETY"))
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.chat_json("prompt", 100, "demo")
+
+        assert str(excinfo.value) == analysis._CONTENT_BLOCKED
+        assert client.models.calls == 1
+
+    def test_the_message_names_the_fix_and_leaks_nothing(self):
+        message = analysis._CONTENT_BLOCKED
+        assert message[0].isupper() and message.endswith(".")
+        assert "different communities" in message
+        for jargon in ["SAFETY", "finish_reason", "block", "API", "http"]:
+            assert jargon.lower() not in message.lower()
+
+    def test_an_unspecified_block_reason_is_not_a_block(self, monkeypatch):
+        response = self._Blocked(finish="STOP", block_reason="BLOCK_REASON_UNSPECIFIED")
+        response.text = '{"ok": 1}'
+        client = self._client_returning(response)
+        monkeypatch.setattr(analysis, "_client", client)
+        assert analysis.chat_json("prompt", 100, "demo")[0] == {"ok": 1}
+
+    def test_an_ordinary_truncation_is_still_retried(self, monkeypatch):
+        client = _FakeClient(["", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+        assert analysis.chat_json("prompt", 100, "demo")[0] == {"ok": 1}
+        assert client.models.calls == 2
+
+
+class TestRefitLoop:
+    """A prompt the provider rejects shrinks THIS run's budget and nothing else."""
+
+    def _posts(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": i, "comments": 0, "created_utc": 1700000000 + i}
+            for i in range(count)
+        ]
+
+    def test_a_rejection_shrinks_the_sample_and_then_succeeds(self, monkeypatch):
+        budgets = []
+        attempts = {"n": 0}
+
+        def fake_fit(posts, comments, subreddits, budget=None):
+            budgets.append(budget)
+            return list(posts)[:5], 200
+
+        def fake_classify_items(items, subreddits, preview_chars=200):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise analysis.PayloadTooLarge("too big")
+            return {"topics": [], "item_sentiments": [], "model": "m"}
+
+        monkeypatch.setattr(analysis, "fit_sample", fake_fit)
+        monkeypatch.setattr(analysis, "classify_items", fake_classify_items)
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: None)
+
+        analysis.classify_sample(self._posts(10), [], ["s"], "query", "")
+
+        assert len(budgets) == 2
+        assert budgets[0] == analysis.token_budget()
+        assert budgets[1] == int(budgets[0] * 0.75)
+
+    def test_the_shaved_budget_does_not_leak_into_the_next_run(self, monkeypatch):
+        seen = []
+
+        def fake_fit(posts, comments, subreddits, budget=None):
+            seen.append(budget)
+            return list(posts)[:5], 200
+
+        monkeypatch.setattr(analysis, "fit_sample", fake_fit)
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: None)
+        monkeypatch.setattr(
+            analysis, "classify_items",
+            lambda items, subreddits, preview_chars=200: (_ for _ in ()).throw(
+                analysis.PayloadTooLarge("too big")
+            ),
+        )
+
+        with pytest.raises(ValueError):
+            analysis.classify_sample(self._posts(10), [], ["s"], "query", "")
+        first_run = list(seen)
+        seen.clear()
+
+        monkeypatch.setattr(
+            analysis, "classify_items",
+            lambda items, subreddits, preview_chars=200: {
+                "topics": [], "item_sentiments": [], "model": "m"
+            },
+        )
+        analysis.classify_sample(self._posts(10), [], ["s"], "query", "")
+
+        assert first_run[0] == analysis.token_budget()
+        assert first_run[-1] < first_run[0]          # it did shrink, within the run
+        assert seen == [analysis.token_budget()]      # and the next run starts fresh
+
+    def test_running_out_of_refits_raises_a_user_ready_sentence(self, monkeypatch):
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: None)
+        monkeypatch.setattr(
+            analysis, "classify_items",
+            lambda items, subreddits, preview_chars=200: (_ for _ in ()).throw(
+                analysis.PayloadTooLarge("too big")
+            ),
+        )
+        with pytest.raises(ValueError) as excinfo:
+            analysis.classify_sample(self._posts(10), [], ["s"], "query", "")
+        message = str(excinfo.value)
+        assert message[0].isupper() and message.endswith(".")
 
 
 class TestErrorMapping:
@@ -782,9 +1494,16 @@ class TestTokenBudget:
         items, _ = analysis.fit_sample(posts, [], ["x"], budget=1)
         assert items
 
-    def test_learned_limit_is_used_for_the_budget(self, monkeypatch):
-        monkeypatch.setattr(analysis, "_token_limit", 12000)
-        assert analysis.token_budget() == int(12000 * analysis.BUDGET_SAFETY)
+    def test_the_budget_is_the_configured_one_with_a_safety_margin(self):
+        assert analysis.token_budget() == int(
+            analysis.DEFAULT_TOKEN_BUDGET * analysis.BUDGET_SAFETY
+        )
+
+    def test_the_budget_has_no_module_level_state_to_race_on(self):
+        # A "learned limit" global used to shrink here and stay shrunk for every
+        # later run in the same process, and race between two concurrent ones.
+        assert not hasattr(analysis, "_token_limit")
+        assert analysis.token_budget() == analysis.token_budget()
 
     def test_capacity_limited_is_false_when_the_full_sample_was_used(self):
         posts = [{"kind": "post", "score": 1} for _ in range(10)]
@@ -875,7 +1594,7 @@ class TestScoring:
         quiet_ontopic = self._post("on", score=2, comments=0)
         ranked_posts, _ = analysis.rank_items(
             [viral_offtopic, quiet_ontopic], [],
-            relevance={"off": 0, "on": 2}, now=self.NOW,
+            relevance={("post", "off"): 0, ("post", "on"): 2}, now=self.NOW,
         )
         assert [post["id"] for post in ranked_posts] == ["on", "off"]
 
@@ -919,6 +1638,141 @@ class TestScoring:
         quiet = self._comment("quiet", score=0)
         _, ranked_comments = analysis.rank_items([], [good, quiet], now=self.NOW)
         assert [comment["id"] for comment in ranked_comments] == ["good", "quiet"]
+
+    def test_the_fairness_cap_carries_across_the_eligible_backfill_seam(self):
+        # "loud" fills the eligible tier on its own. Ordering each tier separately
+        # restarted its count at zero, so it also took the head of the backfill tier
+        # on raw score. With one shared cap, the slots at the seam go to the
+        # community that is six picks behind.
+        loud_eligible = [
+            self._post("loud{}".format(i), subreddit="loud", score=1000 - i) for i in range(6)
+        ]
+        loud_backfill = [
+            self._post("louddrop{}".format(i), subreddit="loud", score=900,
+                       title="look", body="https://x.co")
+            for i in range(4)
+        ]
+        quiet_backfill = [
+            self._post("quietdrop{}".format(i), subreddit="quiet", score=1,
+                       title="look", body="https://x.co")
+            for i in range(4)
+        ]
+        ranked_posts, _ = analysis.rank_items(
+            loud_eligible + loud_backfill + quiet_backfill, [], now=self.NOW
+        )
+        ids = [post["id"] for post in ranked_posts]
+        assert ids[:6] == ["loud{}".format(i) for i in range(6)]
+        # Every quiet backfill item comes before any loud one, despite scoring 1 to
+        # their 900, because loud has already had six of the six picks so far.
+        assert all(name.startswith("quietdrop") for name in ids[6:10])
+        assert all(name.startswith("louddrop") for name in ids[10:])
+
+    def test_no_backfill_item_outranks_an_eligible_one(self):
+        link_drop = self._post("drop", subreddit="quiet", score=5000, comments=900,
+                               title="look", body="https://x.co")
+        real = self._post("real", subreddit="loud", score=1, comments=0)
+        ranked_posts, _ = analysis.rank_items([link_drop, real], [], now=self.NOW)
+        assert [post["id"] for post in ranked_posts] == ["real", "drop"]
+
+
+class TestRelevanceKeying:
+    """A rating belongs to exactly one item. Keying by the raw id alone handed one
+    item's rating to another whenever ids collided or were missing."""
+
+    def _post(self, id, score=10):
+        return {
+            "kind": "post", "id": id, "subreddit": "s", "score": score, "comments": 0,
+            "title": "A title long enough to carry the whole idea on its own",
+            "body": "A body with plenty of real text in it, past the substance bar.",
+            "created_utc": 1700000000,
+        }
+
+    def _comment(self, id, score=10):
+        return {"kind": "comment", "id": id, "subreddit": "s", "score": score,
+                "title": "", "body": "a comment", "created_utc": 1700000000}
+
+    def test_a_post_and_a_comment_sharing_an_id_are_rated_separately(self):
+        post = self._post("abc", score=1)
+        comment = self._comment("abc", score=1)
+        # The post is off topic, the comment is on topic, and both carry id "abc".
+        relevance = {("post", "abc"): 0, ("comment", "abc"): 2}
+        ranked_posts, ranked_comments = analysis.rank_items(
+            [post, self._post("other", score=1)], [comment], relevance, now=1700000000.0
+        )
+        # The rated-0 post sinks to the backfill tier; the comment is untouched.
+        assert [item["id"] for item in ranked_posts] == ["other", "abc"]
+        assert [item["id"] for item in ranked_comments] == ["abc"]
+
+    def test_items_with_no_id_do_not_share_one_rating(self):
+        first = self._post("", score=1)
+        second = self._post("", score=1)
+        relevance = {("post", "#0"): 0, ("post", "#1"): 2}
+        ranked_posts, _ = analysis.rank_items([first, second], [], relevance, now=1700000000.0)
+        # Only the second survives into the eligible tier, so it must come first.
+        assert ranked_posts[0] is second
+
+    def test_the_key_namespaces_the_kind_and_falls_back_to_the_position(self):
+        assert analysis.relevance_key("post", {"id": "x"}, 3) == ("post", "x")
+        assert analysis.relevance_key("comment", {"id": "x"}, 3) == ("comment", "x")
+        assert analysis.relevance_key("post", {"id": ""}, 3) == ("post", "#3")
+        assert analysis.relevance_key("post", {}, 0) == ("post", "#0")
+
+
+class TestUntriagedTier:
+    """An item the triage never saw is not the same as one a model looked at and
+    called adjacent, and it must not rank as if it were."""
+
+    def _post(self, id, score=10):
+        return {
+            "kind": "post", "id": id, "subreddit": "s", "score": score, "comments": 0,
+            "title": "A title long enough to carry the whole idea on its own",
+            "body": "A body with plenty of real text in it, past the substance bar.",
+            "created_utc": 1700000000,
+        }
+
+    NOW = 1700000000.0
+
+    def test_a_rated_one_item_outranks_an_equal_untriaged_one(self):
+        rated = self._post("rated")
+        unrated = self._post("unrated")
+        ranked_posts, _ = analysis.rank_items(
+            [unrated, rated], [], relevance={("post", "rated"): 1}, now=self.NOW
+        )
+        assert [post["id"] for post in ranked_posts] == ["rated", "unrated"]
+
+    def test_a_rated_zero_item_still_ranks_below_an_untriaged_one(self):
+        zero = self._post("zero", score=5000)
+        unrated = self._post("unrated", score=1)
+        ranked_posts, _ = analysis.rank_items(
+            [zero, unrated], [], relevance={("post", "zero"): 0}, now=self.NOW
+        )
+        assert [post["id"] for post in ranked_posts] == ["unrated", "zero"]
+
+    def test_the_untriaged_weight_sits_between_zero_and_a_rated_one(self):
+        assert 0 < analysis.UNTRIAGED_WEIGHT < analysis.RELEVANCE_WEIGHTS[1]
+
+    def test_a_fully_untriaged_pool_keeps_its_engagement_order(self):
+        strong = self._post("strong", score=100)
+        weak = self._post("weak", score=1)
+        ranked_posts, _ = analysis.rank_items([weak, strong], [], relevance=None, now=self.NOW)
+        assert [post["id"] for post in ranked_posts] == ["strong", "weak"]
+
+    def test_the_triage_pool_is_capped_and_the_rest_is_untriaged(self, monkeypatch):
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_POSTS", 3)
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_COMMENTS", 0)
+        seen = {}
+
+        def fake_rate(items, query, profile):
+            seen["count"] = len(items)
+            return {position: 2 for position in range(1, len(items) + 1)}
+
+        monkeypatch.setattr(analysis, "rate_relevance", fake_rate)
+        posts = [self._post("p{}".format(i), score=100 - i) for i in range(10)]
+        ranked_posts, _, selection = analysis._select_sample(posts, [], "query", "")
+        assert seen["count"] == 3
+        assert selection["triaged"] == 3
+        # The three rated-2 posts lead; the seven the triage never saw follow.
+        assert [post["id"] for post in ranked_posts[:3]] == ["p0", "p1", "p2"]
 
 
 class TestRateRelevance:
@@ -1004,6 +1858,42 @@ class TestRateRelevance:
     def test_output_reservation_never_exceeds_the_ceiling(self):
         assert analysis._triage_output_tokens(100000) == analysis.TRIAGE_MAX_TOKENS
         assert analysis._triage_output_tokens(0) > 0
+
+    def test_the_output_reservation_matches_the_measured_per_item_cost(self):
+        # 45 is what the sibling classification call measures; the old 30 came from
+        # nowhere in particular and under-reserved every batch.
+        assert analysis.TRIAGE_OUTPUT_TOKENS_PER_ITEM == 45
+        assert analysis._triage_output_tokens(10) == 45 * 10 + 300
+
+    def test_previews_are_long_enough_to_judge_relevance_on(self):
+        item = {"kind": "post", "title": "T", "body": "b" * 1000}
+        assert len(analysis._triage_preview(item)) == analysis.TRIAGE_PREVIEW_CHARS
+        assert analysis.TRIAGE_PREVIEW_CHARS >= 300
+
+    def test_a_batch_fits_the_triage_share_of_the_budget(self):
+        size = analysis._triage_batch_size("a query", "a profile")
+        assert 0 < size <= analysis.TRIAGE_BATCH_SIZE
+        batch = self._items(size)
+        estimate = analysis.estimate_tokens(
+            analysis._triage_prompt(batch, "a query", "a profile", 1)
+        ) + analysis._triage_output_tokens(size)
+        assert estimate <= int(analysis.token_budget() * analysis.TRIAGE_BUDGET_SHARE)
+
+    def test_a_tiny_budget_shrinks_the_batch_rather_than_overflowing_it(self, monkeypatch):
+        monkeypatch.setattr(analysis, "token_budget", lambda: 4000)
+        size = analysis._triage_batch_size("q", "p")
+        assert 1 <= size < analysis.TRIAGE_BATCH_SIZE
+
+    def test_batches_are_split_at_the_budgeted_size(self):
+        prompts = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            prompts.append(prompt)
+            return {"ratings": []}, "m"
+
+        size = analysis._triage_batch_size("q", "p")
+        analysis.rate_relevance(self._items(size + 1), "q", "p", chat=fake_chat)
+        assert len(prompts) == 2
 
 
 class TestSelectSample:

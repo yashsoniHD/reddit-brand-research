@@ -2,6 +2,8 @@
 
 import json
 import os
+import threading
+import time
 
 import pytest
 
@@ -40,6 +42,17 @@ def make_discover(names, reasons=None, subscribers=None, checked=None):
         return {"communities": communities, "considered": list(names)}
 
     return fake
+
+
+def fake_manual(names):
+    """A fake `manual` callable: the discovery shape for hand-picked communities."""
+    return {
+        "communities": [
+            {"name": name, "reason": "chosen by you", "subscribers": 0, "checked": False}
+            for name in names
+        ],
+        "considered": list(names),
+    }
 
 
 def fake_posts(subreddit, days=30, count=4):
@@ -91,8 +104,10 @@ def fake_classify(posts, comments, subreddits, query="", profile=""):
     )
 
 
-def fake_synthesize(items, topics, query, profile, subreddits, preview_chars=200):
+def fake_synthesize(items, topics, query, profile, subreddits, preview_chars=200,
+                    content_types=None):
     return {
+        "report_title": "Tool sprawl among freelancers",
         "executive_summary": "People are drowning in tools.",
         "topic_descriptions": {1: "Tasks fall through the cracks.", 2: "Switching costs bite."},
         "pain_points": [{"text": "Too many tools", "item_indices": [1, 2]}],
@@ -100,7 +115,10 @@ def fake_synthesize(items, topics, query, profile, subreddits, preview_chars=200
         "content_ideas": [
             {
                 "title": "One system", "hook": "Stop juggling five apps.",
-                "format": "Text post", "angle": "Consolidate", "rationale": "It hurts",
+                "format": (
+                    pipeline.analysis.chosen_formats(content_types) or ["Text post"]
+                )[0],
+                "angle": "Consolidate", "rationale": "It hurts",
                 "addresses": "Too many tools", "item_indices": [1],
             }
         ],
@@ -192,13 +210,149 @@ class TestValidateInputs:
             "relevance_filter"
         ] is True
 
+    @pytest.mark.parametrize("raw,expected", [("true", True), ("false", False),
+                                              ("TRUE", True), ("off", False), ("", False)])
+    def test_the_string_false_does_not_become_true(self, raw, expected):
+        # bool("false") is True, which used to turn a setting the user switched off
+        # back on the moment it crossed a form encoding.
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", relevance_filter=raw)
+        assert result["errors"] == []
+        assert result["relevance_filter"] is expected
+
+    def test_an_ambiguous_relevance_string_is_an_error_not_a_guess(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", relevance_filter="maybe")
+        assert result["errors"]
+
+    def test_a_non_integral_time_range_is_rejected(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", days=7.9)
+        assert result["errors"]
+        assert result["days"] == 30
+
+    def test_an_integral_float_time_range_is_accepted(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", days=14.0)
+        assert result["errors"] == []
+        assert result["days"] == 14
+
+    def test_the_time_range_message_is_built_from_the_allowed_windows(self):
+        message = pipeline.validate_inputs(DEFAULT_QUERY, "", days=3)["errors"][0]
+        for window in pipeline.TIME_WINDOWS:
+            assert str(window) in message
+
+    def test_subreddits_may_arrive_as_a_json_list(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", subreddits=["r/freelance", "web_design"])
+        assert result["errors"] == []
+        assert result["subreddits"] == ["freelance", "web_design"]
+
+    @pytest.mark.parametrize("raw", [["freelance", 7], ["freelance", True], 7, True, {"a": 1}])
+    def test_non_string_subreddit_values_are_rejected(self, raw):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", subreddits=raw)
+        assert result["errors"]
+        assert result["subreddits"] == []
+
+    def test_an_empty_subreddit_list_is_not_an_error(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", subreddits=[])
+        assert result["errors"] == []
+        assert result["subreddits"] == []
+
+    @pytest.mark.parametrize("content_type", ["text", "carousel", "video", "poll", "article"])
+    def test_every_allowed_content_type_is_accepted(self, content_type):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=[content_type]
+        )
+        assert result["errors"] == []
+        assert result["content_types"] == [content_type]
+
+    def test_content_types_default_to_empty_meaning_all_formats(self):
+        for raw in (None, [], "", "   ", ["", "  "]):
+            result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_types=raw)
+            assert result["errors"] == []
+            assert result["content_types"] == []
+
+    def test_several_content_types_come_back_sorted_and_deduped(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=["poll", "text", "Poll"]
+        )
+        assert result["errors"] == []
+        assert result["content_types"] == ["poll", "text"]
+
+    def test_choosing_every_content_type_is_the_same_as_choosing_none(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=list(pipeline.CONTENT_TYPES)
+        )
+        assert result["errors"] == []
+        assert result["content_types"] == []
+
+    @pytest.mark.parametrize("content_type", ["reel", "thread", "TEXT POST", 7, True])
+    def test_an_unknown_content_type_is_a_friendly_error(self, content_type):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=[content_type]
+        )
+        assert result["errors"]
+        assert result["errors"][0][0].isupper() and result["errors"][0].endswith(".")
+        assert result["content_types"] == []
+
+    def test_the_unknown_content_type_error_names_the_value_that_was_sent(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=["text", "reel"]
+        )
+        assert len(result["errors"]) == 1
+        assert '"reel"' in result["errors"][0]
+        # The good value is still kept, so the form comes back with the ticks
+        # the user made rather than an empty group.
+        assert result["content_types"] == ["text"]
+
+    @pytest.mark.parametrize("raw", [7, True, {"text": True}, 1.5])
+    def test_content_types_that_are_not_a_list_or_a_name_are_rejected(self, raw):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_types=raw)
+        assert len(result["errors"]) == 1
+        assert result["errors"][0].endswith(".")
+        assert result["content_types"] == []
+
+    @pytest.mark.parametrize("raw", [["text", 7], ["text", True], ["text", None]])
+    def test_a_non_string_inside_the_list_is_rejected(self, raw):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_types=raw)
+        assert result["errors"]
+
+    def test_content_types_are_case_insensitive(self):
+        assert pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=["Carousel", " VIDEO "]
+        )["content_types"] == ["carousel", "video"]
+
+    def test_a_bare_string_is_read_as_one_content_type(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_types="carousel")
+        assert result["errors"] == []
+        assert result["content_types"] == ["carousel"]
+
+    def test_the_legacy_single_content_type_field_is_still_accepted(self):
+        # Old links and stored history replay `content_type`, and a run that
+        # cannot read them would silently drop the format the user chose.
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_type="Carousel")
+        assert result["errors"] == []
+        assert result["content_types"] == ["carousel"]
+
+    def test_the_legacy_field_and_the_list_add_up(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", content_types=["poll"], content_type="text"
+        )
+        assert result["errors"] == []
+        assert result["content_types"] == ["poll", "text"]
+
+    def test_a_bad_legacy_content_type_is_still_a_friendly_error(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", content_type="reel")
+        assert len(result["errors"]) == 1
+        assert '"reel"' in result["errors"][0]
+
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
 class TestRunReport:
     def test_produces_a_complete_v4_bundle(self):
         bundle = build_bundle()
         assert bundle["bundle_version"] == 4
-        assert set(bundle["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
+        # `content_types` is written only when a run was pinned to a subset, and
+        # this one asked for a mix.
+        assert set(bundle["inputs"].keys()) == {
+            "query", "profile", "subreddits", "days", "discovery"
+        }
         assert bundle["inputs"]["subreddits"] == ["testsub"]
         assert "discovery" in bundle
         assert set(bundle["discovery"].keys()) == {"communities", "considered"}
@@ -260,6 +414,20 @@ class TestRunReport:
         assert any("Finding communities" in message for message in messages)
         assert any("testsub" in message for message in messages)
         assert any("Writing your content ideas" in message for message in messages)
+
+    def test_a_present_tense_classifying_message_precedes_the_classified_summary(self):
+        # The frontend's stepper only advances to "Classifying the sample" on a
+        # message matching /^classif/i emitted before classification runs; without
+        # it, the stage jumps straight from selection to the past-tense summary and
+        # that step of the stepper never lights up.
+        messages = []
+        build_bundle(progress=messages.append)
+
+        selecting = next(i for i, m in enumerate(messages) if m.startswith("Selecting "))
+        classifying = next(i for i, m in enumerate(messages) if m.startswith("Classifying"))
+        classified = next(i for i, m in enumerate(messages) if m.startswith("Classified "))
+
+        assert selecting < classifying < classified
 
     def test_low_data_is_flagged(self):
         bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 2),
@@ -380,25 +548,230 @@ class TestRunReport:
         assert captured["days"] == 7
         assert bundle["inputs"]["days"] == 7
 
-    def test_manual_subreddits_skip_discovery(self, monkeypatch):
+    def test_manual_subreddits_skip_discovery(self):
         def exploding_discover(query, profile):
             raise AssertionError("discovery must not run when communities are chosen")
 
-        monkeypatch.setattr(
-            pipeline.discovery,
-            "manual",
-            lambda names: {
-                "communities": [
-                    {"name": name, "reason": "chosen by you", "subscribers": 0, "checked": False}
-                    for name in names
-                ],
-                "considered": list(names),
-            },
+        bundle = build_bundle(
+            subreddits=["handpicked"], discover=exploding_discover, manual=fake_manual
         )
-        bundle = build_bundle(subreddits=["handpicked"], discover=exploding_discover)
         assert bundle["inputs"]["subreddits"] == ["handpicked"]
         community = bundle["discovery"]["communities"][0]
         assert community["reason"] == "chosen by you"
+
+    def test_manual_falls_back_to_the_discovery_module_when_not_injected(self, monkeypatch):
+        # The injectable hook is the supported seam, but monkeypatching the module
+        # function still has to work, because that is how the callable is resolved.
+        monkeypatch.setattr(pipeline.discovery, "manual", fake_manual)
+        bundle = build_bundle(subreddits=["handpicked"])
+        assert bundle["inputs"]["subreddits"] == ["handpicked"]
+
+    def test_discovery_mode_records_who_chose_the_communities(self):
+        assert build_bundle()["inputs"]["discovery"] == "model"
+        manual_bundle = build_bundle(
+            subreddits=["handpicked"], manual=fake_manual,
+            discover=lambda q, p: (_ for _ in ()).throw(AssertionError("no discovery")),
+        )
+        assert manual_bundle["inputs"]["discovery"] == "manual"
+
+    def test_content_types_reach_synthesis_and_the_bundle(self):
+        captured = {}
+
+        def spy(items, topics, query, profile, subreddits, preview_chars=200,
+                content_types=None):
+            captured["content_types"] = content_types
+            return fake_synthesize(items, topics, query, profile, subreddits,
+                                   preview_chars, content_types)
+
+        bundle = build_bundle(content_types=["carousel"], synthesize=spy)
+        assert captured["content_types"] == ["carousel"]
+        assert bundle["inputs"]["content_types"] == ["carousel"]
+        assert bundle["analysis"]["content_ideas"][0]["format"] == "Carousel (PDF)"
+
+    def test_several_content_types_reach_synthesis_sorted(self):
+        captured = {}
+
+        def spy(items, topics, query, profile, subreddits, preview_chars=200,
+                content_types=None):
+            captured["content_types"] = content_types
+            return fake_synthesize(items, topics, query, profile, subreddits,
+                                   preview_chars, content_types)
+
+        bundle = build_bundle(content_types=["poll", "carousel", "poll"], synthesize=spy)
+        assert captured["content_types"] == ["carousel", "poll"]
+        assert bundle["inputs"]["content_types"] == ["carousel", "poll"]
+
+    def test_the_bundle_records_no_content_types_when_unset(self):
+        assert "content_types" not in build_bundle()["inputs"]
+
+    def test_asking_for_every_content_type_records_none_of_them(self):
+        # Every format is a mix, and a bundle that listed all five would make
+        # the report claim a restriction the run never applied.
+        bundle = build_bundle(content_types=list(pipeline.CONTENT_TYPES))
+        assert "content_types" not in bundle["inputs"]
+
+    def test_an_unknown_content_type_never_reaches_the_bundle(self):
+        # Validation is the input layer's job; the engine simply ignores a value
+        # it does not offer rather than pinning ideas to it.
+        assert "content_types" not in build_bundle(content_types=["reel"])["inputs"]
+
+    def test_report_title_comes_from_synthesis(self):
+        assert build_bundle()["analysis"]["report_title"] == "Tool sprawl among freelancers"
+
+    def test_report_title_falls_back_to_the_query_when_synthesis_omits_it(self):
+        def titleless(items, topics, query, profile, subreddits, preview_chars=200,
+                      content_types=None):
+            result = fake_synthesize(items, topics, query, profile, subreddits, preview_chars)
+            del result["report_title"]
+            return result
+
+        title = build_bundle(synthesize=titleless)["analysis"]["report_title"]
+        assert title and title in DEFAULT_QUERY
+
+    def test_engagement_reports_the_analysed_sample_separately(self):
+        bundle = build_bundle()
+        engagement = bundle["stats"]["engagement"]
+        # Four posts scoring 10..13 and two comments scoring 0 and 1.
+        assert engagement["score"] == 46
+        assert engagement["analysed"] == {"upvotes": 47, "comments": 6}
+
+    def test_bundle_bodies_are_truncated_but_citation_excerpts_are_not(self):
+        def long_bodies(subreddit, days):
+            posts = fake_posts(subreddit, days)
+            for post in posts:
+                post["body"] = "x" * 2000
+            return posts
+
+        bundle = build_bundle(fetch_posts=long_bodies)
+        assert all(len(post["body"]) <= pipeline.BUNDLE_BODY_CHARS for post in bundle["posts"])
+        excerpt = bundle["analysis"]["topics"][0]["citations"][0]["excerpt"]
+        assert len(excerpt) > pipeline.BUNDLE_BODY_CHARS
+
+    def test_a_comment_fetch_failure_keeps_the_posts_it_already_read(self):
+        def broken_comments(subreddit, days):
+            raise RuntimeError("The Reddit data service is temporarily unavailable.")
+
+        bundle = build_bundle(fetch_comments=broken_comments)
+        assert bundle["inputs"]["subreddits"] == ["testsub"]
+        assert bundle["sample"]["posts_fetched"] == 4
+        assert bundle["sample"]["comments_fetched"] == 0
+        assert any("not its comments" in notice for notice in bundle["notices"])
+
+    def test_an_empty_error_message_from_a_fetch_does_not_crash_the_run(self):
+        def blank_failure(subreddit, days):
+            if subreddit == "bad":
+                raise ValueError("")
+            return fake_posts(subreddit, days)
+
+        bundle = build_bundle(discover=make_discover(["good", "bad"]), fetch_posts=blank_failure)
+        assert bundle["inputs"]["subreddits"] == ["good"]
+        assert any("r/bad was skipped" in notice for notice in bundle["notices"])
+
+    def test_no_communities_at_all_is_its_own_error(self):
+        empty = lambda query, profile: {"communities": [], "considered": []}
+        with pytest.raises(pipeline.RunError) as excinfo:
+            build_bundle(discover=empty)
+        assert "could not find any communities" in str(excinfo.value)
+
+    def test_the_bundle_names_every_model_that_was_used(self):
+        def lite_synthesis(items, topics, query, profile, subreddits, preview_chars=200,
+                           content_types=None):
+            result = fake_synthesize(items, topics, query, profile, subreddits, preview_chars)
+            result["model"] = "gemini-2.5-flash-lite"
+            return result
+
+        bundle = build_bundle(synthesize=lite_synthesis)
+        # Synthesis names the report; classification is still disclosed.
+        assert bundle["model"] == "gemini-2.5-flash-lite"
+        assert bundle["models"] == ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        assert "Lite" in bundle["model_label"] and "Flash on" in bundle["model_label"]
+
+
+class TestCancelAndDeadline:
+    """A run nobody is waiting for should stop, and a run that cannot finish in the
+    time it has should say so rather than being killed mid-sentence."""
+
+    STAGES = ["start", "discovery", "fetch", "classification", "synthesis"]
+
+    def test_a_cancelled_run_stops_before_discovery(self):
+        cancel = threading.Event()
+        cancel.set()
+
+        def exploding_discover(query, profile):
+            raise AssertionError("a cancelled run must not call discovery")
+
+        with pytest.raises(pipeline.RunCancelled):
+            build_bundle(discover=exploding_discover, cancel=cancel)
+
+    def test_cancelling_during_the_fetch_stops_the_fetch(self):
+        cancel = threading.Event()
+
+        def cancel_after_first(subreddit, days):
+            cancel.set()
+            return fake_posts(subreddit, days)
+
+        with pytest.raises(pipeline.RunCancelled):
+            build_bundle(
+                discover=make_discover(["one", "two"]),
+                fetch_posts=cancel_after_first, cancel=cancel,
+            )
+
+    def test_cancelling_before_synthesis_stops_the_run(self):
+        cancel = threading.Event()
+
+        def cancel_in_classify(posts, comments, subreddits, query="", profile=""):
+            cancel.set()
+            return fake_classify(posts, comments, subreddits)
+
+        def exploding_synthesize(*args, **kwargs):
+            raise AssertionError("a cancelled run must not synthesise")
+
+        with pytest.raises(pipeline.RunCancelled):
+            build_bundle(
+                classify=cancel_in_classify, synthesize=exploding_synthesize, cancel=cancel
+            )
+
+    def test_an_unset_cancel_event_changes_nothing(self):
+        bundle = build_bundle(cancel=threading.Event())
+        assert bundle["bundle_version"] == 4
+
+    def test_a_deadline_already_past_fails_with_a_friendly_sentence(self):
+        with pytest.raises(pipeline.RunError) as excinfo:
+            build_bundle(deadline=time.monotonic() - 1)
+        message = str(excinfo.value)
+        assert message[0].isupper() and message.endswith(".")
+        assert "took longer" in message
+
+    def test_a_generous_deadline_produces_a_normal_report(self):
+        bundle = build_bundle(deadline=time.monotonic() + 3600)
+        assert bundle["analysis"]["content_ideas"]
+
+    def test_the_reserve_stops_new_communities_but_keeps_the_report(self):
+        # Inside the reserve from the very first check: the first community is read
+        # (nothing has been read yet, so stopping would produce no report at all)
+        # and the second is skipped with a notice rather than an error.
+        deadline = time.monotonic() + pipeline.DEADLINE_RESERVE_SECONDS - 1
+        bundle = build_bundle(discover=make_discover(["one", "two"]), deadline=deadline)
+        assert bundle["inputs"]["subreddits"] == ["one"]
+        assert any("ran out of time" in notice for notice in bundle["notices"])
+
+    def test_the_deadline_reaches_a_fetcher_that_accepts_one(self):
+        captured = {}
+
+        def deadline_aware(subreddit, days, deadline=None):
+            captured["deadline"] = deadline
+            return fake_posts(subreddit, days)
+
+        deadline = time.monotonic() + 3600
+        build_bundle(fetch_posts=deadline_aware, deadline=deadline)
+        assert captured["deadline"] == pytest.approx(
+            deadline - pipeline.DEADLINE_RESERVE_SECONDS
+        )
+
+    def test_a_fetcher_that_predates_the_deadline_is_still_called(self):
+        # Every injected fake in this file takes (subreddit, days) and nothing else.
+        bundle = build_bundle(deadline=time.monotonic() + 3600)
+        assert bundle["sample"]["posts_fetched"] == 4
 
     def test_relevance_off_relabels_the_selection_and_blanks_the_query(self):
         captured = {}
@@ -564,6 +937,21 @@ class TestExports:
         bundle["inputs"]["query"] = ""
         assert report_export.filename_stem(bundle).startswith("content-ideas-report-")
 
+    def test_a_kind_is_appended_so_two_exports_never_collide(self):
+        # Both CSV exports end in ".csv", so the kind is the only thing keeping
+        # the ideas download and the posts download apart in a downloads folder.
+        bundle = build_bundle(query="ai automation")
+        ideas = report_export.filename_stem(bundle, "ideas")
+        posts = report_export.filename_stem(bundle, "posts")
+        assert ideas.endswith("-ideas") and posts.endswith("-posts")
+        assert ideas != posts
+        assert ideas.rsplit("-", 1)[0] == posts.rsplit("-", 1)[0]
+
+    def test_a_kind_cannot_widen_the_safe_character_set(self):
+        bundle = build_bundle(query="ai automation")
+        stem = report_export.filename_stem(bundle, '"\r\nSet-Cookie: x=1')
+        assert report_export._FILENAME_STEM_SAFE.match(stem)
+
 
 # ── The bundled sample ────────────────────────────────────────────────────────
 class TestSampleReport:
@@ -586,7 +974,10 @@ class TestSampleReport:
         for key in ["inputs", "discovery", "posts", "comments", "items", "analysis", "stats", "sample"]:
             assert key in sample
         assert "brand_mentions" not in sample["stats"]
-        assert set(sample["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
+        # A subset check, not an equality one: the file on disk was generated before
+        # content types and the discovery mode joined `inputs`, and regenerating it
+        # costs a live model run. These four have been there since v3.
+        assert {"query", "profile", "subreddits", "days"} <= set(sample["inputs"].keys())
 
     def test_discovery_section_has_the_expected_shape(self, sample):
         assert "communities" in sample["discovery"] and "considered" in sample["discovery"]
@@ -614,3 +1005,68 @@ class TestSampleReport:
         assert "## Communities analysed" in markdown
         assert report_export.posts_csv(sample)
         assert report_export.ideas_csv(sample)
+
+
+class TestDeadlineKeepsWhatItRead:
+    """The reserve is what keeps a run out of the hard deadline: entering it turns
+    the remaining communities into a notice, and the run analyses what it has."""
+
+    def test_the_reserve_turns_the_rest_of_the_fetch_into_a_notice(self):
+        clock = {"now": time.monotonic()}
+        # Comfortably outside the reserve at the start, inside it after one fetch.
+        deadline = clock["now"] + pipeline.DEADLINE_RESERVE_SECONDS + 30
+
+        def slow(subreddit, days):
+            clock["now"] += 45
+            return fake_posts(subreddit, days)
+
+        original = pipeline.time.monotonic
+        try:
+            pipeline.time.monotonic = lambda: clock["now"]
+            bundle = build_bundle(
+                discover=make_discover(["one", "two"]), fetch_posts=slow, deadline=deadline
+            )
+        finally:
+            pipeline.time.monotonic = original
+
+        assert bundle["inputs"]["subreddits"] == ["one"]
+        assert any("ran out of time" in notice for notice in bundle["notices"])
+        assert bundle["analysis"]["content_ideas"]
+
+    def test_overrunning_the_hard_deadline_ends_the_run_rather_than_half_analysing(self):
+        clock = {"now": time.monotonic()}
+        deadline = clock["now"] + 10
+
+        def very_slow(subreddit, days):
+            clock["now"] += 1000
+            return fake_posts(subreddit, days)
+
+        original = pipeline.time.monotonic
+        try:
+            pipeline.time.monotonic = lambda: clock["now"]
+            with pytest.raises(pipeline.RunError) as excinfo:
+                build_bundle(
+                    discover=make_discover(["one", "two"]),
+                    fetch_posts=very_slow, deadline=deadline,
+                )
+        finally:
+            pipeline.time.monotonic = original
+        assert "took longer" in str(excinfo.value)
+
+    def test_running_out_before_anything_is_read_is_an_error(self):
+        with pytest.raises(pipeline.RunError) as excinfo:
+            build_bundle(deadline=time.monotonic() - 1)
+        assert "took longer" in str(excinfo.value)
+
+    def test_cancelling_mid_fetch_still_stops_even_with_data_in_hand(self):
+        cancel = threading.Event()
+
+        def cancel_after_first(subreddit, days):
+            cancel.set()
+            return fake_posts(subreddit, days)
+
+        with pytest.raises(pipeline.RunCancelled):
+            build_bundle(
+                discover=make_discover(["one", "two"]),
+                fetch_posts=cancel_after_first, cancel=cancel,
+            )
