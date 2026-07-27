@@ -21,13 +21,13 @@ import {
 export interface FormValues {
   query: string;
   profile: string;
-  /** Advanced: comma-separated community names; empty means auto-discover. */
+  /** Settings panel: comma-separated community names; empty means auto-discover. */
   subreddits: string;
-  /** Advanced: 7, 14 or 30. */
+  /** Settings panel: 7, 14 or 30. */
   days: number;
-  /** Advanced: whether the relevance triage runs. */
+  /** Settings panel: whether the relevance triage runs. */
   relevance: boolean;
-  /** Advanced: the shapes the ideas may take. Empty sends nothing, meaning any. */
+  /** Settings panel: the shapes the ideas may take. Empty sends nothing, meaning any. */
   contentTypes: ContentType[];
 }
 
@@ -35,9 +35,12 @@ function contentTypeLabel(value: ContentType): string {
   return CONTENT_TYPE_CHOICES.find((choice) => choice.value === value)?.label ?? value;
 }
 
-/** A short trace of non-default advanced settings, shown on the collapsed tab. */
+/** A short trace of the non-default settings, shown on the collapsed tab. */
 function advancedSummary(values: FormValues): string {
   const parts: string[] = [];
+  // The profile lives inside the panel now, so a filled one has to show on the
+  // closed tab: a setting that changes the output must never hide silently.
+  if (values.profile.trim()) parts.push("about you");
   const communities = values.subreddits
     .split(",")
     .map((name) => name.trim())
@@ -148,29 +151,6 @@ export function QueryForm({
         </p>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="profile" className="h-section text-foreground">
-          About you or your brand{" "}
-          <span className="text-[0.8125rem] font-normal text-muted-foreground">
-            optional
-          </span>
-        </Label>
-        <FieldHint>
-          Tailors the ideas to your voice and audience. Not sure? Paste your bio or
-          homepage tagline.
-        </FieldHint>
-        <Textarea
-          id="profile"
-          name="profile"
-          rows={2}
-          maxLength={MAX_PROFILE_CHARS}
-          value={values.profile}
-          onChange={(event) => set("profile", event.target.value)}
-          placeholder="I run a Notion template shop for freelance designers."
-          className="resize-y rounded-xl px-3.5 py-2.5"
-        />
-      </div>
-
       <details
         ref={detailsRef}
         open={advancedOpen}
@@ -183,19 +163,44 @@ export function QueryForm({
             strokeWidth={2.25}
             className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90"
           />
-          <span className="text-sm font-medium text-foreground">Advanced settings</span>
+          <span className="text-sm font-medium text-foreground">Settings</span>
           {summary ? (
             <span className="ml-auto truncate text-xs text-[var(--brand-ink)]">
               {summary}
             </span>
           ) : (
             <span className="ml-auto hidden text-xs text-muted-foreground sm:inline">
-              Communities, format, time range
+              About you, communities, format, time range
             </span>
           )}
         </summary>
 
         <div className="mt-5 flex flex-col gap-6 border-t pt-5">
+          {/* First in the panel because it is the one setting most runs want:
+              the ideas are shaped for whoever is posting them. */}
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="profile" className="h-section text-foreground">
+              About you or your brand{" "}
+              <span className="text-[0.8125rem] font-normal text-muted-foreground">
+                optional
+              </span>
+            </Label>
+            <FieldHint>
+              Tailors the ideas to your voice and audience. Not sure? Paste your bio or
+              homepage tagline.
+            </FieldHint>
+            <Textarea
+              id="profile"
+              name="profile"
+              rows={2}
+              maxLength={MAX_PROFILE_CHARS}
+              value={values.profile}
+              onChange={(event) => set("profile", event.target.value)}
+              placeholder="I run a Notion template shop for freelance designers."
+              className="resize-y rounded-xl px-3.5 py-2.5"
+            />
+          </div>
+
           <div className="flex flex-col gap-2">
             <Label htmlFor="subreddits" className="h-section text-foreground">
               Communities{" "}

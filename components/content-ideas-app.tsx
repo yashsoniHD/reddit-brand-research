@@ -1,6 +1,5 @@
 "use client";
 
-import { FileText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ErrorBanner } from "@/components/error-banner";
@@ -9,7 +8,7 @@ import { HistoryDrawer } from "@/components/history-drawer";
 import { QueryForm, type FormValues } from "@/components/query-form";
 import { ReportView } from "@/components/report/report-view";
 import { RunProgress } from "@/components/run-progress";
-import { fetchSample, fetchSampleAvailable, runReport } from "@/lib/api";
+import { runReport } from "@/lib/api";
 import { bundleKey, reportPath } from "@/lib/format";
 import { addToHistory, loadHistory, saveHistory } from "@/lib/storage";
 import { checkCommunities, mentionsCommunities } from "@/lib/validate";
@@ -165,7 +164,6 @@ export function ContentIdeasApp() {
   const [errors, setErrors] = useState<string[]>([]);
   const [progress, setProgress] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
-  const [sampleAvailable, setSampleAvailable] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [highlightCommunities, setHighlightCommunities] = useState(false);
@@ -195,11 +193,6 @@ export function ContentIdeasApp() {
       setAdvancedOpen(true);
     }
     setHistory(loadHistory());
-    const abort = new AbortController();
-    // A yes/no call, not the sample itself: the bundle is megabytes, and on
-    // first paint all the page needs to know is whether to offer the button.
-    void fetchSampleAvailable(abort.signal).then(setSampleAvailable);
-    return () => abort.abort();
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -360,19 +353,6 @@ export function ContentIdeasApp() {
     });
   }, [clearMessages]);
 
-  const onLoadSample = useCallback(async () => {
-    clearMessages();
-    const bundle = await fetchSample();
-    if (!bundle) {
-      fail(["The sample report is not available right now. Please try a search."]);
-      setSampleAvailable(false);
-      return;
-    }
-    show(bundle, false);
-    writeQueryParams(urlStateFor(bundle));
-    scrollTo(reportRef.current);
-  }, [clearMessages, fail, scrollTo, show]);
-
   const onLoadDemo = useCallback(async () => {
     clearMessages();
     try {
@@ -421,7 +401,7 @@ export function ContentIdeasApp() {
           {/* The search zone stays a narrow column even on a wide screen: a
               three-row textarea stretched to 1100px is a worse target than a
               centred one, and the report below gets the full width instead. */}
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
             <div ref={errorRef} className="scroll-mt-20">
               <ErrorBanner messages={errors} onDismiss={clearMessages} />
             </div>
@@ -439,22 +419,6 @@ export function ContentIdeasApp() {
               {running ? <RunProgress messages={progress} /> : null}
             </div>
 
-            {/* The one thing offered besides the form, so it sits with the
-                form rather than in a section of its own. */}
-            {!report && sampleAvailable ? (
-              <button
-                type="button"
-                onClick={() => void onLoadSample()}
-                // A run in flight owns the page. Swapping the sample in
-                // underneath it would replace the reader's report the
-                // moment their own finished.
-                disabled={running}
-                className="self-center text-sm font-medium text-foreground-soft underline underline-offset-4 transition-colors hover:text-[var(--brand-ink)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:text-foreground-soft"
-              >
-                See a sample report
-              </button>
-            ) : null}
-
             {!report && IS_DEV ? (
               <button
                 type="button"
@@ -468,19 +432,10 @@ export function ContentIdeasApp() {
           </div>
         </div>
 
+        {/* Nothing stands in for the report before there is one: the landing
+            below the form is quiet space, not a placeholder describing itself. */}
         <div ref={reportRef} className="scroll-mt-20">
-          {report ? (
-            <ReportView bundle={report} />
-          ) : (
-            <section className="surface-hush flex flex-col items-center gap-3 border-dashed px-6 py-12 text-center">
-              <FileText
-                aria-hidden="true"
-                strokeWidth={1.5}
-                className="size-6 text-muted-foreground"
-              />
-              <p className="h-zone text-foreground">Your ideas will appear here.</p>
-            </section>
-          )}
+          {report ? <ReportView bundle={report} /> : null}
         </div>
       </main>
 

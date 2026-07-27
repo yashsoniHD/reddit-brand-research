@@ -56,7 +56,7 @@ export function checkCommunities(raw: string): CommunityCheck {
 /**
  * Does this error sentence point at the communities field?
  *
- * Used to decide whether the Advanced settings panel should open itself so the
+ * Used to decide whether the Settings panel should open itself so the
  * user can see the field the message is about.
  */
 export function mentionsCommunities(message: string): boolean {
