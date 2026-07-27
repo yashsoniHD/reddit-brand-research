@@ -12,12 +12,15 @@ than estimated by a language model.
 ## How it works
 
 1. **Describe what you're looking for.** One text box, plus an optional line about
-   who you are or your brand (tailors the ideas to your voice and audience). Pick a
-   platform (LinkedIn, Instagram, or both) and a time window.
+   who you are or your brand (tailors the ideas to your voice and audience). That's
+   the whole form: the app always reads the last 30 days.
 2. **We find and read the communities.** A model proposes candidate subreddits for
    your query; each one is checked against the Reddit archive to confirm it exists
-   and is public before it's read. The model proposes, the archive verifies.
-3. **Get platform-ready ideas with evidence.** 8 to 12 content ideas, each with a hook
+   and is public before it's read. The model proposes, the archive verifies. From
+   everything fetched, the strongest candidates are rated for relevance to your
+   query by the model, then ranked in code by relevance, community engagement and
+   recency to pick the sample that gets analysed.
+3. **Get feed-ready ideas with evidence.** 8 to 12 content ideas, each with a hook
    (the literal opening line), a native format, an angle, and citations back to the
    real posts and comments that inspired it, backed by trending topics, pain points
    and questions pulled from the same data.
@@ -113,7 +116,7 @@ the API calls, works from that one origin. The API alone can also be exercised d
 curl http://localhost:8000/api/sample
 curl -N -X POST http://localhost:8000/api/report \
   -H 'Content-Type: application/json' \
-  -d '{"query": "content ideas about time management for busy founders", "profile": "", "platform": "linkedin", "days": 7}'
+  -d '{"query": "content ideas about time management for busy founders", "profile": ""}'
 ```
 
 `POST /api/report` streams newline-delimited JSON: one `{"type": "progress", ...}` line
@@ -176,7 +179,6 @@ smoke tests, for scripting, and for regenerating the bundled sample:
 python scripts/run_report.py \
   --query "Productivity struggles freelance designers have juggling multiple clients" \
   --profile "I run a Notion template shop for freelance designers" \
-  --platform linkedin --days 7 \
   --json sample_report.json --markdown report.md --sample
 ```
 
@@ -187,7 +189,7 @@ community in isolation:
 ```bash
 python scripts/run_report.py \
   --query "Productivity struggles freelance designers have juggling multiple clients" \
-  --subreddits productivity,freelance --platform both --days 14
+  --subreddits productivity,freelance
 ```
 
 ## Tests
@@ -260,15 +262,23 @@ clears the report already on screen; it surfaces an error alongside it instead.
   failures and keeps partial pages rather than discarding a good fetch.
 - **Data lag.** The archive trails live Reddit, typically by an hour or two. Every report
   states the timestamp of the newest item it saw and how far behind that was.
-- **Sample size is capped on purpose.** A run reads at most 150 posts and 150 comments.
-  Gemini's context window is far larger than that, so the cap is about cost and speed
-  rather than a provider ceiling: `GEMINI_TOKEN_BUDGET` (default 200000) is the token
-  budget a single request may spend, and the sample ladder picks the largest shape that
-  fits it. If Vertex ever rejects a request as oversized, the ladder shaves the budget and
-  refits rather than failing the run. The report always states the real numbers ("Posts
-  analysed: 40 of 300 fetched") and says so when the budget, not the available data, is
-  what limited the sample. Vertex quotas are per minute, not per day, so a rate limit is
-  a short wait rather than a lockout, and the app retries before reporting one.
+- **Sample size is capped on purpose.** A run analyses at most 150 posts and 150
+  comments, chosen from everything fetched over the last 30 days. Selection is hybrid:
+  the model rates the strongest candidates for relevance to your query (a cheap
+  triage call, and the only thing the model decides), then code ranks them by
+  relevance, engagement normalised within each community, and recency, with no
+  single community taking more than half the sample while others still have items
+  to offer. If the triage call fails, selection falls back to engagement and recency
+  alone rather than failing the run, and the methodology panel says which happened.
+  Gemini's context window is far larger than the sample, so the cap is about cost and
+  speed rather than a provider ceiling: `GEMINI_TOKEN_BUDGET` (default 200000) is the
+  token budget a single request may spend, and the sample ladder picks the largest
+  shape that fits it. If Vertex ever rejects a request as oversized, the ladder shaves
+  the budget and refits rather than failing the run. The report always states the real
+  numbers ("Posts analysed: 40 of 300 fetched") and says so when the budget, not the
+  available data, is what limited the sample. Vertex quotas are per minute, not per
+  day, so a rate limit is a short wait rather than a lockout, and the app retries
+  before reporting one.
 - **Topic findings are bound to topics by label, not by id.** Asked for `{id, finding}`,
   models mis-key the pairing often enough to matter, which silently attaches a finding to
   the wrong topic. The prompt requires the label to be echoed back and the label decides
@@ -276,8 +286,8 @@ clears the report already on screen; it surfaces an error alongside it instead.
 - **Sentiment is model-judged.** The percentages are counted deterministically, but the
   per-item labels behind them are a model's reading of tone. They are directional, and the
   report says so wherever they appear.
-- **Under ten items, results are directional.** Quiet communities and short windows are
-  flagged, and raw counts replace percentages so a 1-of-3 sample never renders as "33%".
+- **Under ten items, results are directional.** Quiet communities are flagged, and raw
+  counts replace percentages so a 1-of-3 sample never renders as "33%".
 - **Markdown injection is mitigated, not eliminated.** Reddit bodies can contain markdown
   images and links, and a model asked to summarise them will echo them. All model text,
   including hooks, reasons, findings and every other generated field, is stripped of

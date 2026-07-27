@@ -9,7 +9,7 @@ const STEPS = [
   },
   {
     title: "We read what people actually said",
-    body: "The last 7 to 30 days of posts and comments come in, and every item is classified by topic and tone. Code counts the numbers, nothing is estimated.",
+    body: "The last 30 days of posts and comments come in, and every item is classified by topic and tone. Code counts the numbers, nothing is estimated.",
   },
   {
     title: "You get ideas, then the post",

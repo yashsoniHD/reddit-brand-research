@@ -1,5 +1,11 @@
 # Content Ideas Pivot — Contract Spec (v2)
 
+> **Historical document.** This spec describes bundle v2. Since then, v3 removed
+> the platform input and v4 removed the time-window input (the app always fetches
+> the last 30 days) and replaced newest-first sampling with relevance-triaged
+> selection (`analysis.rank_items` / `analysis.rate_relevance`). Where this
+> document and the code disagree, the code and README are current.
+
 The app pivots from "brand research over manually-picked subreddits" to
 "content-idea generation from a free-text query, with automatic subreddit
 discovery". This document is the single source of truth for the new inputs,

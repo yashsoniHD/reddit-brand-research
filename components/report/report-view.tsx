@@ -64,8 +64,8 @@ export function ReportView({ bundle }: { bundle: Bundle }) {
 
         {bundle.sample.low_data ? (
           <Callout tone="warning">
-            Only {bundle.sample.items_analysed} items were found for this window, so the
-            results are directional rather than conclusive. Try a 30 day window.
+            Only {bundle.sample.items_analysed} items were found for this search, so the
+            results are directional rather than conclusive.
           </Callout>
         ) : null}
       </header>

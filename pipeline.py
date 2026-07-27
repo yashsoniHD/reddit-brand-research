@@ -21,8 +21,7 @@ import stats
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_VERSION = 3
-TIME_WINDOWS = (7, 14, 30)
+BUNDLE_VERSION = 4
 MIN_QUERY_CHARS = 10
 MAX_QUERY_CHARS = 300
 MAX_PROFILE_CHARS = 500
@@ -34,7 +33,7 @@ class RunError(Exception):
     """A run that could not produce a report, with a message fit for a user."""
 
 
-def validate_inputs(query: str, profile: str, days: int) -> dict:
+def validate_inputs(query: str, profile: str) -> dict:
     """Check every field at once and collect all problems.
 
     Reporting one error at a time makes people submit four times to learn four
@@ -61,14 +60,10 @@ def validate_inputs(query: str, profile: str, days: int) -> dict:
             )
         )
 
-    if days not in TIME_WINDOWS:
-        errors.append("Choose a time window of 7, 14 or 30 days.")
-
     return {
         "errors": errors,
         "query": cleaned_query,
         "profile": cleaned_profile,
-        "days": days,
     }
 
 
@@ -91,7 +86,6 @@ def _resolve_citations(indices: Sequence[int], items: Sequence[dict]) -> List[di
 def run_report(
     query: str,
     profile: str,
-    days: int,
     progress: Optional[Callable[[str], None]] = None,
     discover: Optional[Callable] = None,
     fetch_posts: Optional[Callable] = None,
@@ -114,7 +108,7 @@ def run_report(
     synthesize = synthesize or analysis.synthesize
 
     started = time.time()
-    logger.info("run start: query=%r days=%s", query, days)
+    logger.info("run start: query=%r", query)
 
     say("Finding communities talking about this…")
     found_communities = discover(query, profile)
@@ -133,10 +127,10 @@ def run_report(
         # caught by the fetch errors below.
         try:
             say("Fetching posts from r/{}…".format(name))
-            found = fetch_posts(name, days)
+            found = fetch_posts(name)
             say("Fetching posts from r/{}… ({} so far)".format(name, len(found)))
             say("Fetching comments from r/{}…".format(name))
-            found_comments = fetch_comments(name, days)
+            found_comments = fetch_comments(name)
         except ValueError as exc:
             notices.append("r/{} was skipped: {}".format(name, str(exc)[0].lower() + str(exc)[1:]))
             continue
@@ -146,7 +140,9 @@ def run_report(
 
         if not found:
             notices.append(
-                "r/{} had no posts in the last {} days, so it was left out.".format(name, days)
+                "r/{} had no posts in the last {} days, so it was left out.".format(
+                    name, reddit_data.FETCH_WINDOW_DAYS
+                )
             )
             continue
 
@@ -160,8 +156,8 @@ def run_report(
         # we looked.
         detail = " ".join(notices)
         raise RunError(
-            "{}We could not read anything usable from {}. Try a 30-day window, or "
-            "describe what you are looking for in different words.".format(
+            "{}We could not read anything usable from {}. Try describing what you "
+            "are looking for in different words.".format(
                 detail + " " if detail else "", _human_list(names)
             )
         )
@@ -171,8 +167,8 @@ def run_report(
 
     # The analysis layer decides how big a sample the model plan can take, so the
     # counts reported to the user come back from it rather than being assumed here.
-    say("Classifying posts and comments…")
-    items, preview_chars, classification = classify(posts, comments, used)
+    say("Selecting the most relevant items…")
+    items, preview_chars, classification = classify(posts, comments, used, query, profile)
     n_posts_analysed = sum(1 for item in items if item.get("kind") != "comment")
     n_comments_analysed = len(items) - n_posts_analysed
     say("Classified {} posts and {} comments…".format(n_posts_analysed, n_comments_analysed))
@@ -217,7 +213,6 @@ def run_report(
             "query": query,
             "profile": profile,
             "subreddits": used,
-            "days": days,
         },
         "discovery": {
             # Rebuilt rather than passed through: a cached discover() must not have
@@ -247,6 +242,14 @@ def run_report(
             "comments_truncated": len(comments) > n_comments_analysed,
             "low_data": n_items < analysis.LOW_DATA_THRESHOLD,
             "capacity_limited": bool(classification.get("capacity_limited")),
+            "selection": classification.get(
+                "selection",
+                {
+                    "method": "deterministic-fallback",
+                    "triaged": 0,
+                    "relevance_counts": {"0": 0, "1": 0, "2": 0},
+                },
+            ),
         },
         "analysis": {
             "executive_summary": synthesis["executive_summary"],
@@ -278,7 +281,7 @@ def run_report(
             "engagement": stats.engagement_totals(posts),
             "date_range": date_range,
             "lag_hours": stats.data_lag_hours(date_range.get("newest_ts", 0)),
-            "trend": stats.trend_buckets(posts, days),
+            "trend": stats.trend_buckets(posts),
         },
     }
 
@@ -298,4 +301,4 @@ def run_label(bundle: dict) -> str:
     query = " ".join(str(inputs.get("query") or "Report").split())
     if len(query) > MAX_LABEL_QUERY_CHARS:
         query = query[: MAX_LABEL_QUERY_CHARS - 1].rstrip() + "…"
-    return "{} · {}d".format(query, inputs.get("days", ""))
+    return query

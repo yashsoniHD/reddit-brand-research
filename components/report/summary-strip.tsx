@@ -14,7 +14,7 @@ export function SummaryStrip({ bundle }: { bundle: Bundle }) {
 
   const facts = [
     communities || "no communities",
-    `last ${inputs.days} days`,
+    bundle.stats.date_range.short_label || "last 30 days",
     `${thousands(sample.items_analysed)} items read`,
   ];
 

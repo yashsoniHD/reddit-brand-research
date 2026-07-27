@@ -16,7 +16,6 @@ import {
   MAX_PROFILE_CHARS,
   MAX_QUERY_CHARS,
   MIN_QUERY_CHARS,
-  TIME_WINDOWS,
   type Bundle,
 } from "@/lib/types";
 
@@ -25,7 +24,6 @@ const IS_DEV = process.env.NODE_ENV === "development";
 const DEFAULT_VALUES: FormValues = {
   query: "",
   profile: "",
-  days: 7,
 };
 
 /** Mirrors pipeline.validate_inputs so obvious mistakes never cost a round trip. */
@@ -46,9 +44,6 @@ function validate(values: FormValues): string[] {
       `Shorten the description of you or your brand to ${MAX_PROFILE_CHARS} characters or fewer.`,
     );
   }
-  if (!TIME_WINDOWS.includes(values.days as (typeof TIME_WINDOWS)[number])) {
-    errors.push("Choose a time window of 7, 14 or 30 days.");
-  }
   return errors;
 }
 
@@ -58,8 +53,6 @@ function readQueryParams(): Partial<FormValues> {
   const next: Partial<FormValues> = {};
   const query = params.get("q");
   if (query) next.query = query.slice(0, MAX_QUERY_CHARS);
-  const days = Number(params.get("days"));
-  if (TIME_WINDOWS.includes(days as (typeof TIME_WINDOWS)[number])) next.days = days;
   return next;
 }
 
@@ -68,7 +61,6 @@ function writeQueryParams(bundle: Bundle): void {
   // cannot survive into a URL that describes a run it had no part in.
   const params = new URLSearchParams();
   params.set("q", bundle.inputs.query);
-  params.set("days", String(bundle.inputs.days));
   window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
 }
 
@@ -145,7 +137,6 @@ export function ContentIdeasApp() {
       {
         query: values.query.trim(),
         profile: values.profile.trim(),
-        days: values.days,
       },
       {
         signal: abort.signal,

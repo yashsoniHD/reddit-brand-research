@@ -98,26 +98,42 @@ class TestTopicVolumes:
 
 
 class TestTrendBuckets:
-    def test_fills_the_whole_window_including_empty_days(self):
-        today = datetime.now(timezone.utc)
-        posts = [_post(int(today.timestamp())), _post(int(today.timestamp()))]
-        buckets = stats.trend_buckets(posts, days=7)
-        assert len(buckets) == 7
+    def test_spans_the_actual_coverage_including_empty_days(self):
+        now = datetime.now(timezone.utc)
+        posts = [
+            _post(int(now.timestamp())),
+            _post(int(now.timestamp())),
+            _post(int((now - timedelta(days=2)).timestamp())),
+        ]
+        buckets = stats.trend_buckets(posts)
+        assert len(buckets) == 3  # oldest to newest, the empty middle day zero-filled
+        assert buckets[0][1] == 1
+        assert buckets[1][1] == 0
         assert buckets[-1][1] == 2
-        assert sum(count for _, count in buckets) == 2
 
     def test_dates_are_ordered_oldest_first(self):
-        buckets = stats.trend_buckets([], days=14)
-        dates = [date for date, _ in buckets]
-        assert dates == sorted(dates) and len(dates) == 14
+        now = datetime.now(timezone.utc)
+        posts = [_post(int((now - timedelta(days=offset)).timestamp())) for offset in range(5)]
+        dates = [date for date, _ in stats.trend_buckets(posts)]
+        assert dates == sorted(dates) and len(dates) == 5
 
-    def test_posts_outside_the_window_are_not_counted(self):
-        old = datetime.now(timezone.utc) - timedelta(days=40)
-        buckets = stats.trend_buckets([_post(int(old.timestamp()))], days=7)
-        assert sum(count for _, count in buckets) == 0
+    def test_a_single_day_of_posts_is_one_bucket(self):
+        buckets = stats.trend_buckets([_post(1700000000), _post(1700000000)])
+        assert buckets == [("2023-11-14", 2)]
 
-    def test_zero_days_is_clamped(self):
-        assert len(stats.trend_buckets([], days=0)) == 1
+    def test_a_span_wider_than_the_cap_keeps_the_newest_days(self):
+        now = datetime.now(timezone.utc)
+        posts = [_post(int(now.timestamp())), _post(int((now - timedelta(days=40)).timestamp()))]
+        buckets = stats.trend_buckets(posts, max_days=30)
+        assert len(buckets) == 30
+        assert buckets[-1][1] == 1  # the newest post survives
+        assert sum(count for _, count in buckets) == 1  # the 40-day-old one falls outside
+
+    def test_no_posts_means_no_trend(self):
+        assert stats.trend_buckets([]) == []
+
+    def test_malformed_dates_are_ignored(self):
+        assert stats.trend_buckets([{"date": "not-a-date"}, {"date": ""}]) == []
 
 
 class TestEngagementAndDates:

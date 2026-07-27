@@ -12,6 +12,7 @@ import io
 import re
 from typing import List, Sequence
 
+import reddit_data
 import stats
 
 SENTIMENT_ORDER = ("pos", "neu", "neg")
@@ -67,7 +68,7 @@ def report_markdown(bundle: dict) -> str:
     add(
         "**Communities:** {} · **Window:** last {} days · "
         "**Actual range:** {}".format(
-            subs, inputs.get("days", ""), date_range.get("label", "n/a")
+            subs, reddit_data.FETCH_WINDOW_DAYS, date_range.get("label", "n/a")
         )
     )
     add("**Generated:** {} · **Analysis:** {}".format(
@@ -86,7 +87,7 @@ def report_markdown(bundle: dict) -> str:
     if low_data:
         add(
             "> Only {} items were found in this window, so these results are "
-            "directional rather than conclusive. A 30-day window will give a firmer read.".format(
+            "directional rather than conclusive.".format(
                 sample.get("items_analysed", 0)
             )
         )
@@ -229,14 +230,24 @@ def report_markdown(bundle: dict) -> str:
     add("- Communities read: {}".format(subs or "none"))
     add("- Discovery: the communities were chosen by the model from your query, then "
         "checked to exist and be public before being read.")
-    add("- Requested window: last {} days".format(inputs.get("days", "")))
+    add("- Requested window: last {} days".format(reddit_data.FETCH_WINDOW_DAYS))
     add("- Actual coverage: {}".format(date_range.get("label", "n/a")))
     add("- Posts fetched: {} · analysed: {}".format(
         sample.get("posts_fetched", 0), sample.get("posts_analysed", 0)))
     add("- Comments fetched: {} · analysed: {}".format(
         sample.get("comments_fetched", 0), sample.get("comments_analysed", 0)))
+    selection = sample.get("selection", {})
+    if selection.get("method") == "relevance+engagement":
+        add("- Selection: every candidate was rated for relevance to your search by the "
+            "model ({} items rated), then ranked in code by relevance, community "
+            "engagement and recency, with no single community taking more than half "
+            "the sample while others had items to offer.".format(selection.get("triaged", 0)))
+    else:
+        add("- Selection: items were ranked in code by community engagement and "
+            "recency, with no single community taking more than half the sample "
+            "while others had items to offer.")
     if sample.get("posts_truncated") or sample.get("comments_truncated"):
-        add("- Truncation: the {} most recent posts and the top {} comments by score were analysed.".format(
+        add("- Truncation: the {} top-ranked posts and the {} top-ranked comments were analysed.".format(
             sample.get("posts_analysed", 0), sample.get("comments_analysed", 0)))
     if sample.get("capacity_limited"):
         # Same disclosure the on-screen report carries: the cap came from the

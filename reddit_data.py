@@ -35,6 +35,9 @@ SUBREDDITS_ENDPOINT = f"{_API_ROOT}/subreddits/search"
 SOURCE_NAME = "Arctic Shift archive"
 
 # ── Request tuning ────────────────────────────────────────────────────────────
+# There is no user-facing time window: every run reads the last 30 days and the
+# selection layer decides what is worth analysing from that pool.
+FETCH_WINDOW_DAYS = 30
 PAGE_SIZE = 100
 MAX_POST_PAGES = 5            # 5 x 100 = 500 posts ceiling
 MAX_COMMENT_PAGES = 3         # 3 x 100 = 300 comments ceiling
@@ -294,7 +297,7 @@ def lookup_subreddit(name: str) -> Optional[dict]:
 
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
-def fetch_posts(subreddit: str, days: int = 7) -> List[dict]:
+def fetch_posts(subreddit: str, days: int = FETCH_WINDOW_DAYS) -> List[dict]:
     """Newest-first posts from the last `days` days, deduped, deleted ones dropped."""
     cutoff = _cutoff_timestamp(days)
     posts: List[dict] = []
@@ -370,7 +373,9 @@ def fetch_posts(subreddit: str, days: int = 7) -> List[dict]:
     return posts
 
 
-def fetch_comments(subreddit: str, days: int = 7, limit: int = DEFAULT_COMMENT_LIMIT) -> List[dict]:
+def fetch_comments(
+    subreddit: str, days: int = FETCH_WINDOW_DAYS, limit: int = DEFAULT_COMMENT_LIMIT
+) -> List[dict]:
     """Newest-first comments from the last `days` days, deduped, deleted ones dropped."""
     cutoff = _cutoff_timestamp(days)
     comments: List[dict] = []

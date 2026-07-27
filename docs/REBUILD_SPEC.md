@@ -1,5 +1,10 @@
 # Reddit Brand Research — v1 Sellable Rebuild Spec
 
+> **Historical document.** This spec predates the content-ideas pivot, the move
+> from Groq to Gemini on Vertex AI, the removal of Streamlit, the removal of the
+> platform and time-window inputs, and the relevance-triaged sample selection.
+> Where this document and the code disagree, the code and README are current.
+
 Goal: transform the current 3-file demo into a polished, trustworthy, exportable Reddit
 research tool for content/brand teams and agencies. Keep the name "Reddit Brand Research".
 Keep Groq as the LLM provider. Data source stays Arctic Shift, but isolated behind a

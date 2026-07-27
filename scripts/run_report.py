@@ -5,7 +5,6 @@ Exercises exactly the code path the Streamlit app uses, with no Streamlit involv
     python scripts/run_report.py \
         --query "Productivity struggles freelance designers have juggling multiple clients" \
         --profile "I run a Notion template shop for freelance designers" \
-        --days 7 \
         --json sample_report.json --markdown report.md --sample
 
 Pass --subreddits to skip discovery entirely and analyse specific communities instead,
@@ -64,7 +63,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a Reddit content ideas report.")
     parser.add_argument("--query", required=True, help="what you want content ideas about")
     parser.add_argument("--profile", default="", help="optional: who you are / your brand")
-    parser.add_argument("--days", type=int, default=7, choices=list(pipeline.TIME_WINDOWS))
     parser.add_argument("--json", dest="json_path", help="write the full bundle here")
     parser.add_argument("--markdown", dest="markdown_path", help="write the Markdown report here")
     parser.add_argument("--sample", action="store_true", help="mark the bundle as a sample report")
@@ -79,7 +77,7 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout
     )
 
-    checked = pipeline.validate_inputs(args.query, args.profile, args.days)
+    checked = pipeline.validate_inputs(args.query, args.profile)
     if checked["errors"]:
         for error in checked["errors"]:
             print("input error: {}".format(error))
@@ -98,7 +96,6 @@ def main() -> int:
         bundle = pipeline.run_report(
             checked["query"],
             checked["profile"],
-            checked["days"],
             progress=lambda message: print("  · {}".format(message)),
             discover=discover,
         )

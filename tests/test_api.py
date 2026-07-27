@@ -22,7 +22,6 @@ client = TestClient(app)
 VALID_BODY = {
     "query": "ai automation ideas for freelancers",
     "profile": "",
-    "days": 7,
 }
 
 
@@ -34,11 +33,11 @@ class TestReportStreamHappyPath:
     def test_valid_input_streams_progress_then_a_terminal_report_line(self, monkeypatch):
         captured = {}
 
-        def fake_run_report(query, profile, days, progress=None):
-            captured["args"] = (query, profile, days)
+        def fake_run_report(query, profile, progress=None):
+            captured["args"] = (query, profile)
             progress("Finding communities talking about this...")
             progress("Found r/testsub - fetching posts...")
-            return {"bundle_version": 3, "inputs": {"query": query}, "sample": {}}
+            return {"bundle_version": 4, "inputs": {"query": query}, "sample": {}}
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
 
@@ -53,17 +52,15 @@ class TestReportStreamHappyPath:
         assert len(lines) == 3
         assert lines[2] == {
             "type": "report",
-            "bundle": {"bundle_version": 3, "inputs": {"query": VALID_BODY["query"]}, "sample": {}},
+            "bundle": {"bundle_version": 4, "inputs": {"query": VALID_BODY["query"]}, "sample": {}},
         }
-        assert captured["args"] == (
-            VALID_BODY["query"], VALID_BODY["profile"], VALID_BODY["days"]
-        )
+        assert captured["args"] == (VALID_BODY["query"], VALID_BODY["profile"])
 
     def test_only_the_last_line_carries_the_bundle(self, monkeypatch):
-        def fake_run_report(query, profile, days, progress=None):
+        def fake_run_report(query, profile, progress=None):
             for message in ("one", "two", "three"):
                 progress(message)
-            return {"bundle_version": 3}
+            return {"bundle_version": 4}
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
         lines = _lines(client.post("/api/report", json=VALID_BODY))
@@ -76,14 +73,22 @@ class TestReportStreamValidation:
         # the API is wired to the actual validation rules, not a stand-in for them.
         response = client.post(
             "/api/report",
-            json={"query": "short", "profile": "", "days": 3},
+            json={"query": "short", "profile": ""},
         )
         assert response.status_code == 200
         lines = _lines(response)
         assert len(lines) == 1
         assert lines[0]["type"] == "invalid"
-        assert len(lines[0]["errors"]) == 2  # too-short query, bad time window
+        assert len(lines[0]["errors"]) == 1  # too-short query
         assert all(message[0].isupper() and message.endswith(".") for message in lines[0]["errors"])
+
+    def test_a_stray_days_field_from_an_old_client_is_ignored(self, monkeypatch):
+        def fake_run_report(query, profile, progress=None):
+            return {"bundle_version": 4}
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        lines = _lines(client.post("/api/report", json={**VALID_BODY, "days": 7}))
+        assert lines[-1]["type"] == "report"
 
     def test_empty_query_is_invalid(self):
         lines = _lines(client.post("/api/report", json={**VALID_BODY, "query": ""}))
@@ -109,7 +114,7 @@ class TestReportStreamValidation:
 
 class TestReportStreamErrors:
     def test_run_error_streams_progress_then_a_terminal_error_line(self, monkeypatch):
-        def fake_run_report(query, profile, days, progress=None):
+        def fake_run_report(query, profile, progress=None):
             progress("Finding communities talking about this...")
             raise pipeline.RunError("We could not read anything usable from r/testsub.")
 
@@ -122,7 +127,7 @@ class TestReportStreamErrors:
         assert len(lines) == 2
 
     def test_value_error_from_the_engine_passes_its_message_through_verbatim(self, monkeypatch):
-        def fake_run_report(query, profile, days, progress=None):
+        def fake_run_report(query, profile, progress=None):
             raise ValueError("The analysis service has reached its rate limit.")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
@@ -130,7 +135,7 @@ class TestReportStreamErrors:
         assert lines == [{"type": "error", "message": "The analysis service has reached its rate limit."}]
 
     def test_unexpected_exception_becomes_the_generic_message_not_a_leaked_traceback(self, monkeypatch):
-        def fake_run_report(query, profile, days, progress=None):
+        def fake_run_report(query, profile, progress=None):
             raise RuntimeError("some internal detail nobody outside should see")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
@@ -140,16 +145,16 @@ class TestReportStreamErrors:
 
 
 class TestSampleEndpoint:
-    def test_available_when_the_file_is_a_v3_bundle(self, tmp_path, monkeypatch):
+    def test_available_when_the_file_is_a_v4_bundle(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
-        sample_path.write_text(json.dumps({"bundle_version": 3, "inputs": {"query": "x"}}))
+        sample_path.write_text(json.dumps({"bundle_version": 4, "inputs": {"query": "x"}}))
         monkeypatch.setattr(api_index, "SAMPLE_PATH", sample_path)
 
         response = client.get("/api/sample")
         assert response.status_code == 200
         body = response.json()
         assert body["available"] is True
-        assert body["bundle"]["bundle_version"] == 3
+        assert body["bundle"]["bundle_version"] == 4
 
     def test_unavailable_when_the_file_is_still_v1(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
@@ -158,9 +163,9 @@ class TestSampleEndpoint:
 
         assert client.get("/api/sample").json() == {"available": False}
 
-    def test_unavailable_when_the_file_is_still_v2(self, tmp_path, monkeypatch):
+    def test_unavailable_when_the_file_is_still_v3(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
-        sample_path.write_text(json.dumps({"bundle_version": 2, "inputs": {}}))
+        sample_path.write_text(json.dumps({"bundle_version": 3, "inputs": {}}))
         monkeypatch.setattr(api_index, "SAMPLE_PATH", sample_path)
 
         assert client.get("/api/sample").json() == {"available": False}
@@ -255,9 +260,9 @@ class TestExportEndpoints:
         # No patching here: exercises the real report_export functions once, so this
         # file also proves the wiring works, not only that mocks can be swapped in.
         bundle = {
-            "bundle_version": 3,
+            "bundle_version": 4,
             "inputs": {"query": "ai tools for founders", "profile": "",
-                       "subreddits": ["testsub"], "days": 7},
+                       "subreddits": ["testsub"]},
             "generated_at": "2026-07-26 10:00 UTC", "model_label": "test-model", "source": "Test archive",
             "discovery": {"communities": [], "considered": []},
             "notices": [], "posts": [], "comments": [], "items": [],

@@ -1,5 +1,5 @@
 import {
-  isBundleV3,
+  isBundleV4,
   type Bundle,
   type DraftRequest,
   type DraftResponse,
@@ -99,7 +99,7 @@ export async function runReport(
       return;
     }
     if (parsed.type === "report") {
-      terminal = isBundleV3(parsed.bundle)
+      terminal = isBundleV4(parsed.bundle)
         ? { kind: "report", bundle: parsed.bundle }
         : {
             kind: "error",
@@ -150,7 +150,7 @@ export async function fetchSample(signal?: AbortSignal): Promise<Bundle | null> 
     if (!response.ok) return null;
     const payload = (await response.json()) as SampleResponse;
     if (!payload || payload.available !== true) return null;
-    if (!isBundleV3(payload.bundle)) return null;
+    if (!isBundleV4(payload.bundle)) return null;
     return { ...payload.bundle, is_sample: true };
   } catch {
     return null;

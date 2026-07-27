@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
 from google import genai
@@ -65,8 +66,9 @@ BAD_PAYLOAD_LOG_CHARS = 200
 # refit ladder handles that case if the estimate here ever turns out optimistic.
 DEFAULT_TOKEN_BUDGET = int(os.environ.get("GEMINI_TOKEN_BUDGET", "200000"))
 BUDGET_SAFETY = 0.9
-CLASSIFY_BUDGET_SHARE = 0.55
-SYNTHESIS_BUDGET_SHARE = 0.45
+TRIAGE_BUDGET_SHARE = 0.10
+CLASSIFY_BUDGET_SHARE = 0.50
+SYNTHESIS_BUDGET_SHARE = 0.40
 CHARS_PER_TOKEN = 4
 _token_limit: Optional[int] = None
 
@@ -97,6 +99,31 @@ MAX_CONTENT_IDEAS = 12
 # a hook and starts being the post.
 MAX_HOOK_CHARS = 120
 LOW_DATA_THRESHOLD = 10
+
+# ── Selection tuning ──────────────────────────────────────────────────────────
+# How the best posts and comments are chosen from the fetched pool. A cheap triage
+# call rates each candidate's relevance to the query; Python then ranks by
+# relevance x engagement x recency, so the model judges language and the code
+# decides the sample, in that order and never the other way around.
+RECENCY_HALF_LIFE_DAYS = 8
+# 0 gates an item out of the main tier entirely; 1 keeps the maybe-relevant
+# majority competitive without letting it beat a clearly on-topic item.
+RELEVANCE_WEIGHTS = {2: 1.0, 1: 0.55, 0: 0.0}
+# A zero-engagement item is quiet, not worthless: without a floor, a brand-new
+# on-topic post scores 0 and loses to any off-window viral one.
+ENGAGEMENT_FLOOR = 0.25
+# No subreddit may hold more than this share of any prefix of the ranked list,
+# while another community still has eligible items to offer.
+FAIRNESS_SHARE = 0.5
+# Below this much real text (URLs stripped) a post body is a link drop; a title
+# this short cannot carry the idea on its own either.
+SUBSTANCE_MIN_BODY_CHARS = 15
+SUBSTANCE_MIN_TITLE_CHARS = 40
+TRIAGE_MAX_POSTS = 400
+TRIAGE_MAX_COMMENTS = 400
+TRIAGE_PREVIEW_CHARS = 100
+TRIAGE_BATCH_SIZE = 250
+TRIAGE_MAX_TOKENS = 12000
 
 # ── Formats ───────────────────────────────────────────────────────────────────
 # The product writes for one professional feed, so there is no platform to choose and
@@ -510,6 +537,259 @@ def quota_message(exc: Exception) -> Optional[str]:
     return message + " Please try again in a minute."
 
 
+# ── Selection: scoring ────────────────────────────────────────────────────────
+# Everything in this section is deterministic. The only model involvement is the
+# relevance rating fed in from rate_relevance, and even that arrives as plain
+# integers the code is free to distrust.
+
+_BARE_URL_PATTERN = re.compile(r"https?://\S+")
+
+
+def _engagement_raw(item: dict) -> float:
+    """Log-damped engagement, so 4000 upvotes beats 400 without drowning it."""
+    item = item or {}
+    score = max(0, int(item.get("score") or 0))
+    if item.get("kind") == "comment":
+        return math.log1p(score)
+    return math.log1p(score + max(0, int(item.get("comments") or 0)))
+
+
+def _recency_decay(created_utc: Any, now: float) -> float:
+    """Halves every RECENCY_HALF_LIFE_DAYS. Undated items sit in the middle:
+    they cannot claim to be fresh, and they should not be buried as ancient."""
+    try:
+        created = int(created_utc or 0)
+    except (TypeError, ValueError):
+        created = 0
+    if created <= 0:
+        return 0.5
+    age_days = max(0.0, (now - created) / 86400.0)
+    return 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
+
+
+def _has_substance(post: dict) -> bool:
+    """A link drop with a throwaway title cannot seed a content idea."""
+    post = post or {}
+    body = _BARE_URL_PATTERN.sub("", str(post.get("body") or "")).strip()
+    if len(body) >= SUBSTANCE_MIN_BODY_CHARS:
+        return True
+    return len(str(post.get("title") or "").strip()) >= SUBSTANCE_MIN_TITLE_CHARS
+
+
+def _base_scores(items: Sequence[dict], now: float) -> List[float]:
+    """Engagement x recency per item, engagement normalised within each subreddit.
+
+    Normalising per community is what lets a 40-upvote post from a small subreddit
+    compete with a 4000-upvote one from a huge subreddit: each is measured against
+    its own community's ceiling, not the loudest community's.
+    """
+    raw = [_engagement_raw(item) for item in items]
+    ceiling: Dict[str, float] = {}
+    for item, value in zip(items, raw):
+        subreddit = str((item or {}).get("subreddit") or "")
+        ceiling[subreddit] = max(ceiling.get(subreddit, 0.0), value)
+
+    scores = []
+    for item, value in zip(items, raw):
+        subreddit = str((item or {}).get("subreddit") or "")
+        top = ceiling.get(subreddit, 0.0)
+        # An all-zero community gets neutral footing rather than nothing; the
+        # fairness cap stops it dominating on that footing.
+        norm = (value / top) if top > 0 else 0.5
+        engagement = ENGAGEMENT_FLOOR + (1 - ENGAGEMENT_FLOOR) * norm
+        scores.append(engagement * _recency_decay((item or {}).get("created_utc"), now))
+    return scores
+
+
+def _fair_order(scored: List[Tuple[float, dict]]) -> List[dict]:
+    """Order best-first so that every prefix respects the fairness cap.
+
+    Greedy: always take the best-scored head of a community that is still under
+    the cap for the next prefix; when every community with items left is capped
+    (only possible when one community is all that remains), take the best anyway.
+    Prefix safety is the point: fit_sample slices this list at whatever rung the
+    token budget allows, and the slice has to be as fair as the whole.
+    """
+    queues: Dict[str, List[Tuple[float, int, dict]]] = {}
+    for position, (score, item) in enumerate(scored):
+        subreddit = str((item or {}).get("subreddit") or "")
+        # position keeps the sort stable and fully deterministic on ties.
+        queues.setdefault(subreddit, []).append((score, position, item))
+    for queue in queues.values():
+        queue.sort(key=lambda entry: (-entry[0], entry[1]))
+        queue.reverse()  # pop() from the end is the best remaining
+
+    picked: List[dict] = []
+    counts: Dict[str, int] = {}
+    while any(queues.values()):
+        cap = max(1, math.ceil(FAIRNESS_SHARE * (len(picked) + 1)))
+        heads = [
+            (queue[-1][0], queue[-1][1], subreddit)
+            for subreddit, queue in queues.items()
+            if queue
+        ]
+        allowed = [head for head in heads if counts.get(head[2], 0) < cap]
+        score, position, subreddit = max(
+            allowed or heads, key=lambda head: (head[0], -head[1])
+        )
+        picked.append(queues[subreddit].pop()[2])
+        counts[subreddit] = counts.get(subreddit, 0) + 1
+    return picked
+
+
+def rank_items(
+    posts: Sequence[dict],
+    comments: Sequence[dict],
+    relevance: Optional[Dict[str, int]] = None,
+    now: Optional[float] = None,
+) -> Tuple[List[dict], List[dict]]:
+    """Fully order both pools, best candidates first.
+
+    `relevance` maps item id -> 0..2 from the triage call; items it does not
+    cover count as 1 (maybe relevant), so a failed or partial triage degrades
+    the ranking instead of the run. Items rated 0, and posts with no substance,
+    drop to a backfill tier below everything eligible: still available when a
+    quiet topic needs them, never ahead of anything actually on-topic.
+    """
+    relevance = relevance or {}
+    timestamp = time.time() if now is None else now
+
+    def ordered(items: Sequence[dict], substance_check: bool) -> List[dict]:
+        items = [item for item in items if isinstance(item, dict)]
+        base = _base_scores(items, timestamp)
+        eligible: List[Tuple[float, dict]] = []
+        backfill: List[Tuple[float, dict]] = []
+        for item, score in zip(items, base):
+            rating = relevance.get(str(item.get("id") or ""), 1)
+            weight = RELEVANCE_WEIGHTS.get(rating, RELEVANCE_WEIGHTS[1])
+            if weight <= 0 or (substance_check and not _has_substance(item)):
+                # Ranked by base score alone: relevance said no, so it no longer
+                # gets a say in how the leftovers are ordered.
+                backfill.append((score, item))
+            else:
+                eligible.append((weight * score, item))
+        return _fair_order(eligible) + _fair_order(backfill)
+
+    return ordered(posts, True), ordered(comments, False)
+
+
+# ── Selection: relevance triage ───────────────────────────────────────────────
+def _triage_preview(item: dict, chars: int = TRIAGE_PREVIEW_CHARS) -> str:
+    item = item or {}
+    text = " ".join("{} {}".format(item.get("title") or "", item.get("body") or "").split())
+    return text[:chars]
+
+
+def _triage_lines(items: Sequence[dict], start: int = 1) -> str:
+    lines = []
+    for position, item in enumerate(items, start):
+        kind = "comment" if (item or {}).get("kind") == "comment" else "post"
+        lines.append("{}. [{}] {}".format(position, kind, _triage_preview(item)))
+    return "\n".join(lines)
+
+
+def _triage_prompt(items: Sequence[dict], query: str, profile: str, start: int) -> str:
+    return (
+        "You are rating Reddit items for relevance to a research brief. "
+        "You never invent content.\n\n"
+        "Brief: {query}\n"
+        "Researcher: {profile}\n\n"
+        "Below are {count} numbered items, each a short preview of a post or comment.\n\n"
+        "{listing}\n\n"
+        'Return ONLY a JSON object: {{"ratings": [{{"i": {start}, "r": 2}}, ...]}}\n\n'
+        "Rules:\n"
+        "- Include EVERY item number shown above, exactly once.\n"
+        '- "r" is 2 (directly about the brief\'s topic), 1 (adjacent: the same '
+        "audience or a neighbouring problem, partly related, or too short to tell), "
+        "or 0 (a different audience or subject entirely, or spam).\n"
+        "- When unsure, use 1. No markdown fences, no commentary. JSON only."
+    ).format(
+        query=query,
+        profile=profile or "not given",
+        count=len(items),
+        listing=_triage_lines(items, start),
+        start=start,
+    )
+
+
+def _triage_output_tokens(n_items: int) -> int:
+    """Room for one pretty-printed {"i", "r"} object per item, padded the same
+    way as _classification_output_tokens and for the same reason."""
+    return min(TRIAGE_MAX_TOKENS, 30 * max(1, n_items) + 300)
+
+
+def _sanitize_ratings(raw: dict, batch_size: int, start: int) -> Dict[int, int]:
+    """Every item in the batch gets a rating; anything malformed becomes a 1.
+
+    Defaulting to 1 on every failure mode is the fail-open rule: a rating the
+    model fumbled must cost that item nothing, in either direction.
+    """
+    ratings = {position: 1 for position in range(start, start + batch_size)}
+    entries = raw.get("ratings") if isinstance(raw, dict) else None
+    seen = set()
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("i")
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if index < start or index >= start + batch_size or index in seen:
+            continue
+        seen.add(index)
+        rating = entry.get("r")
+        if isinstance(rating, bool) or not isinstance(rating, (int, float)):
+            continue
+        rating = int(rating)
+        if rating in (0, 1, 2):
+            ratings[index] = rating
+    return ratings
+
+
+def rate_relevance(
+    items: Sequence[dict],
+    query: str,
+    profile: str,
+    chat: Optional[Any] = None,
+) -> Optional[Dict[int, int]]:
+    """Rate every candidate's relevance to the query, 0..2, keyed by 1-based
+    position in `items`.
+
+    Batches keep each call small; indices are global across batches so results
+    merge by simple union. A batch that fails after chat_json's own retries is
+    dropped (its items fall back to the untriaged default of 1 in rank_items);
+    only when every batch fails does this return None, telling the caller to
+    select deterministically. Triage failure is never worth failing a run over.
+    """
+    chat = chat or chat_json
+    ratings: Dict[int, int] = {}
+    batches = 0
+    failures = 0
+
+    for offset in range(0, len(items), TRIAGE_BATCH_SIZE):
+        batch = items[offset : offset + TRIAGE_BATCH_SIZE]
+        start = offset + 1
+        batches += 1
+        try:
+            raw, _ = chat(
+                _triage_prompt(batch, query, profile, start),
+                _triage_output_tokens(len(batch)),
+                "relevance-triage",
+                thinking=False,
+            )
+        except (ValueError, PayloadTooLarge) as exc:
+            failures += 1
+            logger.warning(
+                "relevance-triage batch at %s failed, items keep the default rating: %s",
+                start, exc,
+            )
+            continue
+        ratings.update(_sanitize_ratings(raw, len(batch), start))
+
+    if batches > 0 and failures == batches:
+        return None
+    return ratings
+
+
 # ── Item selection and prompt shaping ─────────────────────────────────────────
 def select_items(
     posts: Sequence[dict],
@@ -517,16 +797,14 @@ def select_items(
     max_posts: int = MAX_POSTS_ANALYSED,
     max_comments: int = MAX_COMMENTS_ANALYSED,
 ) -> List[dict]:
-    """Build the indexed analysis sample: newest posts first, then top comments.
+    """Build the indexed analysis sample: the best posts, then the best comments.
 
-    Index order is the contract between the model, stats.py and every citation, so
-    this function is the single source of truth for it.
+    A pure slicer: both lists arrive already ranked by rank_items (or in fetch
+    order when the caller skipped ranking), so every prefix is already the best
+    sample of its size. Index order is the contract between the model, stats.py
+    and every citation, so this function is the single source of truth for it.
     """
-    chosen_posts = list(posts or [])[:max_posts]
-    ranked_comments = sorted(
-        list(comments or []), key=lambda c: (c or {}).get("score", 0), reverse=True
-    )[:max_comments]
-    return chosen_posts + ranked_comments
+    return list(posts or [])[:max_posts] + list(comments or [])[:max_comments]
 
 
 def _preview(text: str, chars: int = BODY_PREVIEW_CHARS) -> str:
@@ -1052,10 +1330,68 @@ def classify_items(
     return result
 
 
+def _triage_pool(items: Sequence[dict], scores: Sequence[float], cap: int) -> List[dict]:
+    """The strongest candidates by base score, worth spending a triage call on."""
+    paired = sorted(zip(scores, range(len(items))), key=lambda entry: (-entry[0], entry[1]))
+    return [items[index] for _, index in paired[:cap]]
+
+
+def _select_sample(
+    posts: Sequence[dict],
+    comments: Sequence[dict],
+    query: str,
+    profile: str,
+) -> Tuple[List[dict], List[dict], dict]:
+    """Rank both pools for selection and say how the ranking was decided.
+
+    Returns (ranked_posts, ranked_comments, selection). The model rates relevance
+    for the strongest candidates only (a triage call over the whole pool would
+    spend tokens rating items that could never win a slot anyway); Python computes
+    every ranking decision from those ratings.
+    """
+    posts = [item for item in posts or [] if isinstance(item, dict)]
+    comments = [item for item in comments or [] if isinstance(item, dict)]
+    now = time.time()
+
+    pool = _triage_pool(posts, _base_scores(posts, now), TRIAGE_MAX_POSTS) + _triage_pool(
+        comments, _base_scores(comments, now), TRIAGE_MAX_COMMENTS
+    )
+    ratings = rate_relevance(pool, query, profile) if query else None
+
+    if ratings is None:
+        relevance: Optional[Dict[str, int]] = None
+        selection = {
+            "method": "deterministic-fallback",
+            "triaged": 0,
+            "relevance_counts": {"0": 0, "1": 0, "2": 0},
+        }
+    else:
+        relevance = {
+            str(item.get("id") or ""): rating
+            for item, rating in ((pool[position - 1], value) for position, value in ratings.items())
+        }
+        counts = {"0": 0, "1": 0, "2": 0}
+        for value in ratings.values():
+            counts[str(value)] += 1
+        selection = {
+            "method": "relevance+engagement",
+            "triaged": len(ratings),
+            "relevance_counts": counts,
+        }
+
+    ranked_posts, ranked_comments = rank_items(posts, comments, relevance, now)
+    return ranked_posts, ranked_comments, selection
+
+
 def classify_sample(
-    posts: Sequence[dict], comments: Sequence[dict], subreddits: Sequence[str]
+    posts: Sequence[dict],
+    comments: Sequence[dict],
+    subreddits: Sequence[str],
+    query: str = "",
+    profile: str = "",
 ) -> Tuple[List[dict], int, dict]:
-    """Fit a sample to the account's token budget, classify it, shrink and retry if rejected.
+    """Select the best sample, fit it to the token budget, classify it, shrink and
+    retry if rejected.
 
     Returns (items, preview_chars, classification). The items list is authoritative
     from here on: every index in the classification refers to it.
@@ -1063,18 +1399,23 @@ def classify_sample(
     if not posts and not comments:
         raise ValueError("There was nothing to analyse in this sample.")
 
+    # Ranked once, outside the refit loop: a refit changes how much of the ranking
+    # is used, never the ranking itself.
+    ranked_posts, ranked_comments, selection = _select_sample(posts, comments, query, profile)
+
     global _token_limit
     for attempt in range(MAX_REFIT_ATTEMPTS):
-        items, preview_chars = fit_sample(posts, comments, subreddits)
+        items, preview_chars = fit_sample(ranked_posts, ranked_comments, subreddits)
         try:
             classification = classify_items(items, subreddits, preview_chars)
             classification["capacity_limited"] = is_capacity_limited(items, preview_chars, posts, comments)
+            classification["selection"] = selection
             return items, preview_chars, classification
         except PayloadTooLarge:
             if attempt == MAX_REFIT_ATTEMPTS - 1:
                 raise ValueError(
                     "This sample is larger than the analysis service can take right "
-                    "now. Try a shorter time window."
+                    "now. Please try again in a moment."
                 )
             # A rejection means the provider counts this prompt as bigger than our
             # estimate did, so the budget is shaved and the ladder tried again a rung

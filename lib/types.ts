@@ -1,5 +1,5 @@
 /**
- * Report bundle v3.
+ * Report bundle v4.
  *
  * Hand-derived from the Python engine so the two cannot drift silently:
  * field names and nesting come from `pipeline.run_report`, the numeric shapes
@@ -7,16 +7,16 @@
  * `reddit_data.fetch_comments`, and the idea/claim shapes from
  * `analysis.sanitize_synthesis`.
  *
- * v3 removes the publishing-target concept from the product surface: inputs
- * carry only {query, profile, days}, and an idea no longer names a target.
- * Writing for a professional feed is a property of the prompts, not of the
- * bundle or the UI.
+ * v4 removes the user-facing time window: every run reads the engine's fixed
+ * fetch window (30 days) and a relevance-aware selector decides what gets
+ * analysed, so inputs carry only {query, profile}. The window the report
+ * actually covered lives in stats.date_range, computed from real timestamps.
  *
  * The bundle is the single unit of state on this side too: it is what the
  * stream delivers, what history stores, and what every section renders.
  */
 
-export const BUNDLE_VERSION = 3;
+export const BUNDLE_VERSION = 4;
 
 export type SentimentKey = "pos" | "neu" | "neg";
 
@@ -66,7 +66,19 @@ export interface Inputs {
   profile: string;
   /** Only the communities that actually contributed data. */
   subreddits: string[];
-  days: number;
+}
+
+/** How the analysed sample was chosen from the fetched pool. */
+export interface SelectionInfo {
+  /**
+   * "relevance+engagement" when the triage call rated candidates;
+   * "deterministic-fallback" when selection ran on engagement and recency alone.
+   */
+  method: string;
+  /** Candidates the model actually rated (0 on fallback). */
+  triaged: number;
+  /** How many candidates were rated 0 (unrelated), 1 (maybe), 2 (on-topic). */
+  relevance_counts: Record<"0" | "1" | "2", number>;
 }
 
 export interface SampleInfo {
@@ -79,6 +91,7 @@ export interface SampleInfo {
   comments_truncated: boolean;
   low_data: boolean;
   capacity_limited: boolean;
+  selection: SelectionInfo;
 }
 
 export interface Topic {
@@ -181,7 +194,6 @@ export interface Bundle {
 export interface ReportRequest {
   query: string;
   profile: string;
-  days: number;
 }
 
 export type StreamLine =
@@ -222,7 +234,6 @@ export const MAX_DRAFT_EVIDENCE = 6;
 export const MIN_QUERY_CHARS = 10;
 export const MAX_QUERY_CHARS = 300;
 export const MAX_PROFILE_CHARS = 500;
-export const TIME_WINDOWS = [7, 14, 30] as const;
 
 export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   pos: "Positive",
@@ -233,7 +244,7 @@ export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
 export const SENTIMENT_ORDER: SentimentKey[] = ["pos", "neu", "neg"];
 
 /** Narrow an unknown payload before anything renders it. */
-export function isBundleV3(value: unknown): value is Bundle {
+export function isBundleV4(value: unknown): value is Bundle {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<Bundle>;
   return (

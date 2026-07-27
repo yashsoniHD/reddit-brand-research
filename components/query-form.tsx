@@ -2,20 +2,12 @@
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { MAX_PROFILE_CHARS, MAX_QUERY_CHARS, TIME_WINDOWS } from "@/lib/types";
+import { MAX_PROFILE_CHARS, MAX_QUERY_CHARS } from "@/lib/types";
 
 export interface FormValues {
   query: string;
   profile: string;
-  days: number;
 }
 
 export function QueryForm({
@@ -81,27 +73,6 @@ export function QueryForm({
           placeholder="I run a Notion template shop for freelance designers."
           className="resize-y"
         />
-      </div>
-
-      <div className="flex flex-col gap-2 sm:max-w-xs">
-        <Label htmlFor="days" className="text-sm font-medium">
-          Time window
-        </Label>
-        <Select
-          value={String(values.days)}
-          onValueChange={(value) => set("days", Number(value))}
-        >
-          <SelectTrigger id="days" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TIME_WINDOWS.map((days) => (
-              <SelectItem key={days} value={String(days)}>
-                Last {days} days
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">

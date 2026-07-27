@@ -1,4 +1,4 @@
-"""Orchestration and exports (bundle v3), driven by fakes so no test touches the network."""
+"""Orchestration and exports (bundle v4), driven by fakes so no test touches the network."""
 
 import json
 import os
@@ -42,7 +42,7 @@ def make_discover(names, reasons=None, subscribers=None, checked=None):
     return fake
 
 
-def fake_posts(subreddit, days, count=4):
+def fake_posts(subreddit, count=4):
     return [
         {
             "kind": "post", "id": "{}-{}".format(subreddit, i), "subreddit": subreddit,
@@ -55,7 +55,7 @@ def fake_posts(subreddit, days, count=4):
     ]
 
 
-def fake_comments(subreddit, days, count=2):
+def fake_comments(subreddit, count=2):
     return [
         {
             "kind": "comment", "id": "c{}-{}".format(subreddit, i), "subreddit": subreddit,
@@ -67,7 +67,7 @@ def fake_comments(subreddit, days, count=2):
     ]
 
 
-def fake_classify(posts, comments, subreddits):
+def fake_classify(posts, comments, subreddits, query="", profile=""):
     items = list(posts) + list(comments)
     return (
         items,
@@ -82,6 +82,11 @@ def fake_classify(posts, comments, subreddits):
                 for index in range(1, len(items) + 1)
             ],
             "model": "gemini-2.5-flash",
+            "selection": {
+                "method": "relevance+engagement",
+                "triaged": len(items),
+                "relevance_counts": {"0": 0, "1": 1, "2": len(items) - 1},
+            },
         },
     )
 
@@ -105,7 +110,7 @@ def fake_synthesize(items, topics, query, profile, subreddits, preview_chars=200
 
 def build_bundle(**overrides):
     kwargs = dict(
-        query=DEFAULT_QUERY, profile="", days=7,
+        query=DEFAULT_QUERY, profile="",
         discover=make_discover(["testsub"]),
         fetch_posts=fake_posts, fetch_comments=fake_comments,
         classify=fake_classify, synthesize=fake_synthesize,
@@ -117,42 +122,35 @@ def build_bundle(**overrides):
 # ── Input validation ──────────────────────────────────────────────────────────
 class TestValidateInputs:
     def test_accepts_good_input(self):
-        result = pipeline.validate_inputs(DEFAULT_QUERY, "I run a small design studio", 7)
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "I run a small design studio")
         assert result["errors"] == []
         assert result["query"] == DEFAULT_QUERY
 
     def test_reports_every_problem_at_once(self):
-        result = pipeline.validate_inputs("", "p" * 600, 99)
-        assert len(result["errors"]) == 3
+        result = pipeline.validate_inputs("", "p" * 600)
+        assert len(result["errors"]) == 2
 
     def test_rejects_a_too_short_query(self):
-        assert pipeline.validate_inputs("short", "", 7)["errors"]
+        assert pipeline.validate_inputs("short", "")["errors"]
 
     def test_rejects_an_overlong_query(self):
-        assert pipeline.validate_inputs("q" * 400, "", 7)["errors"]
+        assert pipeline.validate_inputs("q" * 400, "")["errors"]
 
     def test_rejects_an_overlong_profile(self):
-        result = pipeline.validate_inputs(DEFAULT_QUERY, "p" * 600, 7)
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "p" * 600)
         assert len(result["errors"]) == 1
 
-    def test_rejects_a_time_window_outside_the_allowed_set(self):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", 3)["errors"]
-
-    @pytest.mark.parametrize("days", [7, 14, 30])
-    def test_accepts_every_allowed_time_window(self, days):
-        assert pipeline.validate_inputs(DEFAULT_QUERY, "", days)["errors"] == []
-
     def test_every_error_is_a_full_sentence(self):
-        for message in pipeline.validate_inputs("", "", 3)["errors"]:
+        for message in pipeline.validate_inputs("", "p" * 600)["errors"]:
             assert message[0].isupper() and message.endswith(".")
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
 class TestRunReport:
-    def test_produces_a_complete_v3_bundle(self):
+    def test_produces_a_complete_v4_bundle(self):
         bundle = build_bundle()
-        assert bundle["bundle_version"] == 3
-        assert set(bundle["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
+        assert bundle["bundle_version"] == 4
+        assert set(bundle["inputs"].keys()) == {"query", "profile", "subreddits"}
         assert bundle["inputs"]["subreddits"] == ["testsub"]
         assert "discovery" in bundle
         assert set(bundle["discovery"].keys()) == {"communities", "considered"}
@@ -162,7 +160,8 @@ class TestRunReport:
         assert bundle["sample"]["items_analysed"] == 6
         assert bundle["analysis"]["executive_summary"]
         assert bundle["stats"]["sentiment"]["classified"] == 6
-        assert len(bundle["stats"]["trend"]) == 7
+        # Every fake post carries the same date, so coverage-based buckets collapse to one.
+        assert len(bundle["stats"]["trend"]) == 1
 
     def test_content_ideas_have_no_platform_field(self):
         idea = build_bundle()["analysis"]["content_ideas"][0]
@@ -215,20 +214,20 @@ class TestRunReport:
         assert any("Writing your content ideas" in message for message in messages)
 
     def test_low_data_is_flagged(self):
-        bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 2),
-                              fetch_comments=lambda s, d: [])
+        bundle = build_bundle(fetch_posts=lambda s: fake_posts(s, 2),
+                              fetch_comments=lambda s: [])
         assert bundle["sample"]["low_data"] is True
 
     def test_enough_data_is_not_flagged(self):
-        bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 30),
-                              fetch_comments=lambda s, d: fake_comments(s, d, 5))
+        bundle = build_bundle(fetch_posts=lambda s: fake_posts(s, 30),
+                              fetch_comments=lambda s: fake_comments(s, 5))
         assert bundle["sample"]["low_data"] is False
 
     def test_notice_when_one_community_is_empty_but_others_still_produce_a_report(self):
-        def fetch_posts(name, days):
+        def fetch_posts(name):
             if name == "emptysub":
                 return []
-            return fake_posts(name, days)
+            return fake_posts(name)
 
         bundle = build_bundle(
             discover=make_discover(["testsub", "emptysub"]),
@@ -241,15 +240,15 @@ class TestRunReport:
 
     def test_all_communities_empty_raises_a_run_error_naming_them(self):
         with pytest.raises(pipeline.RunError) as excinfo:
-            build_bundle(discover=make_discover(["subone", "subtwo"]), fetch_posts=lambda s, d: [])
+            build_bundle(discover=make_discover(["subone", "subtwo"]), fetch_posts=lambda s: [])
         message = str(excinfo.value)
         assert "r/subone" in message and "r/subtwo" in message
 
     def test_an_unchecked_community_that_turns_out_missing_becomes_a_notice_not_a_failure(self):
-        def fetch_posts(name, days):
+        def fetch_posts(name):
             if name == "ghost":
                 raise ValueError("We could not find a community called r/ghost.")
-            return fake_posts(name, days)
+            return fake_posts(name)
 
         bundle = build_bundle(
             discover=make_discover(["testsub", "ghost"], checked={"testsub": True, "ghost": False}),
@@ -259,10 +258,10 @@ class TestRunReport:
         assert any("r/ghost" in notice for notice in bundle["notices"])
 
     def test_fetch_failure_on_one_of_two_is_survivable(self):
-        def flaky(subreddit, days):
+        def flaky(subreddit):
             if subreddit == "bad":
                 raise RuntimeError("The Reddit data service is temporarily unavailable.")
-            return fake_posts(subreddit, days)
+            return fake_posts(subreddit)
 
         bundle = build_bundle(discover=make_discover(["good", "bad"]), fetch_posts=flaky)
         assert bundle["inputs"]["subreddits"] == ["good"]
@@ -277,23 +276,50 @@ class TestRunReport:
     def test_run_label_is_human_readable(self):
         bundle = build_bundle(query="ai tools for freelancers")
         label = pipeline.run_label(bundle)
-        assert label == "ai tools for freelancers · 7d"
+        assert label == "ai tools for freelancers"
 
     def test_run_label_truncates_a_long_query(self):
         long_query = "how do i " + "really " * 20 + "grow an audience on social media"
         bundle = build_bundle(query=long_query)
         label = pipeline.run_label(bundle)
         assert "…" in label
-        assert len(label.split(" · ")[0]) <= pipeline.MAX_LABEL_QUERY_CHARS
+        assert len(label) <= pipeline.MAX_LABEL_QUERY_CHARS
 
     def test_capacity_limited_flag_reaches_the_bundle(self):
-        def limited(posts, comments, subreddits):
+        def limited(posts, comments, subreddits, query="", profile=""):
             items, preview, classification = fake_classify(posts, comments, subreddits)
             classification["capacity_limited"] = True
             return items, preview, classification
 
         assert build_bundle(classify=limited)["sample"]["capacity_limited"] is True
         assert build_bundle()["sample"]["capacity_limited"] is False
+
+    def test_selection_metadata_reaches_the_bundle(self):
+        selection = build_bundle()["sample"]["selection"]
+        assert selection["method"] == "relevance+engagement"
+        assert set(selection["relevance_counts"].keys()) == {"0", "1", "2"}
+
+    def test_a_classifier_without_selection_metadata_still_produces_a_bundle(self):
+        def bare(posts, comments, subreddits, query="", profile=""):
+            items, preview, classification = fake_classify(posts, comments, subreddits)
+            del classification["selection"]
+            return items, preview, classification
+
+        selection = build_bundle(classify=bare)["sample"]["selection"]
+        assert selection["method"] == "deterministic-fallback"
+        assert selection["triaged"] == 0
+
+    def test_classify_receives_the_query_and_profile(self):
+        captured = {}
+
+        def spy(posts, comments, subreddits, query="", profile=""):
+            captured["query"] = query
+            captured["profile"] = profile
+            return fake_classify(posts, comments, subreddits)
+
+        build_bundle(classify=spy, profile="I run a design studio")
+        assert captured["query"] == DEFAULT_QUERY
+        assert captured["profile"] == "I run a design studio"
 
 
 class TestTopicFindingCoherence:
@@ -305,7 +331,7 @@ class TestTopicFindingCoherence:
             {"id": 2, "label": "Tool fatigue", "item_indices": [3]},
         ]
 
-        def classify_with_topics(posts, comments, subreddits):
+        def classify_with_topics(posts, comments, subreddits, query="", profile=""):
             items = list(posts) + list(comments)
             return items, 200, {
                 "topics": topics,
@@ -364,8 +390,8 @@ class TestExports:
         assert "contributed data to this report" in markdown
 
     def test_communities_analysed_notes_communities_that_did_not_contribute(self):
-        def fetch_posts(name, days):
-            return [] if name == "emptysub" else fake_posts(name, days)
+        def fetch_posts(name):
+            return [] if name == "emptysub" else fake_posts(name)
 
         bundle = build_bundle(discover=make_discover(["testsub", "emptysub"]), fetch_posts=fetch_posts)
         markdown = report_export.report_markdown(bundle)
@@ -379,14 +405,14 @@ class TestExports:
         assert "Platform" not in markdown
 
     def test_markdown_sentiment_percentages_sum_to_one_hundred(self):
-        bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 30))
+        bundle = build_bundle(fetch_posts=lambda s: fake_posts(s, 30))
         percentages = bundle["stats"]["sentiment"]["percentages"]
         assert sum(percentages.values()) == 100
         assert "{}%".format(percentages["pos"]) in report_export.report_markdown(bundle)
 
     def test_markdown_escapes_table_breaking_characters(self):
-        def piped(subreddit, days):
-            posts = fake_posts(subreddit, days)
+        def piped(subreddit):
+            posts = fake_posts(subreddit)
             for post in posts:
                 post["title"] = "A | pipe | title"
             return posts
@@ -403,8 +429,8 @@ class TestExports:
         assert "capacity tier" not in report_export.report_markdown(build_bundle())
 
     def test_low_data_markdown_shows_counts_not_percentages(self):
-        bundle = build_bundle(fetch_posts=lambda s, d: fake_posts(s, d, 2),
-                              fetch_comments=lambda s, d: [])
+        bundle = build_bundle(fetch_posts=lambda s: fake_posts(s, 2),
+                              fetch_comments=lambda s: [])
         markdown = report_export.report_markdown(bundle)
         assert "directional rather than conclusive" in markdown
         assert "of the conversation" not in markdown
@@ -422,8 +448,8 @@ class TestExports:
         assert "https://reddit.com/" in csv_text
 
     def test_comments_csv_flattens_newlines(self):
-        def multiline(subreddit, days):
-            comments = fake_comments(subreddit, days)
+        def multiline(subreddit):
+            comments = fake_comments(subreddit)
             comments[0]["body"] = "line one\nline two"
             return comments
 
@@ -450,7 +476,7 @@ class TestExports:
 
 # ── The bundled sample ────────────────────────────────────────────────────────
 class TestSampleReport:
-    """Assertions here target bundle v3. Until `sample_report.json` is regenerated
+    """Assertions here target bundle v4. Until `sample_report.json` is regenerated
     with the new pipeline, every test in this class is skipped rather than failing
     on a bundle shape that predates this pass."""
 
@@ -461,15 +487,15 @@ class TestSampleReport:
 
     @pytest.fixture(autouse=True)
     def _skip_until_regenerated(self, sample):
-        if sample.get("bundle_version") != 3:
-            pytest.skip("sample_report.json not yet regenerated for bundle v3")
+        if sample.get("bundle_version") != 4:
+            pytest.skip("sample_report.json not yet regenerated for bundle v4")
 
     def test_sample_file_has_the_current_bundle_shape(self, sample):
         assert sample["bundle_version"] == pipeline.BUNDLE_VERSION
         for key in ["inputs", "discovery", "posts", "comments", "items", "analysis", "stats", "sample"]:
             assert key in sample
         assert "brand_mentions" not in sample["stats"]
-        assert set(sample["inputs"].keys()) == {"query", "profile", "subreddits", "days"}
+        assert set(sample["inputs"].keys()) == {"query", "profile", "subreddits"}
 
     def test_discovery_section_has_the_expected_shape(self, sample):
         assert "communities" in sample["discovery"] and "considered" in sample["discovery"]

@@ -383,7 +383,7 @@ function sentimentPercentages(counts: Record<SentimentKey, number>): Record<Sent
 const COUNTS = sentimentCounts();
 
 export const MOCK_BUNDLE: Bundle = {
-  bundle_version: 3,
+  bundle_version: 4,
   generated_at: "2026-07-26 09:14 UTC",
   generated_ts: Math.floor(WINDOW_END / 1000),
   elapsed_seconds: 41.6,
@@ -395,7 +395,6 @@ export const MOCK_BUNDLE: Bundle = {
     query: "How small design studios win clients without cold outreach",
     profile: "I run a two person branding studio for early stage software companies.",
     subreddits: [...SUBS],
-    days: 14,
   },
   discovery: {
     communities: [
@@ -427,7 +426,7 @@ export const MOCK_BUNDLE: Bundle = {
       "examplecreatives",
     ],
   },
-  notices: ["r/examplestudio had no posts in the last 14 days, so it was left out."],
+  notices: ["r/examplestudio had no posts in the last 30 days, so it was left out."],
   posts: POSTS,
   comments: COMMENTS,
   items: ITEMS,
@@ -441,6 +440,11 @@ export const MOCK_BUNDLE: Bundle = {
     comments_truncated: true,
     low_data: false,
     capacity_limited: false,
+    selection: {
+      method: "relevance+engagement",
+      triaged: 85,
+      relevance_counts: { "0": 9, "1": 31, "2": 45 },
+    },
   },
   analysis: {
     executive_summary:

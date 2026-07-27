@@ -103,15 +103,31 @@ def topic_volumes(topics: Sequence[dict], n_items: int) -> List[dict]:
 
 
 # ── Trend ─────────────────────────────────────────────────────────────────────
-def trend_buckets(posts: Sequence[dict], days: int) -> List[Tuple[str, int]]:
-    """Posts per day across the whole window, zero-filled, oldest first."""
-    days = max(1, int(days))
-    today = datetime.now(timezone.utc).date()
-    window = [(today - timedelta(days=offset)) for offset in range(days - 1, -1, -1)]
-    buckets = {day.strftime("%Y-%m-%d"): 0 for day in window}
+def trend_buckets(posts: Sequence[dict], max_days: int = 30) -> List[Tuple[str, int]]:
+    """Posts per day across the actual data coverage, zero-filled, oldest first.
 
+    Sized by the dates the fetch really returned rather than by a requested
+    window, so the chart never ends in a run of fake zeros the archive's lag
+    would produce. Capped at max_days buckets, keeping the newest.
+    """
+    dates = []
     for post in posts or []:
         date = str((post or {}).get("date") or "")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            continue
+        dates.append(date)
+    if not dates:
+        return []
+
+    newest = datetime.strptime(max(dates), "%Y-%m-%d").date()
+    oldest = datetime.strptime(min(dates), "%Y-%m-%d").date()
+    span = min((newest - oldest).days + 1, max(1, int(max_days)))
+    window = [(newest - timedelta(days=offset)) for offset in range(span - 1, -1, -1)]
+    buckets = {day.strftime("%Y-%m-%d"): 0 for day in window}
+
+    for date in dates:
         if date in buckets:
             buckets[date] += 1
 

@@ -28,7 +28,7 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           read, so the model proposes and the archive verifies.
         </Row>
         <Row label="Window">
-          Requested: last {inputs.days} days. Actual coverage: {range.label || "n/a"}.
+          The last 30 days are always read. Actual coverage: {range.label || "n/a"}.
         </Row>
         <Row label="Posts">
           {thousands(sample.posts_fetched)} fetched, {thousands(sample.posts_analysed)}{" "}
@@ -42,9 +42,16 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           {compact(engagement.score)} upvotes and {compact(engagement.comments)} comments
           across the posts fetched.
         </Row>
+        <Row label="Selection">
+          {sample.selection?.method === "relevance+engagement"
+            ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`
+            : "Items were ranked in code by community engagement and recency; the relevance rating was unavailable for this run."}{" "}
+          No single community takes more than half the sample while others have items
+          to offer.
+        </Row>
         <Row label="Truncation">
-          When a community exceeds the sample size, the most recent posts and the top
-          comments by score are the ones analysed.
+          When more was fetched than the sample can hold, the top-ranked posts and
+          comments are the ones analysed.
           {sample.capacity_limited
             ? " This run was capped by the current analysis capacity tier."
             : ""}

@@ -29,7 +29,7 @@ export function ActivityTrend({ bundle }: { bundle: Bundle }) {
       <ColumnChart
         data={data}
         valueName="posts"
-        caption="Posts per day across the requested window, from the posts we fetched."
+        caption="Posts per day across the period the fetch actually covered."
       />
     </Section>
   );

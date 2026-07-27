@@ -1,5 +1,5 @@
 import { bundleKey } from "./format";
-import { isBundleV3, type Bundle } from "./types";
+import { isBundleV4, type Bundle } from "./types";
 
 export const MAX_HISTORY = 8;
 
@@ -44,7 +44,7 @@ export function loadHistory(): Bundle[] {
     }
     // Every entry is re-validated: a bundle written by an older engine would
     // otherwise crash a section that assumes v2.
-    const bundles = parsed.bundles.filter(isBundleV3).slice(0, MAX_HISTORY);
+    const bundles = parsed.bundles.filter(isBundleV4).slice(0, MAX_HISTORY);
     if (bundles.length !== parsed.bundles.length) saveHistory(bundles);
     return bundles;
   } catch {

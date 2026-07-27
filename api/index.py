@@ -69,7 +69,7 @@ app.add_middleware(
 )
 
 SAMPLE_PATH = _REPO_ROOT / "sample_report.json"
-BUNDLE_VERSION = 3
+BUNDLE_VERSION = 4
 
 # analysis.draft_post already caps evidence at DRAFT_MAX_EVIDENCE internally, but
 # the API layer does not trust its caller either, so the same cap is applied
@@ -105,7 +105,7 @@ def _stream_invalid(errors) -> "StreamingResponse":
     return StreamingResponse(_single(), media_type="application/x-ndjson")
 
 
-def _run_report_lines(query: str, profile: str, days: int):
+def _run_report_lines(query: str, profile: str):
     """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
 
     run_report is synchronous and, with a live model and Reddit archive, can
@@ -124,7 +124,7 @@ def _run_report_lines(query: str, profile: str, days: int):
 
     def worker() -> None:
         try:
-            bundle = pipeline.run_report(query, profile, days, progress=progress)
+            bundle = pipeline.run_report(query, profile, progress=progress)
             updates.put(("report", bundle))
         except (pipeline.RunError, ValueError) as exc:
             # These already carry a user-ready sentence (see pipeline.py and
@@ -161,20 +161,19 @@ async def post_report(request: Request):
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 - any body that is not valid JSON
-        return _stream_invalid(["Send a JSON body with query, profile and days."])
+        return _stream_invalid(["Send a JSON body with query and profile."])
 
     if not isinstance(body, dict):
-        return _stream_invalid(["Send a JSON body with query, profile and days."])
+        return _stream_invalid(["Send a JSON body with query and profile."])
 
     checked = pipeline.validate_inputs(
         body.get("query", ""),
         body.get("profile", ""),
-        body.get("days"),
     )
     if checked["errors"]:
         return _stream_invalid(checked["errors"])
 
-    generator = _run_report_lines(checked["query"], checked["profile"], checked["days"])
+    generator = _run_report_lines(checked["query"], checked["profile"])
     return StreamingResponse(generator, media_type="application/x-ndjson")
 
 

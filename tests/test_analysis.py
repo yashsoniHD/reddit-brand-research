@@ -721,10 +721,12 @@ class TestSelectAndFormatItems:
             for i in range(count)
         ]
 
-    def test_posts_come_first_in_fetch_order_comments_by_score(self):
+    def test_posts_come_first_and_both_lists_keep_their_given_order(self):
+        # select_items is a pure slicer: rank_items has already decided the order,
+        # so reordering here would silently undo the ranking.
         items = analysis.select_items(self._posts(3), self._comments(3))
         assert [item["kind"] for item in items] == ["post"] * 3 + ["comment"] * 3
-        assert [item["score"] for item in items[3:]] == [2, 1, 0]
+        assert [item["score"] for item in items[3:]] == [0, 1, 2]
 
     def test_caps_are_respected(self):
         items = analysis.select_items(self._posts(400), self._comments(400))
@@ -805,3 +807,241 @@ class TestTokenBudget:
     def test_output_reservation_never_exceeds_the_ceiling(self):
         assert analysis._classification_output_tokens(100000) == analysis.CLASSIFY_MAX_TOKENS
         assert analysis._classification_output_tokens(0) > 0
+
+
+class TestScoring:
+    """The deterministic half of selection: engagement, recency, substance, fairness."""
+
+    def _post(self, id, subreddit="subone", score=10, comments=5, age_days=0.0,
+              title="A title long enough to carry the whole idea on its own",
+              body="A body with plenty of real text in it, well past the substance bar.",
+              now=1700000000.0):
+        return {
+            "kind": "post", "id": id, "subreddit": subreddit, "title": title,
+            "body": body, "score": score, "comments": comments,
+            "created_utc": int(now - age_days * 86400),
+        }
+
+    def _comment(self, id, subreddit="subone", score=10, age_days=0.0, now=1700000000.0):
+        return {
+            "kind": "comment", "id": id, "subreddit": subreddit, "title": "",
+            "body": "comment body", "score": score,
+            "created_utc": int(now - age_days * 86400),
+        }
+
+    NOW = 1700000000.0
+
+    def test_recency_halves_at_the_half_life(self):
+        fresh = analysis._recency_decay(self.NOW, self.NOW)
+        aged = analysis._recency_decay(
+            self.NOW - analysis.RECENCY_HALF_LIFE_DAYS * 86400, self.NOW
+        )
+        assert fresh == 1.0
+        assert aged == pytest.approx(0.5)
+
+    def test_missing_timestamp_gets_the_neutral_middle(self):
+        assert analysis._recency_decay(None, self.NOW) == 0.5
+        assert analysis._recency_decay(0, self.NOW) == 0.5
+        assert analysis._recency_decay("nope", self.NOW) == 0.5
+
+    def test_engagement_is_normalised_within_each_subreddit(self):
+        # 40 upvotes in a quiet community outranks 400 in a loud one when the loud
+        # community's own ceiling is 4000.
+        small_star = self._post("a", subreddit="quiet", score=40, comments=0)
+        big_mid = self._post("b", subreddit="loud", score=400, comments=0)
+        big_star = self._post("c", subreddit="loud", score=4000, comments=0)
+        scores = analysis._base_scores([small_star, big_mid, big_star], self.NOW)
+        assert scores[0] > scores[1]
+        assert scores[2] == pytest.approx(scores[0])
+
+    def test_zero_engagement_everywhere_is_neutral_not_zero(self):
+        posts = [self._post("a", score=0, comments=0)]
+        scores = analysis._base_scores(posts, self.NOW)
+        assert scores[0] > 0
+
+    def test_substance_rejects_a_link_drop_with_a_short_title(self):
+        assert not analysis._has_substance(
+            {"title": "look at this", "body": "https://example.com/thing"}
+        )
+
+    def test_substance_accepts_a_real_body_or_a_carrying_title(self):
+        assert analysis._has_substance({"title": "x", "body": "There is a real story in here."})
+        assert analysis._has_substance(
+            {"title": "A title long enough to carry the whole idea alone", "body": ""}
+        )
+
+    def test_relevance_zero_is_gated_behind_everything_eligible(self):
+        viral_offtopic = self._post("off", score=5000, comments=900)
+        quiet_ontopic = self._post("on", score=2, comments=0)
+        ranked_posts, _ = analysis.rank_items(
+            [viral_offtopic, quiet_ontopic], [],
+            relevance={"off": 0, "on": 2}, now=self.NOW,
+        )
+        assert [post["id"] for post in ranked_posts] == ["on", "off"]
+
+    def test_substance_failed_posts_sink_to_the_backfill_tier(self):
+        link_drop = self._post("drop", score=5000, comments=900, title="look", body="https://x.co")
+        real = self._post("real", score=1, comments=0)
+        ranked_posts, _ = analysis.rank_items([link_drop, real], [], now=self.NOW)
+        assert [post["id"] for post in ranked_posts] == ["real", "drop"]
+
+    def test_untriaged_items_default_to_maybe_relevant(self):
+        strong = self._post("strong", score=100, comments=50)
+        weak = self._post("weak", score=1, comments=0)
+        ranked_posts, _ = analysis.rank_items([weak, strong], [], relevance=None, now=self.NOW)
+        assert [post["id"] for post in ranked_posts] == ["strong", "weak"]
+
+    def test_fairness_holds_for_every_prefix_with_two_communities(self):
+        posts = [
+            self._post("loud{}".format(i), subreddit="loud", score=1000 - i)
+            for i in range(10)
+        ] + [self._post("quiet{}".format(i), subreddit="quiet", score=10 - i) for i in range(10)]
+        ranked_posts, _ = analysis.rank_items(posts, [], now=self.NOW)
+        for size in range(1, len(ranked_posts) + 1):
+            prefix = ranked_posts[:size]
+            loud = sum(1 for post in prefix if post["subreddit"] == "loud")
+            cap = max(1, -(-size // 2))  # ceil(size / 2)
+            assert loud <= cap, "prefix {} holds {} loud posts".format(size, loud)
+
+    def test_a_single_community_is_not_capped(self):
+        posts = [self._post("p{}".format(i), score=100 - i) for i in range(6)]
+        ranked_posts, _ = analysis.rank_items(posts, [], now=self.NOW)
+        assert len(ranked_posts) == 6
+
+    def test_ranking_is_deterministic_on_ties(self):
+        posts = [self._post("p{}".format(i), score=5, comments=0) for i in range(8)]
+        first, _ = analysis.rank_items(list(posts), [], now=self.NOW)
+        second, _ = analysis.rank_items(list(posts), [], now=self.NOW)
+        assert [post["id"] for post in first] == [post["id"] for post in second]
+
+    def test_comments_are_ranked_but_never_substance_gated(self):
+        good = self._comment("good", score=50)
+        quiet = self._comment("quiet", score=0)
+        _, ranked_comments = analysis.rank_items([], [good, quiet], now=self.NOW)
+        assert [comment["id"] for comment in ranked_comments] == ["good", "quiet"]
+
+
+class TestRateRelevance:
+    """The triage call: batching, sanitisation and fail-open behaviour."""
+
+    def _items(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    def test_happy_path_returns_every_rating_keyed_by_global_position(self):
+        calls = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            calls.append({"prompt": prompt, "label": label, "thinking": thinking})
+            return {"ratings": [{"i": 1, "r": 2}, {"i": 2, "r": 0}, {"i": 3, "r": 1}]}, "m"
+
+        ratings = analysis.rate_relevance(self._items(3), "q", "p", chat=fake_chat)
+        assert ratings == {1: 2, 2: 0, 3: 1}
+        assert calls[0]["label"] == "relevance-triage"
+        assert calls[0]["thinking"] is False
+
+    def test_malformed_entries_fail_open_to_one(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            return {
+                "ratings": [
+                    {"i": 1, "r": 9},          # out-of-range rating
+                    {"i": "2", "r": 0},        # stringly index
+                    {"i": 99, "r": 0},          # index outside the batch
+                    {"i": True, "r": 0},        # bool masquerading as int
+                    "not even a dict",
+                ]
+            }, "m"
+
+        ratings = analysis.rate_relevance(self._items(3), "q", "p", chat=fake_chat)
+        assert ratings == {1: 1, 2: 1, 3: 1}
+
+    def test_duplicate_indices_first_wins(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            return {"ratings": [{"i": 1, "r": 2}, {"i": 1, "r": 0}]}, "m"
+
+        assert analysis.rate_relevance(self._items(1), "q", "p", chat=fake_chat) == {1: 2}
+
+    def test_batches_split_at_the_batch_size_with_global_indices(self):
+        prompts = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            prompts.append(prompt)
+            return {"ratings": []}, "m"
+
+        count = analysis.TRIAGE_BATCH_SIZE + 10
+        ratings = analysis.rate_relevance(self._items(count), "q", "p", chat=fake_chat)
+        assert len(prompts) == 2
+        second_start = analysis.TRIAGE_BATCH_SIZE + 1
+        assert "{}. [post]".format(second_start) in prompts[1]
+        assert set(ratings) == set(range(1, count + 1))
+        assert set(ratings.values()) == {1}
+
+    def test_one_failed_batch_defaults_only_that_batch(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            if "[post] title 0" in prompt:
+                raise ValueError("boom")
+            return {"ratings": [{"i": analysis.TRIAGE_BATCH_SIZE + 1, "r": 2}]}, "m"
+
+        count = analysis.TRIAGE_BATCH_SIZE + 1
+        ratings = analysis.rate_relevance(self._items(count), "q", "p", chat=fake_chat)
+        assert ratings == {analysis.TRIAGE_BATCH_SIZE + 1: 2}
+
+    def test_every_batch_failing_returns_none(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            raise ValueError("boom")
+
+        assert analysis.rate_relevance(self._items(5), "q", "p", chat=fake_chat) is None
+
+    def test_no_items_means_no_calls_and_an_empty_result(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            raise AssertionError("should not be called")
+
+        assert analysis.rate_relevance([], "q", "p", chat=fake_chat) == {}
+
+    def test_output_reservation_never_exceeds_the_ceiling(self):
+        assert analysis._triage_output_tokens(100000) == analysis.TRIAGE_MAX_TOKENS
+        assert analysis._triage_output_tokens(0) > 0
+
+
+class TestSelectSample:
+    """classify_sample's selection step: triage wiring and the deterministic fallback."""
+
+    def _posts(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": i, "comments": 0, "created_utc": 1700000000 + i}
+            for i in range(count)
+        ]
+
+    def test_triage_failure_falls_back_to_deterministic_selection(self, monkeypatch):
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: None)
+        posts, comments, selection = analysis._select_sample(self._posts(5), [], "query", "")
+        assert len(posts) == 5 and comments == []
+        assert selection["method"] == "deterministic-fallback"
+        assert selection["triaged"] == 0
+
+    def test_an_empty_query_skips_the_triage_call_entirely(self, monkeypatch):
+        def explode(*a, **k):
+            raise AssertionError("triage must not be called without a query")
+
+        monkeypatch.setattr(analysis, "rate_relevance", explode)
+        _, _, selection = analysis._select_sample(self._posts(3), [], "", "")
+        assert selection["method"] == "deterministic-fallback"
+
+    def test_ratings_are_mapped_back_to_items_and_counted(self, monkeypatch):
+        # Pool order is by base score, best first: p2 (score 2), p1, p0.
+        monkeypatch.setattr(
+            analysis, "rate_relevance", lambda items, q, p: {1: 0, 2: 2, 3: 1}
+        )
+        ranked_posts, _, selection = analysis._select_sample(self._posts(3), [], "query", "")
+        assert selection["method"] == "relevance+engagement"
+        assert selection["triaged"] == 3
+        assert selection["relevance_counts"] == {"0": 1, "1": 1, "2": 1}
+        # p2 was rated 0 (unrelated), so it sinks below the others despite the
+        # highest engagement.
+        assert [post["id"] for post in ranked_posts][-1] == "p2"
