@@ -28,7 +28,8 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           read, so the model proposes and the archive verifies.
         </Row>
         <Row label="Window">
-          The last 30 days are always read. Actual coverage: {range.label || "n/a"}.
+          Requested: last {inputs.days ?? 30} days. Actual coverage:{" "}
+          {range.label || "n/a"}.
         </Row>
         <Row label="Posts">
           {thousands(sample.posts_fetched)} fetched, {thousands(sample.posts_analysed)}{" "}
@@ -45,7 +46,9 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
         <Row label="Selection">
           {sample.selection?.method === "relevance+engagement"
             ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`
-            : "Items were ranked in code by community engagement and recency; the relevance rating was unavailable for this run."}{" "}
+            : sample.selection?.method === "relevance-off"
+              ? "The relevance filter was turned off for this run, so items were ranked in code by community engagement and recency."
+              : "Items were ranked in code by community engagement and recency; the relevance rating was unavailable for this run."}{" "}
           No single community takes more than half the sample while others have items
           to offer.
         </Row>

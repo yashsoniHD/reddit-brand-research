@@ -25,6 +25,9 @@ BUNDLE_VERSION = 4
 MIN_QUERY_CHARS = 10
 MAX_QUERY_CHARS = 300
 MAX_PROFILE_CHARS = 500
+# Advanced-settings choices. The default is the full fetch window; shorter ranges
+# exist for people who explicitly want only what is fresh.
+TIME_WINDOWS = (7, 14, reddit_data.FETCH_WINDOW_DAYS)
 # The history label has to fit a sidebar, so the query is cut down to a glance.
 MAX_LABEL_QUERY_CHARS = 30
 
@@ -33,11 +36,19 @@ class RunError(Exception):
     """A run that could not produce a report, with a message fit for a user."""
 
 
-def validate_inputs(query: str, profile: str) -> dict:
+def validate_inputs(
+    query: str,
+    profile: str,
+    days: Optional[int] = None,
+    subreddits: Optional[str] = None,
+    relevance_filter: Optional[bool] = None,
+) -> dict:
     """Check every field at once and collect all problems.
 
     Reporting one error at a time makes people submit four times to learn four
     things; this returns everything wrong in one pass, plus the cleaned values.
+    The last three fields are advanced settings and all optional: absent means
+    the defaults (full window, automatic discovery, relevance filter on).
     """
     errors: List[str] = []
 
@@ -60,10 +71,31 @@ def validate_inputs(query: str, profile: str) -> dict:
             )
         )
 
+    if days is None:
+        cleaned_days = reddit_data.FETCH_WINDOW_DAYS
+    else:
+        try:
+            cleaned_days = int(days)
+        except (TypeError, ValueError):
+            cleaned_days = -1
+        if isinstance(days, bool) or cleaned_days not in TIME_WINDOWS:
+            errors.append("Choose a time range of 7, 14 or 30 days.")
+            cleaned_days = reddit_data.FETCH_WINDOW_DAYS
+
+    cleaned_subreddits: List[str] = []
+    if subreddits is not None and str(subreddits).strip():
+        try:
+            cleaned_subreddits = reddit_data.parse_subreddit_input(str(subreddits))
+        except ValueError as exc:
+            errors.append(str(exc))
+
     return {
         "errors": errors,
         "query": cleaned_query,
         "profile": cleaned_profile,
+        "days": cleaned_days,
+        "subreddits": cleaned_subreddits,
+        "relevance_filter": True if relevance_filter is None else bool(relevance_filter),
     }
 
 
@@ -86,6 +118,9 @@ def _resolve_citations(indices: Sequence[int], items: Sequence[dict]) -> List[di
 def run_report(
     query: str,
     profile: str,
+    days: int = reddit_data.FETCH_WINDOW_DAYS,
+    subreddits: Optional[Sequence[str]] = None,
+    relevance_filter: bool = True,
     progress: Optional[Callable[[str], None]] = None,
     discover: Optional[Callable] = None,
     fetch_posts: Optional[Callable] = None,
@@ -95,10 +130,13 @@ def run_report(
 ) -> dict:
     """Produce a complete report bundle, or raise RunError with a friendly message.
 
-    The five callables are injection points so the Streamlit layer can supply cached
-    wrappers without this module importing streamlit. A ValueError from discovery or
-    from the model layer already carries a user-ready message and is left to
-    propagate, exactly as the analysis calls' errors are.
+    `days`, `subreddits` and `relevance_filter` are the advanced settings: a
+    shorter window, a manual list of communities that skips discovery entirely,
+    and a switch that turns the relevance triage off for a faster, engagement-only
+    selection. The five callables are injection points so callers can supply
+    cached wrappers or fakes. A ValueError from discovery or from the model layer
+    already carries a user-ready message and is left to propagate, exactly as the
+    analysis calls' errors are.
     """
     say = progress or _noop
     discover = discover or discovery.discover
@@ -108,10 +146,17 @@ def run_report(
     synthesize = synthesize or analysis.synthesize
 
     started = time.time()
-    logger.info("run start: query=%r", query)
+    logger.info(
+        "run start: query=%r days=%s manual_subreddits=%s relevance=%s",
+        query, days, list(subreddits or []), relevance_filter,
+    )
 
-    say("Finding communities talking about this…")
-    found_communities = discover(query, profile)
+    if subreddits:
+        say("Checking the communities you chose…")
+        found_communities = discovery.manual(subreddits)
+    else:
+        say("Finding communities talking about this…")
+        found_communities = discover(query, profile)
     communities = list(found_communities.get("communities") or [])
     names = [community["name"] for community in communities]
     say("Found {}. Fetching posts…".format(", ".join("r/{}".format(name) for name in names)))
@@ -127,10 +172,10 @@ def run_report(
         # caught by the fetch errors below.
         try:
             say("Fetching posts from r/{}…".format(name))
-            found = fetch_posts(name)
+            found = fetch_posts(name, days)
             say("Fetching posts from r/{}… ({} so far)".format(name, len(found)))
             say("Fetching comments from r/{}…".format(name))
-            found_comments = fetch_comments(name)
+            found_comments = fetch_comments(name, days)
         except ValueError as exc:
             notices.append("r/{} was skipped: {}".format(name, str(exc)[0].lower() + str(exc)[1:]))
             continue
@@ -140,9 +185,7 @@ def run_report(
 
         if not found:
             notices.append(
-                "r/{} had no posts in the last {} days, so it was left out.".format(
-                    name, reddit_data.FETCH_WINDOW_DAYS
-                )
+                "r/{} had no posts in the last {} days, so it was left out.".format(name, days)
             )
             continue
 
@@ -167,8 +210,13 @@ def run_report(
 
     # The analysis layer decides how big a sample the model plan can take, so the
     # counts reported to the user come back from it rather than being assumed here.
-    say("Selecting the most relevant items…")
-    items, preview_chars, classification = classify(posts, comments, used, query, profile)
+    say("Selecting the most relevant items…" if relevance_filter else "Selecting items…")
+    # An empty query is how the analysis layer is told to skip the relevance
+    # triage; the selection metadata is relabelled below so the report says
+    # "turned off" rather than "unavailable".
+    items, preview_chars, classification = classify(
+        posts, comments, used, query if relevance_filter else "", profile
+    )
     n_posts_analysed = sum(1 for item in items if item.get("kind") != "comment")
     n_comments_analysed = len(items) - n_posts_analysed
     say("Classified {} posts and {} comments…".format(n_posts_analysed, n_comments_analysed))
@@ -213,6 +261,7 @@ def run_report(
             "query": query,
             "profile": profile,
             "subreddits": used,
+            "days": days,
         },
         "discovery": {
             # Rebuilt rather than passed through: a cached discover() must not have
@@ -242,13 +291,21 @@ def run_report(
             "comments_truncated": len(comments) > n_comments_analysed,
             "low_data": n_items < analysis.LOW_DATA_THRESHOLD,
             "capacity_limited": bool(classification.get("capacity_limited")),
-            "selection": classification.get(
-                "selection",
+            "selection": (
                 {
-                    "method": "deterministic-fallback",
+                    "method": "relevance-off",
                     "triaged": 0,
                     "relevance_counts": {"0": 0, "1": 0, "2": 0},
-                },
+                }
+                if not relevance_filter
+                else classification.get(
+                    "selection",
+                    {
+                        "method": "deterministic-fallback",
+                        "triaged": 0,
+                        "relevance_counts": {"0": 0, "1": 0, "2": 0},
+                    },
+                )
             ),
         },
         "analysis": {
@@ -281,7 +338,7 @@ def run_report(
             "engagement": stats.engagement_totals(posts),
             "date_range": date_range,
             "lag_hours": stats.data_lag_hours(date_range.get("newest_ts", 0)),
-            "trend": stats.trend_buckets(posts),
+            "trend": stats.trend_buckets(posts, max_days=days),
         },
     }
 

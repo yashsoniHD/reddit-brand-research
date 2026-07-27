@@ -66,6 +66,9 @@ export interface Inputs {
   profile: string;
   /** Only the communities that actually contributed data. */
   subreddits: string[];
+  /** The requested time range. Optional: bundles from before it returned as an
+   * advanced setting do not carry it; the engine default is 30. */
+  days?: number;
 }
 
 /** How the analysed sample was chosen from the fetched pool. */
@@ -194,6 +197,11 @@ export interface Bundle {
 export interface ReportRequest {
   query: string;
   profile: string;
+  /** Advanced settings; every field optional and defaulted server-side. */
+  days?: number;
+  /** Comma-separated community names; skips discovery when set. */
+  subreddits?: string;
+  relevance_filter?: boolean;
 }
 
 export type StreamLine =
@@ -234,6 +242,9 @@ export const MAX_DRAFT_EVIDENCE = 6;
 export const MIN_QUERY_CHARS = 10;
 export const MAX_QUERY_CHARS = 300;
 export const MAX_PROFILE_CHARS = 500;
+export const TIME_WINDOWS = [7, 14, 30] as const;
+export const DEFAULT_DAYS = 30;
+export const MAX_MANUAL_SUBREDDITS = 4;
 
 export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   pos: "Positive",

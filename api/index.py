@@ -105,7 +105,7 @@ def _stream_invalid(errors) -> "StreamingResponse":
     return StreamingResponse(_single(), media_type="application/x-ndjson")
 
 
-def _run_report_lines(query: str, profile: str):
+def _run_report_lines(query: str, profile: str, days: int, subreddits, relevance_filter: bool):
     """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
 
     run_report is synchronous and, with a live model and Reddit archive, can
@@ -124,7 +124,14 @@ def _run_report_lines(query: str, profile: str):
 
     def worker() -> None:
         try:
-            bundle = pipeline.run_report(query, profile, progress=progress)
+            bundle = pipeline.run_report(
+                query,
+                profile,
+                days=days,
+                subreddits=subreddits,
+                relevance_filter=relevance_filter,
+                progress=progress,
+            )
             updates.put(("report", bundle))
         except (pipeline.RunError, ValueError) as exc:
             # These already carry a user-ready sentence (see pipeline.py and
@@ -169,11 +176,20 @@ async def post_report(request: Request):
     checked = pipeline.validate_inputs(
         body.get("query", ""),
         body.get("profile", ""),
+        days=body.get("days"),
+        subreddits=body.get("subreddits"),
+        relevance_filter=body.get("relevance_filter"),
     )
     if checked["errors"]:
         return _stream_invalid(checked["errors"])
 
-    generator = _run_report_lines(checked["query"], checked["profile"])
+    generator = _run_report_lines(
+        checked["query"],
+        checked["profile"],
+        checked["days"],
+        checked["subreddits"],
+        checked["relevance_filter"],
+    )
     return StreamingResponse(generator, media_type="application/x-ndjson")
 
 

@@ -68,7 +68,9 @@ def report_markdown(bundle: dict) -> str:
     add(
         "**Communities:** {} · **Window:** last {} days · "
         "**Actual range:** {}".format(
-            subs, reddit_data.FETCH_WINDOW_DAYS, date_range.get("label", "n/a")
+            subs,
+            inputs.get("days", reddit_data.FETCH_WINDOW_DAYS),
+            date_range.get("label", "n/a"),
         )
     )
     add("**Generated:** {} · **Analysis:** {}".format(
@@ -230,7 +232,8 @@ def report_markdown(bundle: dict) -> str:
     add("- Communities read: {}".format(subs or "none"))
     add("- Discovery: the communities were chosen by the model from your query, then "
         "checked to exist and be public before being read.")
-    add("- Requested window: last {} days".format(reddit_data.FETCH_WINDOW_DAYS))
+    add("- Requested window: last {} days".format(
+        inputs.get("days", reddit_data.FETCH_WINDOW_DAYS)))
     add("- Actual coverage: {}".format(date_range.get("label", "n/a")))
     add("- Posts fetched: {} · analysed: {}".format(
         sample.get("posts_fetched", 0), sample.get("posts_analysed", 0)))
@@ -242,6 +245,10 @@ def report_markdown(bundle: dict) -> str:
             "model ({} items rated), then ranked in code by relevance, community "
             "engagement and recency, with no single community taking more than half "
             "the sample while others had items to offer.".format(selection.get("triaged", 0)))
+    elif selection.get("method") == "relevance-off":
+        add("- Selection: the relevance filter was turned off for this run, so items "
+            "were ranked in code by community engagement and recency, with no single "
+            "community taking more than half the sample while others had items to offer.")
     else:
         add("- Selection: items were ranked in code by community engagement and "
             "recency, with no single community taking more than half the sample "

@@ -395,6 +395,7 @@ export const MOCK_BUNDLE: Bundle = {
     query: "How small design studios win clients without cold outreach",
     profile: "I run a two person branding studio for early stage software companies.",
     subreddits: [...SUBS],
+    days: 14,
   },
   discovery: {
     communities: [

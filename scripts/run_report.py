@@ -26,43 +26,19 @@ import reddit_data  # noqa: E402
 import report_export  # noqa: E402
 
 
-def _manual_discover(names):
-    """Build a `discover` callable that skips discovery for a fixed set of names.
-
-    Communities picked this way were not run past the model or checked against the
-    archive, so they carry a reason that says so plainly rather than pretending to
-    be a discovery result.
-    """
-    communities = [
-        {"name": name, "reason": "chosen manually", "subscribers": 0, "checked": False}
-        for name in names
-    ]
-
-    def discover(query, profile):
-        return {"communities": communities, "considered": [c["name"] for c in communities]}
-
-    return discover
-
-
-def _parse_subreddits(raw):
-    names = []
-    seen = set()
-    for chunk in raw.split(","):
-        if not chunk.strip():
-            continue
-        name = reddit_data.normalize_subreddit(chunk)
-        if name.lower() not in seen:
-            seen.add(name.lower())
-            names.append(name)
-    if not names:
-        raise ValueError("Please pass at least one subreddit to --subreddits.")
-    return names
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a Reddit content ideas report.")
     parser.add_argument("--query", required=True, help="what you want content ideas about")
     parser.add_argument("--profile", default="", help="optional: who you are / your brand")
+    parser.add_argument(
+        "--days", type=int, default=reddit_data.FETCH_WINDOW_DAYS,
+        choices=list(pipeline.TIME_WINDOWS),
+        help="time range to read (advanced; default the full window)",
+    )
+    parser.add_argument(
+        "--no-relevance", action="store_true",
+        help="skip the relevance triage call and select by engagement and recency only",
+    )
     parser.add_argument("--json", dest="json_path", help="write the full bundle here")
     parser.add_argument("--markdown", dest="markdown_path", help="write the Markdown report here")
     parser.add_argument("--sample", action="store_true", help="mark the bundle as a sample report")
@@ -77,27 +53,24 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stdout
     )
 
-    checked = pipeline.validate_inputs(args.query, args.profile)
+    checked = pipeline.validate_inputs(
+        args.query, args.profile,
+        days=args.days, subreddits=args.subreddits,
+        relevance_filter=not args.no_relevance,
+    )
     if checked["errors"]:
         for error in checked["errors"]:
             print("input error: {}".format(error))
         return 2
 
-    discover = None
-    if args.subreddits:
-        try:
-            names = _parse_subreddits(args.subreddits)
-        except ValueError as exc:
-            print("input error: {}".format(exc))
-            return 2
-        discover = _manual_discover(names)
-
     try:
         bundle = pipeline.run_report(
             checked["query"],
             checked["profile"],
+            days=checked["days"],
+            subreddits=checked["subreddits"],
+            relevance_filter=checked["relevance_filter"],
             progress=lambda message: print("  · {}".format(message)),
-            discover=discover,
         )
     except pipeline.RunError as exc:
         print("run failed: {}".format(exc))

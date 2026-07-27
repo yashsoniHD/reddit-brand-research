@@ -33,8 +33,9 @@ class TestReportStreamHappyPath:
     def test_valid_input_streams_progress_then_a_terminal_report_line(self, monkeypatch):
         captured = {}
 
-        def fake_run_report(query, profile, progress=None):
+        def fake_run_report(query, profile, progress=None, **advanced):
             captured["args"] = (query, profile)
+            captured["advanced"] = advanced
             progress("Finding communities talking about this...")
             progress("Found r/testsub - fetching posts...")
             return {"bundle_version": 4, "inputs": {"query": query}, "sample": {}}
@@ -57,7 +58,7 @@ class TestReportStreamHappyPath:
         assert captured["args"] == (VALID_BODY["query"], VALID_BODY["profile"])
 
     def test_only_the_last_line_carries_the_bundle(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None):
+        def fake_run_report(query, profile, progress=None, **advanced):
             for message in ("one", "two", "three"):
                 progress(message)
             return {"bundle_version": 4}
@@ -82,13 +83,24 @@ class TestReportStreamValidation:
         assert len(lines[0]["errors"]) == 1  # too-short query
         assert all(message[0].isupper() and message.endswith(".") for message in lines[0]["errors"])
 
-    def test_a_stray_days_field_from_an_old_client_is_ignored(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None):
+    def test_unknown_fields_from_an_old_client_are_ignored(self, monkeypatch):
+        def fake_run_report(query, profile, progress=None, **advanced):
             return {"bundle_version": 4}
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json={**VALID_BODY, "days": 7}))
+        lines = _lines(client.post("/api/report", json={**VALID_BODY, "platform": "linkedin"}))
         assert lines[-1]["type"] == "report"
+
+    def test_a_bad_time_range_is_invalid(self):
+        lines = _lines(client.post("/api/report", json={**VALID_BODY, "days": 3}))
+        assert lines[0]["type"] == "invalid"
+        assert any("time range" in message for message in lines[0]["errors"])
+
+    def test_bad_subreddit_input_is_invalid(self):
+        lines = _lines(
+            client.post("/api/report", json={**VALID_BODY, "subreddits": "one,two,three,four,five"})
+        )
+        assert lines[0]["type"] == "invalid"
 
     def test_empty_query_is_invalid(self):
         lines = _lines(client.post("/api/report", json={**VALID_BODY, "query": ""}))
@@ -114,7 +126,7 @@ class TestReportStreamValidation:
 
 class TestReportStreamErrors:
     def test_run_error_streams_progress_then_a_terminal_error_line(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None):
+        def fake_run_report(query, profile, progress=None, **advanced):
             progress("Finding communities talking about this...")
             raise pipeline.RunError("We could not read anything usable from r/testsub.")
 
@@ -127,7 +139,7 @@ class TestReportStreamErrors:
         assert len(lines) == 2
 
     def test_value_error_from_the_engine_passes_its_message_through_verbatim(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None):
+        def fake_run_report(query, profile, progress=None, **advanced):
             raise ValueError("The analysis service has reached its rate limit.")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
@@ -135,7 +147,7 @@ class TestReportStreamErrors:
         assert lines == [{"type": "error", "message": "The analysis service has reached its rate limit."}]
 
     def test_unexpected_exception_becomes_the_generic_message_not_a_leaked_traceback(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None):
+        def fake_run_report(query, profile, progress=None, **advanced):
             raise RuntimeError("some internal detail nobody outside should see")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)

@@ -50,7 +50,9 @@ RETRYABLE_STATUS_CODES = (422, 429)
 SECONDS_PER_DAY = 86400
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
-MAX_SUBREDDITS = 3
+# Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
+# than automatic discovery would.
+MAX_SUBREDDITS = 4
 MIN_SUBREDDIT_LENGTH = 3
 MAX_SUBREDDIT_LENGTH = 21
 MAX_SUGGESTIONS = 3

@@ -13,9 +13,12 @@ import { fetchSample, runReport } from "@/lib/api";
 import { bundleKey } from "@/lib/format";
 import { addToHistory, loadHistory, saveHistory } from "@/lib/storage";
 import {
+  DEFAULT_DAYS,
+  MAX_MANUAL_SUBREDDITS,
   MAX_PROFILE_CHARS,
   MAX_QUERY_CHARS,
   MIN_QUERY_CHARS,
+  TIME_WINDOWS,
   type Bundle,
 } from "@/lib/types";
 
@@ -24,6 +27,9 @@ const IS_DEV = process.env.NODE_ENV === "development";
 const DEFAULT_VALUES: FormValues = {
   query: "",
   profile: "",
+  subreddits: "",
+  days: DEFAULT_DAYS,
+  relevance: true,
 };
 
 /** Mirrors pipeline.validate_inputs so obvious mistakes never cost a round trip. */
@@ -44,6 +50,15 @@ function validate(values: FormValues): string[] {
       `Shorten the description of you or your brand to ${MAX_PROFILE_CHARS} characters or fewer.`,
     );
   }
+  const communities = values.subreddits
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (communities.length > MAX_MANUAL_SUBREDDITS) {
+    errors.push(
+      `Please choose ${MAX_MANUAL_SUBREDDITS} communities or fewer. You entered ${communities.length}.`,
+    );
+  }
   return errors;
 }
 
@@ -53,6 +68,10 @@ function readQueryParams(): Partial<FormValues> {
   const next: Partial<FormValues> = {};
   const query = params.get("q");
   if (query) next.query = query.slice(0, MAX_QUERY_CHARS);
+  const days = Number(params.get("days"));
+  if (TIME_WINDOWS.includes(days as (typeof TIME_WINDOWS)[number])) next.days = days;
+  const subs = params.get("subs");
+  if (subs) next.subreddits = subs.slice(0, 120);
   return next;
 }
 
@@ -61,6 +80,11 @@ function writeQueryParams(bundle: Bundle): void {
   // cannot survive into a URL that describes a run it had no part in.
   const params = new URLSearchParams();
   params.set("q", bundle.inputs.query);
+  // Advanced settings appear only when they differ from the defaults, so a
+  // default run keeps the short shareable URL it always had.
+  if (bundle.inputs.days && bundle.inputs.days !== DEFAULT_DAYS) {
+    params.set("days", String(bundle.inputs.days));
+  }
   window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
 }
 
@@ -137,6 +161,9 @@ export function ContentIdeasApp() {
       {
         query: values.query.trim(),
         profile: values.profile.trim(),
+        days: values.days,
+        ...(values.subreddits.trim() ? { subreddits: values.subreddits.trim() } : {}),
+        relevance_filter: values.relevance,
       },
       {
         signal: abort.signal,

@@ -209,3 +209,31 @@ class TestPromptShape:
         prompt = discovery._discovery_prompt("skincare routines", "")
         assert "candidates" in prompt
         assert "JSON" in prompt
+
+
+class TestManual:
+    def test_looked_up_names_carry_real_subscriber_counts(self):
+        def lookup(name):
+            return {"name": "Freelance", "subscribers": 120000, "over18": False, "public": True}
+
+        result = discovery.manual(["freelance"], lookup=lookup)
+        community = result["communities"][0]
+        assert community == {
+            "name": "Freelance", "reason": "chosen by you",
+            "subscribers": 120000, "checked": True,
+        }
+        assert result["considered"] == ["freelance"]
+
+    def test_a_failed_lookup_keeps_the_name_rather_than_dropping_it(self):
+        def lookup(name):
+            raise RuntimeError("archive down")
+
+        community = discovery.manual(["mysub"], lookup=lookup)["communities"][0]
+        assert community["name"] == "mysub"
+        assert community["checked"] is False
+
+    def test_an_unknown_community_is_kept_for_the_fetch_stage_to_judge(self):
+        community = discovery.manual(["ghost"], lookup=lambda name: None)["communities"][0]
+        assert community["name"] == "ghost"
+        assert community["checked"] is False
+        assert community["subscribers"] == 0

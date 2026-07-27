@@ -56,13 +56,13 @@ class TestParseSubredditInput:
     def test_ignores_empty_segments(self):
         assert reddit_data.parse_subreddit_input("one,,two, ") == ["one", "two"]
 
-    def test_rejects_more_than_three(self):
+    def test_rejects_more_than_the_cap(self):
         with pytest.raises(ValueError) as excinfo:
-            reddit_data.parse_subreddit_input("one,two,three,four")
-        assert "3" in str(excinfo.value)
+            reddit_data.parse_subreddit_input("one,two,three,four,five")
+        assert str(reddit_data.MAX_SUBREDDITS) in str(excinfo.value)
 
-    def test_allows_exactly_three(self):
-        assert len(reddit_data.parse_subreddit_input("one,two,three")) == 3
+    def test_allows_exactly_the_cap(self):
+        assert len(reddit_data.parse_subreddit_input("one,two,three,four")) == 4
 
     @pytest.mark.parametrize("raw", ["", "   ", None, ","])
     def test_rejects_empty_input(self, raw):

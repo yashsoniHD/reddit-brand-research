@@ -16,7 +16,7 @@ model-fallback and error-message behaviour as the two main calls.
 from __future__ import annotations
 
 import logging
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 import analysis
 import reddit_data
@@ -214,3 +214,39 @@ def discover(
         "communities": communities,
         "considered": [candidate["name"] for candidate in candidates],
     }
+
+
+def manual(names: Sequence[str], *, lookup: Optional[Callable] = None) -> dict:
+    """A discovery result for communities the user picked themselves.
+
+    Same shape as discover(), no model call. Each name is looked up so the report
+    can show real subscriber counts, but a failed or empty lookup keeps the name
+    rather than dropping it: the user chose it deliberately, and the fetch stage
+    already turns a community that does not exist into a plain-language notice.
+    """
+    lookup = lookup or reddit_data.lookup_subreddit
+    communities: List[dict] = []
+
+    for name in names:
+        subscribers = 0
+        display = name
+        checked = False
+        try:
+            found = lookup(name)
+        except RuntimeError as exc:
+            logger.warning("could not check manually chosen r/%s: %s", name, exc)
+            found = None
+        if found:
+            display = found.get("name") or name
+            subscribers = int(found.get("subscribers") or 0)
+            checked = True
+        communities.append(
+            {
+                "name": display,
+                "reason": "chosen by you",
+                "subscribers": subscribers,
+                "checked": checked,
+            }
+        )
+
+    return {"communities": communities, "considered": list(names)}
