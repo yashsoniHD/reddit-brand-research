@@ -4,11 +4,12 @@ This is the ONLY module that knows where the Reddit data comes from. It currentl
 reads the public Arctic Shift archive. To swap the source, reimplement the
 public functions below and keep their return shapes identical:
 
-    normalize_subreddit(raw)            -> str
-    parse_subreddit_input(raw)          -> list[str]
-    lookup_subreddit(name)              -> Optional[dict]
-    fetch_posts(subreddit, days)        -> list[dict]
-    fetch_comments(subreddit, days)     -> list[dict]
+    normalize_subreddit(raw)                                    -> str
+    parse_subreddit_input(raw)                                  -> list[str]
+    lookup_subreddit(name)                                      -> Optional[dict]
+    fetch_posts(subreddit, days, deadline=None, *, phrases=None)    -> list[dict]
+    fetch_comments(subreddit, days, limit, deadline=None,
+                    *, phrases=None)                             -> list[dict]
 
 Nothing above this layer imports `requests` or knows an endpoint URL.
 """
@@ -22,6 +23,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 import requests
+
+import keywords
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,19 @@ MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1, 2)  # waits after attempt 1 and attempt 2
 RETRYABLE_STATUS_CODES = (422, 429)
 SECONDS_PER_DAY = 86400
+
+# Text-search parameter names, verified against the live archive: these are
+# exactly the endpoint knowledge this layer's docstring says stays here.
+POSTS_TEXT_PARAM = "query"      # matches title and selftext, AND of words
+# Verified live 2026-07-29: GET /api/posts/search?query=meta%20ads returns 200
+# and matches across both title and selftext with AND-of-words semantics.
+# `body=` on posts is rejected with 400 Unknown query parameter: 'body'.
+# `body=` on comments is accepted: the probe got a 422 transient timeout back,
+# not a 400, which means the parameter itself is recognised.
+COMMENTS_TEXT_PARAM = "body"    # posts reject `body=` with 400 Unknown query parameter
+MAX_TEXT_PARAM_CHARS = 120
+PHRASE_MAX_POST_PAGES = 3
+PHRASE_MAX_COMMENT_PAGES = 2
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
 # Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
@@ -126,13 +142,26 @@ def parse_subreddit_input(raw: str) -> List[str]:
 
 
 # ── HTTP plumbing ─────────────────────────────────────────────────────────────
-def _request_page(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SECONDS) -> requests.Response:
+def _request_page(
+    url: str,
+    params: dict,
+    timeout: int = REQUEST_TIMEOUT_SECONDS,
+    deadline: Optional[float] = None,
+) -> requests.Response:
     """Issue a single request, retrying transient failures with short backoff.
 
     Retries timeouts, connection errors, 5xx, 422 and 429. Returns immediately
     for every other response (including 400/401/403/404) so the caller can turn
     them into a friendly message. Raises requests.RequestException when all
     attempts are exhausted.
+
+    `deadline` is checked before each retry (never before the first attempt,
+    since an empty result is worse than a partial one): today the caller's
+    deadline is only checked between pages, so one unresponsive community can
+    burn MAX_POST_PAGES x MAX_ATTEMPTS x REQUEST_TIMEOUT_SECONDS of the run's
+    budget on retries that were never going to finish in time anyway. Text
+    queries 422 far more often, which makes that routine rather than
+    theoretical.
     """
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_ATTEMPTS):
@@ -146,6 +175,9 @@ def _request_page(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SECONDS
             last_exc = requests.HTTPError(f"transient status {resp.status_code}")
 
         if attempt < MAX_ATTEMPTS - 1:
+            if _out_of_time(deadline):
+                logger.info("stopping retries: out of time")
+                break
             time.sleep(RETRY_DELAYS_SECONDS[attempt])
 
     raise last_exc if last_exc else requests.RequestException("request failed")
@@ -193,8 +225,43 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """Same never-raises contract as `_safe_int`, needed for `upvote_ratio`.
+
+    The archive is a community mirror, not a typed API: `upvote_ratio` arrives
+    as `None`, a string like "0.93", a plain float, or missing entirely
+    depending on when the row was captured.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _is_deleted(text: str) -> bool:
     return text.strip().lower() in _DELETED_BODIES
+
+
+def _text_params(phrases: Optional[List[str]], field: str) -> dict:
+    """Best-effort archive-side prefilter; correctness lives in the post-filter.
+
+    Joins every phrase's words with spaces: the archive tokenises quote
+    characters away regardless, so sending them would be pointless. If the
+    joined string would exceed MAX_TEXT_PARAM_CHARS, send only the first
+    phrase's words instead. That is safe by construction: a narrower-than-
+    requested prefilter can only return a superset of what a full prefilter
+    would, and `keywords.matches_all` still re-checks every accepted phrase
+    against every returned item, so shrinking the prefilter can only ever
+    cost extra rows to filter out, never a wrong result.
+    """
+    if not phrases:
+        return {}
+    joined = " ".join(word for phrase in phrases for word in phrase.split())
+    if len(joined) > MAX_TEXT_PARAM_CHARS:
+        joined = " ".join(phrases[0].split())
+    return {field: joined} if joined else {}
 
 
 # ── Lookup ────────────────────────────────────────────────────────────────────
@@ -254,20 +321,38 @@ def _out_of_time(deadline: Optional[float]) -> bool:
 
 
 def fetch_posts(
-    subreddit: str, days: int = FETCH_WINDOW_DAYS, deadline: Optional[float] = None
+    subreddit: str,
+    days: int = FETCH_WINDOW_DAYS,
+    deadline: Optional[float] = None,
+    *,
+    phrases: Optional[List[str]] = None,
 ) -> List[dict]:
     """Newest-first posts from the last `days` days, deduped, deleted ones dropped.
 
     `deadline` stops paging rather than the whole fetch: whatever pages already came
     back are still a usable sample, and four pages of a five page fetch is a far
     better answer than an error page.
+
+    `phrases`, when given, is keyword-only and last so every existing positional
+    call site is untouched. It adds a best-effort archive-side prefilter (see
+    `_text_params`) and stamps every returned post with `phrase_match`
+    (`keywords.matches_all` over its title and body) without dropping a single
+    one: the key is absent entirely when no phrases are active, which is what
+    lets a later stage fall back to the already-fetched pool for free.
     """
     cutoff = _cutoff_timestamp(days)
     posts: List[dict] = []
     seen_ids = set()
     before = None
+    max_pages = PHRASE_MAX_POST_PAGES if phrases else MAX_POST_PAGES
+    # Once True, a 400 retry has already dropped the text params for the rest
+    # of this fetch (see the retry block below), so later pages go through
+    # unfiltered even though `phrases` (used for the phrase_match stamp) never
+    # changes.
+    text_active = bool(phrases)
+    text_params = _text_params(phrases, POSTS_TEXT_PARAM)
 
-    for page in range(MAX_POST_PAGES):
+    for page in range(max_pages):
         if page > 0 and _out_of_time(deadline):
             logger.info("stopping r/%s after %s pages: out of time", subreddit, page)
             break
@@ -275,15 +360,36 @@ def fetch_posts(
         params = {"subreddit": subreddit, "limit": PAGE_SIZE, "after": cutoff, "sort": "desc"}
         if before is not None:
             params["before"] = before
+        if text_active and text_params:
+            params.update(text_params)
 
         try:
-            resp = _request_page(POSTS_ENDPOINT, params)
+            resp = _request_page(POSTS_ENDPOINT, params, deadline=deadline)
         except requests.RequestException as exc:
             # Keep partial results rather than throwing away good pages.
             logger.warning("post page %s failed for r/%s: %s", page, subreddit, exc)
             if page == 0:
                 raise RuntimeError(_UNAVAILABLE)
             break
+
+        if resp.status_code == 400 and text_active and text_params:
+            # `_raise_for_client_error` maps 400 to "we could not find a
+            # community called r/x". An unsupported text parameter would
+            # otherwise surface as exactly that false claim about a healthy
+            # community, so retry once for this same page with the text
+            # params removed before that mapping is allowed to speak. The
+            # post-filter still runs over the now-unfiltered pages, so a
+            # persistently unsupported param just looks like "too few
+            # matches" to the caller instead of a run failure.
+            retry_params = {k: v for k, v in params.items() if k not in text_params}
+            try:
+                resp = _request_page(POSTS_ENDPOINT, retry_params, deadline=deadline)
+            except requests.RequestException as exc:
+                logger.warning("post page %s retry failed for r/%s: %s", page, subreddit, exc)
+                if page == 0:
+                    raise RuntimeError(_UNAVAILABLE)
+                break
+            text_active = False
 
         _raise_for_client_error(resp, subreddit)
         if resp.status_code >= 400:
@@ -314,21 +420,32 @@ def fetch_posts(
             if _is_deleted(body) and not title:
                 continue
 
+            clean_body = "" if _is_deleted(body) else body
             seen_ids.add(post_id)
-            posts.append(
-                {
-                    "kind": "post",
-                    "id": post_id,
-                    "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
-                    "title": title,
-                    "body": "" if _is_deleted(body) else body,
-                    "score": _safe_int(raw.get("score")),
-                    "comments": _safe_int(raw.get("num_comments")),
-                    "url": f"https://reddit.com{permalink}" if permalink else "",
-                    "created_utc": _safe_int(raw.get("created_utc")),
-                    "date": _format_date(raw.get("created_utc")),
-                }
-            )
+            item = {
+                "kind": "post",
+                "id": post_id,
+                "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
+                "title": title,
+                "body": clean_body,
+                "score": _safe_int(raw.get("score")),
+                "comments": _safe_int(raw.get("num_comments")),
+                "url": f"https://reddit.com{permalink}" if permalink else "",
+                "created_utc": _safe_int(raw.get("created_utc")),
+                "date": _format_date(raw.get("created_utc")),
+                # Public metadata the archive already returns and nothing above
+                # this layer used until now. `author` is captured verbatim
+                # (including the literal string "[deleted]", which is real
+                # information: the account is gone) but this layer never
+                # renders it; that is a caller-side privacy decision.
+                "author": _clean_text(raw.get("author")),
+                "author_flair_text": _clean_text(raw.get("author_flair_text")),
+                "link_flair_text": _clean_text(raw.get("link_flair_text")),
+                "upvote_ratio": min(1.0, max(0.0, _safe_float(raw.get("upvote_ratio")))),
+            }
+            if phrases:
+                item["phrase_match"] = keywords.matches_all(title + "\n" + clean_body, phrases)
+            posts.append(item)
 
         if len(data) < PAGE_SIZE:
             break
@@ -345,14 +462,24 @@ def fetch_comments(
     days: int = FETCH_WINDOW_DAYS,
     limit: int = DEFAULT_COMMENT_LIMIT,
     deadline: Optional[float] = None,
+    *,
+    phrases: Optional[List[str]] = None,
 ) -> List[dict]:
-    """Newest-first comments from the last `days` days, deduped, deleted ones dropped."""
+    """Newest-first comments from the last `days` days, deduped, deleted ones dropped.
+
+    `phrases`, keyword-only and last for the same reason as `fetch_posts`, adds
+    the same best-effort prefilter and `phrase_match` stamp. Matching uses the
+    comment body only, since a comment has no title.
+    """
     cutoff = _cutoff_timestamp(days)
     comments: List[dict] = []
     seen_ids = set()
     before = None
+    max_pages = PHRASE_MAX_COMMENT_PAGES if phrases else MAX_COMMENT_PAGES
+    text_active = bool(phrases)
+    text_params = _text_params(phrases, COMMENTS_TEXT_PARAM)
 
-    for page in range(MAX_COMMENT_PAGES):
+    for page in range(max_pages):
         if len(comments) >= limit:
             break
         if page > 0 and _out_of_time(deadline):
@@ -362,13 +489,26 @@ def fetch_comments(
         params = {"subreddit": subreddit, "limit": PAGE_SIZE, "after": cutoff, "sort": "desc"}
         if before is not None:
             params["before"] = before
+        if text_active and text_params:
+            params.update(text_params)
 
         try:
-            resp = _request_page(COMMENTS_ENDPOINT, params)
+            resp = _request_page(COMMENTS_ENDPOINT, params, deadline=deadline)
         except requests.RequestException as exc:
             # Comments are supporting evidence: never fail the whole run for them.
             logger.warning("comment page %s failed for r/%s: %s", page, subreddit, exc)
             break
+
+        if resp.status_code == 400 and text_active and text_params:
+            # Same reasoning as fetch_posts: retry once for this page without
+            # the text params before treating this as a plain failed page.
+            retry_params = {k: v for k, v in params.items() if k not in text_params}
+            try:
+                resp = _request_page(COMMENTS_ENDPOINT, retry_params, deadline=deadline)
+            except requests.RequestException as exc:
+                logger.warning("comment page %s retry failed for r/%s: %s", page, subreddit, exc)
+                break
+            text_active = False
 
         if resp.status_code >= 400:
             logger.warning("comment page %s returned %s for r/%s", page, resp.status_code, subreddit)
@@ -396,22 +536,28 @@ def fetch_comments(
                 continue
 
             seen_ids.add(key)
-            comments.append(
-                {
-                    "kind": "comment",
-                    # The dedupe key, not the raw id: a comment the archive gave no
-                    # id for used to be stored with id "", and every such comment
-                    # then shared one relevance rating and one identity downstream.
-                    "id": key,
-                    "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
-                    "title": "",
-                    "body": body,
-                    "score": _safe_int(raw.get("score")),
-                    "url": f"https://reddit.com{permalink}" if permalink else "",
-                    "created_utc": _safe_int(raw.get("created_utc")),
-                    "date": _format_date(raw.get("created_utc")),
-                }
-            )
+            item = {
+                "kind": "comment",
+                # The dedupe key, not the raw id: a comment the archive gave no
+                # id for used to be stored with id "", and every such comment
+                # then shared one relevance rating and one identity downstream.
+                "id": key,
+                "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
+                "title": "",
+                "body": body,
+                "score": _safe_int(raw.get("score")),
+                "url": f"https://reddit.com{permalink}" if permalink else "",
+                "created_utc": _safe_int(raw.get("created_utc")),
+                "date": _format_date(raw.get("created_utc")),
+                "author": _clean_text(raw.get("author")),
+                "author_flair_text": _clean_text(raw.get("author_flair_text")),
+                # No link_flair_text and no upvote_ratio: a comment has
+                # neither on Reddit, and writing ""/0.0 for them would be
+                # fiction rather than a genuinely missing value.
+            }
+            if phrases:
+                item["phrase_match"] = keywords.matches_all(body, phrases)
+            comments.append(item)
 
         if len(data) < PAGE_SIZE:
             break
