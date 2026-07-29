@@ -5,6 +5,8 @@ where ints belong, indices that point nowhere, and markdown lifted out of a Redd
 post body. None of it may reach the UI.
 """
 
+import time
+
 import pytest
 
 import analysis
@@ -1296,8 +1298,26 @@ class TestContentFilterIsNotRetried:
         assert client.models.calls == 2
 
 
+def no_requirements(monkeypatch):
+    """Stub the brief decomposition out with its own fail-open answer.
+
+    classify_sample now makes one decomposition call before the triage, so any test
+    that reaches selection with a non-empty query would otherwise make a live model
+    call. Brief(query, ()) is exactly what the real function falls back to, so a
+    test wired this way sees the behaviour a requirement-free brief gets.
+    """
+    monkeypatch.setattr(
+        analysis, "decompose_brief",
+        lambda query, profile="", **kwargs: analysis.Brief(query, ()),
+    )
+
+
 class TestRefitLoop:
     """A prompt the provider rejects shrinks THIS run's budget and nothing else."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_decomposition(self, monkeypatch):
+        no_requirements(monkeypatch)
 
     def _posts(self, count):
         return [
@@ -1722,6 +1742,10 @@ class TestUntriagedTier:
     """An item the triage never saw is not the same as one a model looked at and
     called adjacent, and it must not rank as if it were."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_decomposition(self, monkeypatch):
+        no_requirements(monkeypatch)
+
     def _post(self, id, score=10):
         return {
             "kind": "post", "id": id, "subreddit": "s", "score": score, "comments": 0,
@@ -1793,7 +1817,13 @@ class TestRateRelevance:
             return {"ratings": [{"i": 1, "r": 2}, {"i": 2, "r": 0}, {"i": 3, "r": 1}]}, "m"
 
         ratings = analysis.rate_relevance(self._items(3), "q", "p", chat=fake_chat)
-        assert ratings == {1: 2, 2: 0, 3: 1}
+        # A brief with no requirements carries no qualifier characters, so every
+        # verdict is the topic rating and an empty string.
+        assert ratings == {
+            1: analysis.Verdict(2, ""),
+            2: analysis.Verdict(0, ""),
+            3: analysis.Verdict(1, ""),
+        }
         assert calls[0]["label"] == "relevance-triage"
         assert calls[0]["thinking"] is False
 
@@ -1810,13 +1840,15 @@ class TestRateRelevance:
             }, "m"
 
         ratings = analysis.rate_relevance(self._items(3), "q", "p", chat=fake_chat)
-        assert ratings == {1: 1, 2: 1, 3: 1}
+        assert ratings == {position: analysis.Verdict(1, "") for position in (1, 2, 3)}
 
     def test_duplicate_indices_first_wins(self):
         def fake_chat(prompt, max_tokens, label, thinking=True):
             return {"ratings": [{"i": 1, "r": 2}, {"i": 1, "r": 0}]}, "m"
 
-        assert analysis.rate_relevance(self._items(1), "q", "p", chat=fake_chat) == {1: 2}
+        assert analysis.rate_relevance(self._items(1), "q", "p", chat=fake_chat) == {
+            1: analysis.Verdict(2, "")
+        }
 
     def test_batches_split_at_the_batch_size_with_global_indices(self):
         prompts = []
@@ -1831,7 +1863,7 @@ class TestRateRelevance:
         second_start = analysis.TRIAGE_BATCH_SIZE + 1
         assert "{}. [post]".format(second_start) in prompts[1]
         assert set(ratings) == set(range(1, count + 1))
-        assert set(ratings.values()) == {1}
+        assert set(ratings.values()) == {analysis.Verdict(1, "")}
 
     def test_one_failed_batch_defaults_only_that_batch(self):
         def fake_chat(prompt, max_tokens, label, thinking=True):
@@ -1841,7 +1873,7 @@ class TestRateRelevance:
 
         count = analysis.TRIAGE_BATCH_SIZE + 1
         ratings = analysis.rate_relevance(self._items(count), "q", "p", chat=fake_chat)
-        assert ratings == {analysis.TRIAGE_BATCH_SIZE + 1: 2}
+        assert ratings == {analysis.TRIAGE_BATCH_SIZE + 1: analysis.Verdict(2, "")}
 
     def test_every_batch_failing_returns_none(self):
         def fake_chat(prompt, max_tokens, label, thinking=True):
@@ -1899,6 +1931,10 @@ class TestRateRelevance:
 class TestSelectSample:
     """classify_sample's selection step: triage wiring and the deterministic fallback."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_decomposition(self, monkeypatch):
+        no_requirements(monkeypatch)
+
     def _posts(self, count):
         return [
             {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
@@ -1935,3 +1971,903 @@ class TestSelectSample:
         # p2 was rated 0 (unrelated), so it sinks below the others despite the
         # highest engagement.
         assert [post["id"] for post in ranked_posts][-1] == "p2"
+
+
+# ── Qualifier-aware triage ────────────────────────────────────────────────────
+# The real brief this whole section exists for. It carries a topic and two
+# constraints about who posted, and before decomposition existed both constraints
+# were silently discarded by a triage that only asked "is this on topic".
+EXAMPLE_BRIEF = (
+    "give me detailed posts related to running meta ads for b2b saas, not looking "
+    "for threads asked by newbie or solo founder. Im specifically looking for "
+    "threads posted by someone who is from a funded saas startups. (series a, b, c "
+    "of that sort)"
+)
+EXAMPLE_DECOMPOSITION = {
+    "topic": "running Meta ads for B2B SaaS",
+    "requirements": [
+        {"text": "The author works at a funded startup, Series A, B or C.",
+         "kind": "require"},
+        {"text": "The author is not a beginner or a solo founder.", "kind": "exclude"},
+    ],
+}
+
+
+def two_requirements():
+    return analysis.Brief(
+        "running Meta ads for B2B SaaS",
+        (
+            analysis.Requirement(
+                "The author works at a funded startup, Series A, B or C.", "require"
+            ),
+            analysis.Requirement(
+                "The author is not a beginner or a solo founder.", "exclude"
+            ),
+        ),
+    )
+
+
+class TestTodaysTriageIsUnchanged:
+    """A brief with no requirements must behave exactly as it did before qualifiers.
+
+    This is the most valuable property in the whole feature: the common case is a
+    plain topical brief, and it keeps today's prompt, today's batch size, today's
+    call count and today's selection metadata, so it has no regression surface.
+    """
+
+    def _items(self, count=2):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    def _todays_prompt(self, items, query, profile, start):
+        """The prompt as it read before requirements existed, written out in full.
+
+        Pinned as a literal rather than compared against the function itself, which
+        would pass however the function drifted.
+        """
+        listing = "\n".join(
+            "{}. [{}] {}".format(
+                position,
+                "comment" if item.get("kind") == "comment" else "post",
+                " ".join(
+                    "{} {}".format(item.get("title") or "", item.get("body") or "").split()
+                )[:analysis.TRIAGE_PREVIEW_CHARS],
+            )
+            for position, item in enumerate(items, start)
+        )
+        return (
+            "You are rating Reddit items for relevance to a research brief. "
+            "You never invent content.\n\n"
+            "Brief: {query}\n"
+            "Researcher: {profile}\n\n"
+            "Below are {count} numbered items, each a short preview of a post or comment.\n\n"
+            "{listing}\n\n"
+            'Return ONLY a JSON object: {{"ratings": [{{"i": {start}, "r": 2}}, ...]}}\n\n'
+            "Rules:\n"
+            "- Include EVERY item number shown above, exactly once.\n"
+            '- "r" is 2 (directly about the brief\'s topic), 1 (adjacent: the same '
+            "audience or a neighbouring problem, partly related, or too short to tell), "
+            "or 0 (a different audience or subject entirely, or spam).\n"
+            "- When unsure, use 1. No markdown fences, no commentary. JSON only."
+        ).format(
+            query=query,
+            profile=profile or "not given",
+            count=len(items),
+            listing=listing,
+            start=start,
+        )
+
+    def test_the_prompt_is_byte_for_byte_what_it_was(self):
+        items = self._items(3)
+        assert analysis._triage_prompt(items, "a query", "a profile", 1) == (
+            self._todays_prompt(items, "a query", "a profile", 1)
+        )
+
+    def test_an_empty_brief_object_is_the_same_as_no_brief_at_all(self):
+        items = self._items(2)
+        bare = analysis._triage_prompt(items, "a query", "", 1)
+        with_brief = analysis._triage_prompt(
+            items, "a query", "", 1, analysis.Brief("a query", ())
+        )
+        assert bare == with_brief
+
+    def test_the_prompt_never_mentions_a_qualifier_field(self):
+        prompt = analysis._triage_prompt(self._items(2), "a query", "", 1)
+        assert '"q"' not in prompt
+        assert "constraint" not in prompt
+
+    def test_sanitize_ratings_returns_verdicts_with_an_empty_qualifier_string(self):
+        ratings = analysis._sanitize_ratings(
+            {"ratings": [{"i": 1, "r": 2}, {"i": 2, "r": 0}]}, 3, 1
+        )
+        assert ratings == {
+            1: analysis.Verdict(2, ""),
+            2: analysis.Verdict(0, ""),
+            3: analysis.Verdict(1, ""),
+        }
+
+    def test_a_stray_q_on_a_no_requirement_run_is_ignored(self):
+        ratings = analysis._sanitize_ratings({"ratings": [{"i": 1, "r": 2, "q": "yy"}]}, 1, 1)
+        assert ratings == {1: analysis.Verdict(2, "")}
+
+    def test_rank_items_still_accepts_bare_ints_in_the_relevance_mapping(self):
+        def post(id, score):
+            return {
+                "kind": "post", "id": id, "subreddit": "s", "score": score, "comments": 0,
+                "title": "A title long enough to carry the whole idea on its own",
+                "body": "A body with plenty of real text in it, past the substance bar.",
+                "created_utc": 1700000000,
+            }
+
+        ranked_posts, _ = analysis.rank_items(
+            [post("off", 5000), post("on", 1)], [],
+            relevance={("post", "off"): 0, ("post", "on"): 2}, now=1700000000.0,
+        )
+        assert [item["id"] for item in ranked_posts] == ["on", "off"]
+
+    def test_the_selection_block_keeps_todays_shape_and_keys(self, monkeypatch):
+        no_requirements(monkeypatch)
+        monkeypatch.setattr(
+            analysis, "rate_relevance", lambda items, q, p: {1: 2, 2: 1}
+        )
+        posts = [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": i, "comments": 0, "created_utc": 1700000000 + i}
+            for i in range(2)
+        ]
+        _, _, selection = analysis._select_sample(posts, [], "a query", "")
+        assert selection["method"] == "relevance+engagement"
+        assert set(selection) == {"method", "triaged", "relevance_counts"}
+
+    def test_the_batch_size_is_unchanged_for_a_topical_brief(self):
+        # The budget share went up, but the topical batch was already at its
+        # TRIAGE_BATCH_SIZE ceiling, so nothing about a topical run moves.
+        assert analysis._triage_batch_size("a query", "a profile") == analysis.TRIAGE_BATCH_SIZE
+
+
+class TestDecomposeBrief:
+    """One cheap call splits a brief into its topic and its author constraints."""
+
+    def test_the_example_brief_splits_into_a_topic_and_two_requirements(self):
+        prompts = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            prompts.append({"prompt": prompt, "label": label, "thinking": thinking})
+            return EXAMPLE_DECOMPOSITION, "m"
+
+        brief = analysis.decompose_brief(EXAMPLE_BRIEF, "", chat=fake_chat)
+
+        # The topic is the subject matter with both author constraints taken out.
+        assert brief.topic == "running Meta ads for B2B SaaS"
+        for word in ("newbie", "solo founder", "funded", "series"):
+            assert word not in brief.topic.lower()
+        assert len(brief.requirements) == 2
+        funded, newbie = brief.requirements
+        assert funded.kind == "require"
+        assert newbie.kind == "exclude"
+        # Both phrased positively: the excluded one is a sentence an item either
+        # meets or breaks, not an instruction to invert.
+        for requirement in brief.requirements:
+            assert requirement.text.startswith("The author")
+            assert not requirement.text.lower().startswith("not ")
+        assert prompts[0]["label"] == "brief-decomposition"
+        assert prompts[0]["thinking"] is False
+
+    def test_the_prompt_says_everything_the_answer_depends_on(self):
+        prompt = analysis._decompose_prompt(EXAMPLE_BRIEF, "a profile")
+        assert EXAMPLE_BRIEF in prompt
+        assert "a profile" in prompt
+        # An empty list is the normal answer, and saying so is what stops the model
+        # inventing a constraint for every plain topical brief.
+        flat = " ".join(prompt.split())
+        assert "empty list" in flat
+        assert "Never invent a constraint the brief does not state" in flat
+        assert "never turn the topic into a requirement" in flat
+        assert "POSITIVE" in prompt
+        assert '"The author"' in prompt and '"The thread"' in prompt
+        assert "JSON only" in prompt
+        assert str(analysis.MAX_REQUIREMENTS) in prompt
+        assert str(analysis.MAX_REQUIREMENT_CHARS) in prompt
+        assert str(analysis.MAX_BRIEF_TOPIC_CHARS) in prompt
+
+    def test_the_prompt_forbids_dashes_it_must_not_contain_either(self):
+        prompt = analysis._decompose_prompt("a brief", "")
+        assert "em dash" in prompt and "en dash" in prompt
+        assert "—" not in prompt and "–" not in prompt
+
+    def test_a_chat_that_raises_fails_open_to_the_query_alone(self):
+        def boom(*args, **kwargs):
+            raise ValueError("no")
+
+        assert analysis.decompose_brief("a brief", "", chat=boom) == analysis.Brief(
+            "a brief", ()
+        )
+
+    def test_a_chat_that_raises_something_unexpected_still_fails_open(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("not even a ValueError")
+
+        assert analysis.decompose_brief("a brief", "", chat=boom) == analysis.Brief(
+            "a brief", ()
+        )
+
+    def test_an_empty_answer_fails_open(self):
+        assert analysis.decompose_brief(
+            "a brief", "", chat=lambda *a, **k: ({}, "m")
+        ) == analysis.Brief("a brief", ())
+
+    def test_a_non_list_requirements_field_fails_open(self):
+        brief = analysis.decompose_brief(
+            "a brief", "",
+            chat=lambda *a, **k: ({"topic": "t", "requirements": "no beginners"}, "m"),
+        )
+        assert brief.requirements == ()
+        assert brief.topic == "t"
+
+    def test_nine_requirements_are_capped_not_refused(self):
+        brief = analysis.decompose_brief(
+            "a brief", "",
+            chat=lambda *a, **k: (
+                {"topic": "t",
+                 "requirements": [{"text": "The author is #{}.".format(i)} for i in range(9)]},
+                "m",
+            ),
+        )
+        assert len(brief.requirements) == analysis.MAX_REQUIREMENTS
+        assert all(requirement.kind == "require" for requirement in brief.requirements)
+
+    def test_requirement_text_is_stripped_of_markdown_dashes_and_links(self):
+        raw = {
+            "topic": "meta ads",
+            "requirements": [
+                {"text": "The author works at a funded startup — see "
+                         "[our guide](https://example.com/x) or acme.io for detail.",
+                 "kind": "require"}
+            ],
+        }
+        brief = analysis.decompose_brief("a brief", "", chat=lambda *a, **k: (raw, "m"))
+        text = brief.requirements[0].text
+        assert "—" not in text and "–" not in text
+        assert "https://" not in text and "acme.io" not in text
+        assert "[" not in text and "](" not in text
+        assert "our guide" in text
+
+    def test_long_strings_are_cut_to_their_caps(self):
+        raw = {
+            "topic": "t" * 400,
+            "requirements": [{"text": "The author " + "x" * 400, "kind": "require"}],
+        }
+        brief = analysis.decompose_brief("a brief", "", chat=lambda *a, **k: (raw, "m"))
+        assert len(brief.topic) <= analysis.MAX_BRIEF_TOPIC_CHARS
+        assert len(brief.requirements[0].text) <= analysis.MAX_REQUIREMENT_CHARS
+
+    def test_an_unknown_kind_becomes_require_and_case_does_not_matter(self):
+        raw = {
+            "topic": "t",
+            "requirements": [
+                {"text": "The author is senior.", "kind": "banana"},
+                {"text": "The thread is a case study.", "kind": "EXCLUDE"},
+            ],
+        }
+        brief = analysis.decompose_brief("a brief", "", chat=lambda *a, **k: (raw, "m"))
+        assert [requirement.kind for requirement in brief.requirements] == [
+            "require", "exclude"
+        ]
+
+    def test_a_bare_string_requirement_is_accepted(self):
+        raw = {"topic": "t", "requirements": ["The author is not a beginner."]}
+        brief = analysis.decompose_brief("a brief", "", chat=lambda *a, **k: (raw, "m"))
+        assert brief.requirements == (
+            analysis.Requirement("The author is not a beginner.", "require"),
+        )
+
+    def test_an_empty_query_makes_no_call_at_all(self):
+        def explode(*args, **kwargs):
+            raise AssertionError("decomposition must not be called without a query")
+
+        assert analysis.decompose_brief("", "", chat=explode) == analysis.Brief("", ())
+        assert analysis.decompose_brief("   ", "", chat=explode).requirements == ()
+
+    def test_a_topical_brief_comes_back_with_no_requirements(self):
+        brief = analysis.decompose_brief(
+            "what freelancers complain about", "",
+            chat=lambda *a, **k: ({"topic": "freelancer complaints", "requirements": []}, "m"),
+        )
+        assert brief.requirements == ()
+
+    def test_sanitize_brief_never_raises_on_anything(self):
+        for raw in (None, [], "nope", 4, {"requirements": [None, 3, {}, {"text": ""}]}):
+            assert analysis.sanitize_brief(raw, "a brief") == analysis.Brief("a brief", ())
+
+    def test_a_bare_query_reads_as_a_requirement_free_brief(self):
+        assert analysis._as_brief("a query") == analysis.Brief("a query", ())
+        assert analysis._as_brief(None) == analysis.Brief("", ())
+        assert analysis._as_brief(two_requirements()) == two_requirements()
+
+
+class TestQualifierContract:
+    """The "q" field: one character per requirement, and "u" for everything unsure."""
+
+    def _items(self, count=2):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    def test_the_prompt_asks_for_one_character_per_requirement(self):
+        prompt = analysis._triage_prompt(
+            self._items(2), EXAMPLE_BRIEF, "", 1, two_requirements()
+        )
+        assert '"q": "uu"' in prompt
+        assert "exactly 2 character(s)" in prompt
+        assert "The author works at a funded startup, Series A, B or C." in prompt
+        assert "The author is not a beginner or a solo founder." in prompt
+        # The topic, not the raw brief: the constraints are listed separately, so
+        # repeating them inside the topic would double-count them.
+        assert "Topic: running Meta ads for B2B SaaS" in prompt
+
+    def test_the_prompt_pushes_hard_toward_u(self):
+        prompt = analysis._triage_prompt(
+            self._items(1), EXAMPLE_BRIEF, "", 1, two_requirements()
+        )
+        assert '"u" is the honest answer' in prompt
+        assert '"u" is the correct answer, not a failure.' in prompt
+        assert "Never guess from a username" in prompt
+        assert "—" not in prompt and "–" not in prompt
+
+    def test_a_valid_q_round_trips(self):
+        ratings = analysis._sanitize_ratings(
+            {"ratings": [{"i": 1, "r": 2, "q": "yu"}, {"i": 2, "r": 0, "q": "nn"}]}, 2, 1, 2
+        )
+        assert ratings == {1: analysis.Verdict(2, "yu"), 2: analysis.Verdict(0, "nn")}
+
+    def test_uppercase_is_accepted(self):
+        ratings = analysis._sanitize_ratings({"ratings": [{"i": 1, "r": 2, "q": "YN"}]}, 1, 1, 2)
+        assert ratings[1] == analysis.Verdict(2, "yn")
+
+    @pytest.mark.parametrize("bad", [None, "", "y", "yyyy", "xz", "?!", [], ["y", "u"], 12, True, {}])
+    def test_every_malformed_q_fails_open_to_all_u_without_disturbing_r(self, bad):
+        ratings = analysis._sanitize_ratings(
+            {"ratings": [{"i": 1, "r": 2, "q": bad}]}, 1, 1, 2
+        )
+        verdict = ratings[1]
+        # The valid topic rating survives untouched, and no character became "n".
+        assert verdict.topic == 2
+        assert len(verdict.qualifiers) == 2
+        assert set(verdict.qualifiers) <= {"u", "y"}
+        assert "n" not in verdict.qualifiers
+
+    def test_a_missing_q_key_fails_open_to_all_u(self):
+        ratings = analysis._sanitize_ratings({"ratings": [{"i": 1, "r": 1}]}, 1, 1, 3)
+        assert ratings[1] == analysis.Verdict(1, "uuu")
+
+    def test_a_short_q_is_padded_and_a_long_one_is_truncated(self):
+        assert analysis._sanitize_qualifiers("y", 3) == "yuu"
+        assert analysis._sanitize_qualifiers("ynynyn", 2) == "yn"
+        assert analysis._sanitize_qualifiers("yu", 0) == ""
+
+    def test_a_malformed_r_does_not_disturb_a_valid_q(self):
+        ratings = analysis._sanitize_ratings(
+            {"ratings": [{"i": 1, "r": "two", "q": "yn"}]}, 1, 1, 2
+        )
+        assert ratings[1] == analysis.Verdict(1, "yn")
+
+    def test_items_the_model_never_mentioned_default_to_all_u(self):
+        ratings = analysis._sanitize_ratings({"ratings": []}, 2, 1, 2)
+        assert ratings == {1: analysis.Verdict(1, "uu"), 2: analysis.Verdict(1, "uu")}
+
+    def test_the_tiers_read_off_the_qualifier_string(self):
+        assert analysis.qualifier_tier(analysis.Verdict(2, "yu")) == "confirmed"
+        assert analysis.qualifier_tier(analysis.Verdict(2, "un")) == "violated"
+        assert analysis.qualifier_tier(analysis.Verdict(2, "uu")) == "unconfirmed"
+        assert analysis.qualifier_tier(analysis.Verdict(2, "yn")) == "violated"
+        assert analysis.qualifier_tier(analysis.Verdict(2, "")) == "unconfirmed"
+
+    def test_a_bare_int_verdict_is_unconfirmed_rather_than_violated(self):
+        # The shim's whole job: an old-shaped mapping value must never read as a
+        # constraint violation, because nobody checked a constraint at all.
+        assert analysis.qualifier_tier(2) == "unconfirmed"
+        assert analysis.qualifier_tier(0) == "unconfirmed"
+        assert analysis._as_verdict(2) == analysis.Verdict(2, "")
+        assert analysis._as_verdict("nonsense") == analysis.Verdict(1, "")
+        assert analysis._as_verdict(True) == analysis.Verdict(1, "")
+
+    def test_the_qualifier_round_trip_survives_a_real_triage_call(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            return {"ratings": [{"i": 1, "r": 2, "q": "yu"}, {"i": 2, "r": 1, "q": "nu"}]}, "m"
+
+        ratings = analysis.rate_relevance(
+            self._items(2), EXAMPLE_BRIEF, "", chat=fake_chat, brief=two_requirements()
+        )
+        assert ratings == {1: analysis.Verdict(2, "yu"), 2: analysis.Verdict(1, "nu")}
+
+
+class TestQualifierRanking:
+    """A third tier, and deliberately not a hard filter or a multiplier."""
+
+    NOW = 1700000000.0
+
+    def _post(self, id, subreddit="s", score=10, age_days=0.0):
+        return {
+            "kind": "post", "id": id, "subreddit": subreddit, "score": score, "comments": 0,
+            "title": "A title long enough to carry the whole idea on its own",
+            "body": "A body with plenty of real text in it, past the substance bar.",
+            "created_utc": int(self.NOW - age_days * 86400),
+        }
+
+    def test_a_confirmed_item_at_base_point_one_outranks_an_unconfirmed_one_at_point_nine(self):
+        # This is the test a multiplier fails. Both are rated 2 on topic, so the
+        # only difference is the qualifier verdict.
+        quiet_confirmed = self._post("confirmed", score=0, age_days=10.57)
+        loud_silent = self._post("silent", score=1000, age_days=1.216)
+        base = analysis._base_scores([quiet_confirmed, loud_silent], self.NOW)
+        assert base[0] == pytest.approx(0.1, abs=0.01)
+        assert base[1] == pytest.approx(0.9, abs=0.01)
+        # Under the rejected multiplier design (confirmed 1.0, unknown 0.6) the loud
+        # silent item wins on engagement alone, which is exactly the constraint the
+        # brief cared about being drowned out.
+        assert base[0] * 1.0 < base[1] * 0.6
+
+        ranked_posts, _ = analysis.rank_items(
+            [quiet_confirmed, loud_silent], [],
+            relevance={
+                ("post", "confirmed"): analysis.Verdict(2, "y"),
+                ("post", "silent"): analysis.Verdict(2, "u"),
+            },
+            now=self.NOW,
+        )
+        assert [item["id"] for item in ranked_posts] == ["confirmed", "silent"]
+
+    def test_a_violated_item_ranks_below_every_unconfirmed_and_untriaged_item(self):
+        violated = self._post("violated", score=5000)
+        unconfirmed = self._post("unconfirmed", score=1)
+        untriaged = self._post("untriaged", score=1)
+        ranked_posts, _ = analysis.rank_items(
+            [violated, unconfirmed, untriaged], [],
+            relevance={
+                ("post", "violated"): analysis.Verdict(2, "n"),
+                ("post", "unconfirmed"): analysis.Verdict(1, "u"),
+            },
+            now=self.NOW,
+        )
+        assert [item["id"] for item in ranked_posts][-1] == "violated"
+
+    def test_nothing_is_deleted_by_a_violation(self):
+        violated = self._post("violated", score=10)
+        ranked_posts, _ = analysis.rank_items(
+            [violated], [],
+            relevance={("post", "violated"): analysis.Verdict(2, "nn")}, now=self.NOW,
+        )
+        assert [item["id"] for item in ranked_posts] == ["violated"]
+
+    def test_a_topic_rated_zero_item_stays_in_backfill_however_well_it_qualifies(self):
+        offtopic = self._post("offtopic", score=5000)
+        ontopic = self._post("ontopic", score=1)
+        ranked_posts, _ = analysis.rank_items(
+            [offtopic, ontopic], [],
+            relevance={
+                ("post", "offtopic"): analysis.Verdict(0, "yy"),
+                ("post", "ontopic"): analysis.Verdict(1, "uu"),
+            },
+            now=self.NOW,
+        )
+        assert [item["id"] for item in ranked_posts] == ["ontopic", "offtopic"]
+
+    def test_absence_of_evidence_costs_an_item_nothing(self):
+        # Polarity normalisation means only an explicit "n" demotes, so a silent
+        # item ranks purely on its topic rating and its engagement.
+        strong = self._post("strong", score=100)
+        weak = self._post("weak", score=1)
+        ranked_posts, _ = analysis.rank_items(
+            [weak, strong], [],
+            relevance={
+                ("post", "strong"): analysis.Verdict(2, "uu"),
+                ("post", "weak"): analysis.Verdict(2, "uu"),
+            },
+            now=self.NOW,
+        )
+        assert [item["id"] for item in ranked_posts] == ["strong", "weak"]
+
+    def test_fairness_holds_across_all_three_tier_seams(self):
+        # One loud community fills the confirmed tier on its own. The cap is shared
+        # across every seam, so the quiet community catches up in the tiers below
+        # rather than starting each one with a count of zero.
+        loud_confirmed = [
+            self._post("loudy{}".format(i), subreddit="loud", score=1000 - i)
+            for i in range(6)
+        ]
+        loud_unconfirmed = [
+            self._post("loudu{}".format(i), subreddit="loud", score=900 - i)
+            for i in range(4)
+        ]
+        quiet_unconfirmed = [
+            self._post("quietu{}".format(i), subreddit="quiet", score=1) for i in range(4)
+        ]
+        loud_violated = [
+            self._post("loudn{}".format(i), subreddit="loud", score=800) for i in range(3)
+        ]
+        quiet_violated = [
+            self._post("quietn{}".format(i), subreddit="quiet", score=1) for i in range(3)
+        ]
+        everything = (
+            loud_confirmed + loud_unconfirmed + quiet_unconfirmed
+            + loud_violated + quiet_violated
+        )
+        relevance = {}
+        for item in loud_confirmed:
+            relevance[("post", item["id"])] = analysis.Verdict(2, "y")
+        for item in loud_unconfirmed + quiet_unconfirmed:
+            relevance[("post", item["id"])] = analysis.Verdict(2, "u")
+        for item in loud_violated + quiet_violated:
+            relevance[("post", item["id"])] = analysis.Verdict(2, "n")
+
+        ranked_posts, _ = analysis.rank_items(everything, [], relevance, now=self.NOW)
+        ids = [item["id"] for item in ranked_posts]
+        assert len(ids) == len(everything)
+        # Tier order is absolute, so loud takes the whole confirmed tier: it is the
+        # only community in it, and the cap yields rather than reordering tiers.
+        assert ids[:6] == ["loudy{}".format(i) for i in range(6)]
+        # Then the running counts are SHARED across the seam, so quiet catches up
+        # inside the unconfirmed tier instead of starting it from zero. Loud is six
+        # picks ahead, so every quiet item goes first despite scoring 1 to their 900.
+        assert all(name.startswith("quietu") for name in ids[6:10])
+        assert all(name.startswith("loudu") for name in ids[10:14])
+        # And again at the second seam, into the violated tier.
+        assert all(name.startswith("quietn") for name in ids[14:17])
+        assert all(name.startswith("loudn") for name in ids[17:])
+
+    def test_a_run_with_no_requirements_ranks_exactly_as_two_tiers_did(self):
+        posts = [self._post("p{}".format(i), score=100 - i * 10) for i in range(6)]
+        relevance = {("post", "p{}".format(i)): 2 for i in range(6)}
+        as_ints, _ = analysis.rank_items(posts, [], relevance, now=self.NOW)
+        as_verdicts, _ = analysis.rank_items(
+            posts, [],
+            {key: analysis.Verdict(2, "") for key in relevance}, now=self.NOW,
+        )
+        assert [item["id"] for item in as_ints] == [item["id"] for item in as_verdicts]
+
+
+class TestAdaptiveTriagePreview:
+    """600 characters only when the brief has constraints; 300 stays the default."""
+
+    def _item(self, **extra):
+        item = {
+            "kind": "post", "id": "p1", "subreddit": "s", "score": 1, "created_utc": 1,
+            "title": "T", "body": "b" * 2000, "author": "growthguy99",
+        }
+        item.update(extra)
+        return item
+
+    def test_the_preview_doubles_only_for_a_qualifier_brief(self):
+        assert analysis.TRIAGE_PREVIEW_CHARS == 300
+        assert analysis.TRIAGE_QUALIFIER_PREVIEW_CHARS == 600
+        topical = analysis._triage_prompt([self._item()], "a query", "", 1)
+        qualifier = analysis._triage_prompt(
+            [self._item()], EXAMPLE_BRIEF, "", 1, two_requirements()
+        )
+        assert "1. [post] T " + "b" * (analysis.TRIAGE_PREVIEW_CHARS - 3) in topical
+        assert "b" * (analysis.TRIAGE_PREVIEW_CHARS + 1) not in topical
+        assert "b" * (analysis.TRIAGE_QUALIFIER_PREVIEW_CHARS - 3) in qualifier
+
+    def test_flair_is_prepended_when_there_is_any(self):
+        item = self._item(
+            author_flair_text="Series B | Head of Growth", link_flair_text="Case Study"
+        )
+        prompt = analysis._triage_prompt([item], EXAMPLE_BRIEF, "", 1, two_requirements())
+        assert "(flair: Series B | Head of Growth / Case" in prompt
+
+    def test_the_line_is_clean_when_there_is_no_flair(self):
+        prompt = analysis._triage_prompt(
+            [self._item()], EXAMPLE_BRIEF, "", 1, two_requirements()
+        )
+        assert "flair:" not in prompt
+        assert "1. [post] T bbb" in prompt
+
+    def test_flair_is_capped_and_stripped(self):
+        item = self._item(author_flair_text="**Founder** at acme.io " + "x" * 200)
+        flair = analysis._triage_flair(item)
+        assert "*" not in flair and "acme.io" not in flair
+        assert len(flair) <= analysis.TRIAGE_FLAIR_CHARS + len("(flair: ) ")
+
+    def test_flair_never_appears_on_a_topical_run(self):
+        item = self._item(author_flair_text="Series B | Head of Growth")
+        assert "flair" not in analysis._triage_prompt([item], "a query", "", 1)
+
+    def test_the_username_never_reaches_the_prompt(self):
+        item = self._item(author="growthguy99", author_flair_text="Series B")
+        for prompt in (
+            analysis._triage_prompt([item], "a query", "", 1),
+            analysis._triage_prompt([item], EXAMPLE_BRIEF, "", 1, two_requirements()),
+        ):
+            assert "growthguy99" not in prompt
+
+
+class TestTriageBudgetArithmetic:
+    """A longer preview must not silently push a batch past what the request takes,
+    nor silently double the number of sequential calls a pool costs."""
+
+    def _items(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "b" * 1200,
+             "author_flair_text": "Series B founder",
+             "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    def test_the_share_was_raised_to_keep_the_call_count(self):
+        assert analysis.TRIAGE_BUDGET_SHARE == 0.15
+
+    def test_a_two_requirement_batch_fits_the_triage_share(self):
+        brief = two_requirements()
+        size = analysis._triage_batch_size(EXAMPLE_BRIEF, "a profile", brief)
+        assert 0 < size <= analysis.TRIAGE_BATCH_SIZE
+        estimate = analysis.estimate_tokens(
+            analysis._triage_prompt(self._items(size), EXAMPLE_BRIEF, "a profile", 1, brief)
+        ) + analysis._triage_output_tokens(
+            size, analysis.TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM
+        )
+        assert estimate <= int(analysis.token_budget() * analysis.TRIAGE_BUDGET_SHARE)
+
+    def test_the_batch_size_never_grows_past_the_listing_ceiling(self):
+        assert analysis.TRIAGE_BATCH_SIZE == 120
+        assert analysis._triage_batch_size(
+            EXAMPLE_BRIEF, "a profile", two_requirements()
+        ) <= analysis.TRIAGE_BATCH_SIZE
+
+    def test_the_output_reservation_for_a_full_batch_stays_under_the_ceiling(self):
+        reserved = analysis._triage_output_tokens(
+            analysis.TRIAGE_BATCH_SIZE, analysis.TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM
+        )
+        assert reserved < analysis.TRIAGE_MAX_TOKENS
+        # 200 items is what would truncate, which is why the batch cap must hold.
+        assert analysis._triage_output_tokens(
+            200, analysis.TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM
+        ) == analysis.TRIAGE_MAX_TOKENS
+
+    def test_an_eight_hundred_item_pool_still_costs_about_seven_calls(self):
+        size = analysis._triage_batch_size(
+            EXAMPLE_BRIEF, "a profile", two_requirements()
+        )
+        calls = -(-800 // size)
+        assert calls == 7, "800 items at {} per batch is {} calls".format(size, calls)
+
+    def test_a_topical_pool_costs_the_same_seven_calls_it_always_did(self):
+        size = analysis._triage_batch_size(EXAMPLE_BRIEF, "a profile")
+        assert -(-800 // size) == 7
+
+
+class TestTriageDeadline:
+    """Triage is several uninterruptible calls inside one soft deadline."""
+
+    def _items(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    def test_a_deadline_already_past_issues_no_batch_at_all(self):
+        def explode(*args, **kwargs):
+            raise AssertionError("no batch may be issued past the deadline")
+
+        ratings = analysis.rate_relevance(
+            self._items(5), "a query", "", chat=explode,
+            soft_deadline=time.monotonic() - 1,
+        )
+        assert ratings == {}
+
+    def test_the_caller_degrades_to_the_untriaged_tier(self, monkeypatch):
+        no_requirements(monkeypatch)
+        posts = [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": 100 - i, "comments": 0, "created_utc": 1700000000}
+            for i in range(4)
+        ]
+        ranked_posts, _, selection = analysis._select_sample(
+            posts, [], "a query", "", time.monotonic() - 1
+        )
+        # Nothing was rated, so nothing was promoted, and the engagement order
+        # stands. The run is degraded, not failed.
+        assert selection["triaged"] == 0
+        assert [item["id"] for item in ranked_posts] == ["p0", "p1", "p2", "p3"]
+
+    def test_a_deadline_stops_the_pool_rather_than_the_run(self):
+        state = {"calls": 0}
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            state["calls"] += 1
+            return {"ratings": [{"i": 1, "r": 2}]}, "m"
+
+        size = analysis._triage_batch_size("a query", "")
+        items = self._items(size * 2)
+        # A generous deadline reads the whole pool in two batches.
+        assert analysis.rate_relevance(
+            items, "a query", "", chat=fake_chat, soft_deadline=time.monotonic() + 3600
+        )
+        assert state["calls"] == 2
+        # A spent one reads none of it, and still returns a mapping rather than the
+        # None that means "triage failed, select deterministically".
+        state["calls"] = 0
+        ratings = analysis.rate_relevance(
+            items, "a query", "", chat=fake_chat, soft_deadline=time.monotonic() - 1
+        )
+        assert state["calls"] == 0
+        assert ratings == {}
+
+    def test_no_deadline_behaves_exactly_as_before(self):
+        prompts = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            prompts.append(prompt)
+            return {"ratings": []}, "m"
+
+        analysis.rate_relevance(self._items(3), "a query", "", chat=fake_chat)
+        assert len(prompts) == 1
+
+    def test_classify_sample_forwards_the_deadline_to_the_triage(self, monkeypatch):
+        no_requirements(monkeypatch)
+        seen = {}
+
+        def fake_rate(items, query, profile, chat=None, brief=None, soft_deadline=None):
+            seen["soft_deadline"] = soft_deadline
+            return {}
+
+        monkeypatch.setattr(analysis, "rate_relevance", fake_rate)
+        monkeypatch.setattr(analysis, "fit_sample", lambda p, c, s, budget=None: (list(p), 200))
+        monkeypatch.setattr(
+            analysis, "classify_items",
+            lambda items, subreddits, preview_chars=200: {
+                "topics": [], "item_sentiments": [], "model": "m"
+            },
+        )
+        posts = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "score": 1, "comments": 0,
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "created_utc": 1700000000}
+        ]
+        analysis.classify_sample(posts, [], ["s"], "a query", "", soft_deadline=1234.5)
+        assert seen["soft_deadline"] == 1234.5
+
+    def test_a_triage_fake_that_predates_the_deadline_still_works(self, monkeypatch):
+        no_requirements(monkeypatch)
+        monkeypatch.setattr(analysis, "rate_relevance", lambda items, q, p: {1: 2})
+        posts = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "score": 1, "comments": 0,
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "created_utc": 1700000000}
+        ]
+        _, _, selection = analysis._select_sample(posts, [], "a query", "", 1e18)
+        assert selection["triaged"] == 1
+
+
+class TestSelectionDisclosure:
+    """What the report is allowed to say about how the sample was chosen."""
+
+    def _posts(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": count - i, "comments": 0, "created_utc": 1700000000}
+            for i in range(count)
+        ]
+
+    def _select(self, monkeypatch, verdicts, count=4, brief=None):
+        brief = brief if brief is not None else two_requirements()
+        monkeypatch.setattr(
+            analysis, "decompose_brief", lambda query, profile="", **kwargs: brief
+        )
+        monkeypatch.setattr(
+            analysis, "rate_relevance",
+            lambda items, query, profile, **kwargs: dict(verdicts),
+        )
+        return analysis._select_sample(self._posts(count), [], EXAMPLE_BRIEF, "")
+
+    def test_the_new_keys_appear_with_the_names_the_report_reads(self, monkeypatch):
+        _, _, selection = self._select(monkeypatch, {
+            1: analysis.Verdict(2, "yu"),
+            2: analysis.Verdict(2, "nu"),
+            3: analysis.Verdict(1, "uu"),
+            4: analysis.Verdict(1, "yy"),
+        })
+        assert selection["method"] == "relevance+qualifiers"
+        assert selection["pool"] == 4
+        assert selection["topic"] == "running Meta ads for B2B SaaS"
+        assert selection["qualifier_counts"] == {
+            "confirmed": 2, "unconfirmed": 1, "violated": 1
+        }
+        assert [requirement["kind"] for requirement in selection["requirements"]] == [
+            "require", "exclude"
+        ]
+        assert selection["requirements"][0] == {
+            "text": "The author works at a funded startup, Series A, B or C.",
+            "kind": "require", "met": 2, "violated": 1, "unknown": 1,
+        }
+
+    def test_every_requirement_count_sums_to_the_triaged_total(self, monkeypatch):
+        _, _, selection = self._select(monkeypatch, {
+            1: analysis.Verdict(2, "yu"),
+            2: analysis.Verdict(2, "nu"),
+            3: analysis.Verdict(1, "uu"),
+            4: analysis.Verdict(1, "yy"),
+        })
+        for requirement in selection["requirements"]:
+            total = requirement["met"] + requirement["violated"] + requirement["unknown"]
+            assert total == selection["triaged"]
+
+    def test_the_tier_counts_also_sum_to_the_triaged_total(self, monkeypatch):
+        _, _, selection = self._select(monkeypatch, {
+            1: analysis.Verdict(2, "yu"), 2: analysis.Verdict(2, "nu"),
+        })
+        assert sum(selection["qualifier_counts"].values()) == selection["triaged"]
+
+    def test_no_new_key_appears_without_a_requirement(self, monkeypatch):
+        _, _, selection = self._select(
+            monkeypatch, {1: analysis.Verdict(2, "")},
+            brief=analysis.Brief("running Meta ads for B2B SaaS", ()),
+        )
+        assert selection["method"] == "relevance+engagement"
+        for key in ("pool", "topic", "requirements", "qualifier_counts",
+                    "qualifier_analysed"):
+            assert key not in selection
+
+    def test_the_analysed_counts_come_off_the_stamp_and_never_exceed_the_sample(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            analysis, "decompose_brief",
+            lambda query, profile="", **kwargs: two_requirements(),
+        )
+        monkeypatch.setattr(
+            analysis, "rate_relevance",
+            lambda items, query, profile, **kwargs: {
+                1: analysis.Verdict(2, "yu"),
+                2: analysis.Verdict(2, "nu"),
+                3: analysis.Verdict(2, "uu"),
+            },
+        )
+        monkeypatch.setattr(
+            analysis, "fit_sample", lambda p, c, s, budget=None: (list(p)[:2], 200)
+        )
+        monkeypatch.setattr(
+            analysis, "classify_items",
+            lambda items, subreddits, preview_chars=200: {
+                "topics": [], "item_sentiments": [], "model": "m"
+            },
+        )
+        items, _, classification = analysis.classify_sample(
+            self._posts(3), [], ["s"], EXAMPLE_BRIEF, ""
+        )
+        selection = classification["selection"]
+        analysed = selection["qualifier_analysed"]
+        assert sum(analysed.values()) == len(items) == 2
+        assert sum(analysed.values()) <= sum(selection["qualifier_counts"].values())
+        for tier in ("confirmed", "unconfirmed", "violated"):
+            assert analysed[tier] <= selection["qualifier_counts"][tier]
+
+    def test_an_unstamped_item_counts_as_unconfirmed(self):
+        counts = analysis.analysed_qualifier_counts(
+            [{"qualifier_tier": "confirmed"}, {}, {"qualifier_tier": "nonsense"}]
+        )
+        assert counts == {"confirmed": 1, "unconfirmed": 2, "violated": 0}
+
+    def test_the_stamp_matches_the_tier_the_ranking_used(self, monkeypatch):
+        ranked_posts, _, _ = self._select(monkeypatch, {
+            1: analysis.Verdict(2, "yu"),
+            2: analysis.Verdict(2, "nu"),
+            3: analysis.Verdict(2, "uu"),
+            4: analysis.Verdict(2, "uu"),
+        })
+        assert ranked_posts[0]["qualifier_tier"] == "confirmed"
+        assert ranked_posts[-1]["qualifier_tier"] == "violated"

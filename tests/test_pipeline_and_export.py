@@ -1063,6 +1063,51 @@ class TestExports:
         assert "directional rather than conclusive" in markdown
         assert "of the conversation" not in markdown
 
+    def test_markdown_carries_each_requirement_text_and_its_counts(self):
+        # Mirrors what a qualifier-aware triage run would attach to
+        # sample.selection (Stage C5): the markdown methodology has to carry
+        # the same requirement text, the same three counts per requirement,
+        # the analysed-sample split and the self-reported caveat as the
+        # on-screen Requirements row.
+        def with_requirements(posts, comments, subreddits, query="", profile=""):
+            items, preview, classification = fake_classify(posts, comments, subreddits)
+            classification["selection"] = {
+                "method": "relevance+qualifiers",
+                "triaged": len(items),
+                "pool": len(items),
+                "topic": "running Meta ads for B2B SaaS",
+                "requirements": [
+                    {
+                        "text": "The author works at a funded startup, Series A, B or C.",
+                        "kind": "require", "met": 2, "violated": 1, "unknown": 3,
+                    },
+                    {
+                        "text": "The author is not a beginner or a solo founder.",
+                        "kind": "exclude", "met": 1, "violated": 2, "unknown": 3,
+                    },
+                ],
+                "qualifier_counts": {"confirmed": 3, "unconfirmed": 6, "violated": 3},
+                "qualifier_analysed": {"confirmed": 3, "unconfirmed": 2, "violated": 1},
+            }
+            return items, preview, classification
+
+        markdown = report_export.report_markdown(build_bundle(classify=with_requirements))
+        assert "The author works at a funded startup, Series A, B or C." in markdown
+        assert "The author is not a beginner or a solo founder." in markdown
+        assert "2 threads showed it, 1 contradicted it, and 3 did not say" in markdown
+        assert "1 threads showed it, 2 contradicted it, and 3 did not say" in markdown
+        assert "self-reported" in markdown
+        assert "kept despite contradicting a requirement" in markdown
+
+    def test_markdown_with_no_requirements_is_unchanged(self):
+        # The today-is-unchanged guarantee for Stage C5: a bundle whose
+        # selection carries no requirements (every bundle before this stage,
+        # and every run whose brief was pure topic) must not gain any of the
+        # new requirements copy.
+        markdown = report_export.report_markdown(build_bundle())
+        assert "requirement" not in markdown.lower()
+        assert "self-reported" not in markdown
+
     def test_posts_csv_has_a_header_and_a_row_per_post(self):
         rows = report_export.posts_csv(build_bundle()).strip().split("\n")
         assert rows[0] == "subreddit,title,date,upvotes,comments,sentiment,url"
@@ -1316,3 +1361,149 @@ class TestCallForwardsArbitraryKeywords:
     def test_accepts_rejects_a_bare_lambda(self):
         assert pipeline._accepts(lambda s, d: [], "deadline") is False
         assert pipeline._accepts(lambda s, d: [], "phrases") is False
+
+
+class TestQualifierDisclosure:
+    """A brief with author constraints has to be visible in the run's own words."""
+
+    REQUIREMENTS = [
+        {"text": "The author works at a funded startup, Series A, B or C.",
+         "kind": "require", "met": 3, "violated": 4, "unknown": 12},
+        {"text": "The author is not a beginner or a solo founder.",
+         "kind": "exclude", "met": 2, "violated": 5, "unknown": 12},
+    ]
+
+    def _classify(self, confirmed, requirements=None):
+        def classify(posts, comments, subreddits, query="", profile=""):
+            items, preview, classification = fake_classify(
+                posts, comments, subreddits, query, profile
+            )
+            analysed = len(items)
+            classification["selection"] = {
+                "method": "relevance+qualifiers",
+                "triaged": 19,
+                "relevance_counts": {"0": 1, "1": 8, "2": 10},
+                "pool": 19,
+                "topic": "running Meta ads for B2B SaaS",
+                "requirements": (
+                    self.REQUIREMENTS if requirements is None else requirements
+                ),
+                "qualifier_counts": {"confirmed": 5, "unconfirmed": 9, "violated": 5},
+                "qualifier_analysed": {
+                    "confirmed": confirmed,
+                    "unconfirmed": max(0, analysed - confirmed),
+                    "violated": 0,
+                },
+            }
+            return items, preview, classification
+
+        return classify
+
+    def test_a_thin_confirmed_count_is_said_out_loud(self):
+        bundle = build_bundle(classify=self._classify(confirmed=2))
+        notice = " ".join(bundle["notices"])
+        assert "Only 2 of the" in notice
+        # Specific about why, because "we found two" reads like a bug on its own.
+        assert "Most Reddit posts never say who wrote them" in notice
+        assert "Nothing was removed for contradicting it." in notice
+        assert "whatever the author says they are" in notice
+        assert "The author works at a funded startup, Series A, B or C" in notice
+
+    def test_a_healthy_confirmed_count_says_nothing(self):
+        bundle = build_bundle(
+            classify=self._classify(confirmed=pipeline.QUALIFIER_MIN_CONFIRMED)
+        )
+        assert not any("Only" in notice for notice in bundle["notices"])
+
+    def test_a_run_with_no_requirements_says_nothing_about_them(self):
+        bundle = build_bundle()
+        joined = " ".join(bundle["notices"])
+        assert "who posted" not in joined
+        assert pipeline._REQUIREMENTS_NOT_APPLIED not in bundle["notices"]
+
+    def test_the_new_selection_keys_reach_the_bundle_untouched(self):
+        selection = build_bundle(classify=self._classify(confirmed=2))["sample"]["selection"]
+        assert selection["method"] == "relevance+qualifiers"
+        assert selection["pool"] == 19
+        assert selection["topic"] == "running Meta ads for B2B SaaS"
+        assert selection["qualifier_counts"]["violated"] == 5
+        assert selection["qualifier_analysed"]["confirmed"] == 2
+        assert selection["requirements"][1]["kind"] == "exclude"
+
+    def test_the_notice_never_exceeds_the_analysed_sample(self):
+        bundle = build_bundle(classify=self._classify(confirmed=2))
+        notice = next(n for n in bundle["notices"] if n.startswith("Only "))
+        assert "of the {} threads".format(bundle["sample"]["items_analysed"]) in notice
+
+    def test_relevance_off_says_the_requirements_were_not_applied(self):
+        bundle = build_bundle(relevance_filter=False)
+        assert pipeline._REQUIREMENTS_NOT_APPLIED in bundle["notices"]
+        # And no requirement counts, because no model ever read the brief.
+        selection = bundle["sample"]["selection"]
+        assert selection["method"] == "relevance-off"
+        for key in ("requirements", "qualifier_counts", "qualifier_analysed", "topic"):
+            assert key not in selection
+
+    def test_relevance_off_ignores_a_classifiers_own_qualifier_metadata(self):
+        # The relevance-off branch replaces the selection block wholesale, so a
+        # classifier that somehow reported requirements cannot contradict the notice.
+        bundle = build_bundle(
+            relevance_filter=False, classify=self._classify(confirmed=2)
+        )
+        assert "requirements" not in bundle["sample"]["selection"]
+        assert not any(notice.startswith("Only ") for notice in bundle["notices"])
+
+    def test_a_classifier_reporting_no_analysed_counts_is_not_a_crash(self):
+        def classify(posts, comments, subreddits, query="", profile=""):
+            items, preview, classification = fake_classify(
+                posts, comments, subreddits, query, profile
+            )
+            classification["selection"] = {
+                "method": "relevance+qualifiers",
+                "triaged": 4,
+                "relevance_counts": {"0": 0, "1": 0, "2": 4},
+                "requirements": self.REQUIREMENTS,
+            }
+            return items, preview, classification
+
+        bundle = build_bundle(classify=classify)
+        assert any(notice.startswith("Only 0 of the") for notice in bundle["notices"])
+
+    def test_the_notice_and_the_threshold_carry_no_dashes(self):
+        bundle = build_bundle(classify=self._classify(confirmed=1))
+        for notice in bundle["notices"]:
+            assert "—" not in notice and "–" not in notice
+        assert pipeline.QUALIFIER_MIN_CONFIRMED == pipeline.analysis.LOW_DATA_THRESHOLD
+
+
+class TestClassifyReceivesTheDeadline:
+    """Triage is the stage that can overrun a run's budget invisibly."""
+
+    def test_the_soft_deadline_reaches_the_classifier(self):
+        captured = {}
+
+        def spy(posts, comments, subreddits, query="", profile="", soft_deadline=None):
+            captured["soft_deadline"] = soft_deadline
+            return fake_classify(posts, comments, subreddits, query, profile)
+
+        deadline = time.monotonic() + 3600
+        build_bundle(classify=spy, deadline=deadline)
+        assert captured["soft_deadline"] == pytest.approx(
+            deadline - pipeline.DEADLINE_RESERVE_SECONDS
+        )
+
+    def test_no_deadline_means_the_keyword_is_not_passed_at_all(self):
+        captured = {}
+
+        def spy(posts, comments, subreddits, query="", profile="", soft_deadline="sentinel"):
+            captured["soft_deadline"] = soft_deadline
+            return fake_classify(posts, comments, subreddits, query, profile)
+
+        build_bundle(classify=spy)
+        assert captured["soft_deadline"] == "sentinel"
+
+    def test_a_classifier_that_predates_the_deadline_still_runs(self):
+        # Every classify fake in this file takes five positional arguments and no
+        # more, which is exactly the compatibility case _call exists for.
+        bundle = build_bundle(deadline=time.monotonic() + 3600)
+        assert bundle["sample"]["items_analysed"] > 0

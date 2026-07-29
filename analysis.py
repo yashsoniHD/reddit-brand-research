@@ -15,13 +15,14 @@ retry, model-fallback and error-message machinery instead of reinventing it.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
 from google import genai
@@ -66,7 +67,16 @@ BAD_PAYLOAD_LOG_CHARS = 200
 # refit ladder handles that case if the estimate here ever turns out optimistic.
 DEFAULT_TOKEN_BUDGET = int(os.environ.get("GEMINI_TOKEN_BUDGET", "200000"))
 BUDGET_SAFETY = 0.9
-TRIAGE_BUDGET_SHARE = 0.10
+# Raised from 0.10 when the triage gained a second, longer preview for qualifier
+# briefs. The shares do not partition one request's spend: triage, classification
+# and synthesis are separate HTTP calls, each sized against the whole budget, so a
+# share is a per-call guard rail against one oversized request rather than a slice
+# of a shared pot. At 0.10 a 600 character preview dropped the batch from 120 to
+# about 76, which took an 800 item pool from 7 sequential calls to 11, roughly 60
+# to 100 extra seconds that the run's soft deadline does not have. At 0.15 the
+# batch is back at its 120 ceiling and the pool is 7 calls again. The shares now
+# sum to 1.05, which is deliberate and harmless for that reason.
+TRIAGE_BUDGET_SHARE = 0.15
 CLASSIFY_BUDGET_SHARE = 0.50
 SYNTHESIS_BUDGET_SHARE = 0.40
 CHARS_PER_TOKEN = 4
@@ -170,13 +180,94 @@ TRIAGE_MAX_COMMENTS = 400
 # judge relevance on; 300 reaches the point of most Reddit posts. The batch size
 # comes down to match so a batch still fits TRIAGE_BUDGET_SHARE of the budget.
 TRIAGE_PREVIEW_CHARS = 300
+# Only for a brief that carries requirements about who posted. 300 characters is
+# enough to tell what a thread is about and nowhere near enough to tell who wrote
+# it: the sentence that says "we just closed our Series B" is usually two or three
+# paragraphs in. 800 is the hard ceiling past which the marginal value collapses,
+# because seniority signals live in the opening context paragraph. Topical runs
+# keep the 300 above, so they keep today's batch size and call count exactly.
+TRIAGE_QUALIFIER_PREVIEW_CHARS = 600
+# Author and link flair, prepended to the preview line. In startup and marketing
+# subreddits flair is frequently the single most reliable seniority signal there
+# is, and it costs about 20 characters. It is truncated INSIDE the preview budget
+# rather than added on top of it, so the preview length stays the honest cap the
+# batch arithmetic is computed from.
+TRIAGE_FLAIR_CHARS = 40
+# Never above 120. Long numbered listings lose index alignment near the tail, and
+# at the qualifier output reservation below, 200 items would reserve 12,300 tokens
+# against TRIAGE_MAX_TOKENS and truncate the answer mid-array.
 TRIAGE_BATCH_SIZE = 120
 # Measured the same way as _classification_output_tokens: Gemini pretty-prints, so
 # each {"i": n, "r": n} costs four indented lines, and the sibling classification
 # call measures 45 tokens per labelled item. The earlier figure of 30 was carried
 # over from nothing in particular.
 TRIAGE_OUTPUT_TOKENS_PER_ITEM = 45
+# A qualifier verdict adds one more pretty-printed line per item ("q": "yu"), so
+# the reservation goes up with it. 60 x 120 items is 7,500 against the 12,000
+# ceiling below, which is why the batch size must not grow past 120.
+TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM = 60
 TRIAGE_MAX_TOKENS = 12000
+
+# ── Brief decomposition ───────────────────────────────────────────────────────
+# A brief can carry constraints about WHO posted a thread ("only from someone at a
+# funded startup", "not newbies") alongside its topic. One cheap call splits those
+# out before the triage runs, so the triage can rate the topic and check the
+# constraints as two separate judgements instead of collapsing both into one score.
+#
+# Three is the ceiling because a fourth constraint is nearly always a restatement
+# of one of the first three, and every extra one costs a character per item across
+# the whole triage pool. 120 characters is a sentence; past that the model is
+# writing a paragraph the triage then has to weigh against a 600 character preview.
+MAX_REQUIREMENTS = 3
+MAX_REQUIREMENT_CHARS = 120
+# The topic is what gets searched for and what the report says the brief was read
+# as, so it has to fit a line.
+MAX_BRIEF_TOPIC_CHARS = 100
+# A topic string plus at most three short sentences is well under 200 tokens of
+# JSON. Generous on the same asymmetry as everywhere else here: unused allowance
+# is free, and a truncated answer means the constraints are silently dropped.
+DECOMPOSE_MAX_TOKENS = 1000
+
+
+class Requirement(NamedTuple):
+    """One constraint the brief states about who posted or what kind of thread.
+
+    `text` is always phrased POSITIVELY: a brief that rules newbies out becomes
+    "The author is not a beginner or a solo founder." That normalisation is the
+    reason there is exactly one downstream rule (an item either meets a
+    requirement, breaks it, or does not say) instead of an inverted-logic branch
+    per kind that would be wrong half the time.
+
+    `kind` survives only so the report can say "you asked for" versus "you ruled
+    out". Nothing in the ranking reads it.
+    """
+
+    text: str
+    kind: str
+
+
+class Brief(NamedTuple):
+    """A research brief read as a topic plus the constraints it states."""
+
+    topic: str
+    requirements: Tuple[Requirement, ...]
+
+
+class Verdict(NamedTuple):
+    """One triage answer: the topic rating, and one character per requirement.
+
+    `qualifiers` is one character per requirement in the brief's own order: "y"
+    meets it, "n" breaks it, "u" does not say. Empty when the brief states no
+    requirements, which is the common case and the one that keeps today's contract.
+
+    Topic and qualifiers stay separate rather than collapsing into one score,
+    because the ranking has to be able to weigh an on-topic-but-silent item
+    against an off-topic-but-qualified one, and the report has to be able to
+    attribute a demotion to the requirement that caused it.
+    """
+
+    topic: int
+    qualifiers: str
 
 # ── Formats ───────────────────────────────────────────────────────────────────
 # The product writes for one professional feed, so there is no platform to choose and
@@ -833,21 +924,75 @@ def relevance_key(kind: str, item: dict, position: int) -> Tuple[str, str]:
     return (kind, ident or "#{}".format(position))
 
 
+def _as_verdict(value: Any) -> Verdict:
+    """Read a relevance mapping's value as a Verdict, accepting a bare int.
+
+    A bare 0..2 is what the mapping held before qualifiers existed, and it is what
+    every injected triage fake and every caller outside this module still passes.
+    Normalising here rather than at each read site means there is one place where a
+    verdict-shaped value is defined, and no caller has to be upgraded to keep
+    working.
+    """
+    if isinstance(value, Verdict):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return Verdict(1, "")
+    return Verdict(int(value), "")
+
+
+def qualifier_tier(verdict: Any) -> str:
+    """"confirmed", "unconfirmed" or "violated" for one verdict.
+
+    Any "n" violates: one requirement the item plainly breaks is enough, because
+    the brief stated all of them. Otherwise any "y" confirms. An item that says
+    nothing either way, and an item from a brief with no requirements at all, are
+    both "unconfirmed", which is the tier that costs an item nothing.
+    """
+    qualifiers = _as_verdict(verdict).qualifiers
+    if "n" in qualifiers:
+        return "violated"
+    if "y" in qualifiers:
+        return "confirmed"
+    return "unconfirmed"
+
+
 def rank_items(
     posts: Sequence[dict],
     comments: Sequence[dict],
-    relevance: Optional[Dict[Tuple[str, str], int]] = None,
+    relevance: Optional[Dict[Tuple[str, str], Any]] = None,
     now: Optional[float] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Fully order both pools, best candidates first.
 
-    `relevance` maps relevance_key(kind, item, position) -> 0..2 from the triage
-    call. Items it does not cover are untriaged and rank in their own tier below
-    every rated item (UNTRIAGED_WEIGHT), so a partial triage degrades the ranking
-    instead of quietly promoting unrated items to the same footing as ones a model
-    actually looked at and called adjacent. Items rated 0, and posts with no
-    substance, drop to a backfill tier below everything eligible: still available
-    when a quiet topic needs them, never ahead of anything actually on-topic.
+    `relevance` maps relevance_key(kind, item, position) -> Verdict from the triage
+    call, and a bare 0..2 int is accepted for it too (see _as_verdict). Items it
+    does not cover are untriaged and rank in the unconfirmed tier below every rated
+    item (UNTRIAGED_WEIGHT), so a partial triage degrades the ranking instead of
+    quietly promoting unrated items to the same footing as ones a model actually
+    looked at and called adjacent. Items rated 0, and posts with no substance, drop
+    to a backfill tier below everything eligible: still available when a quiet topic
+    needs them, never ahead of anything actually on-topic.
+
+    Three tiers, not two, once the brief carries requirements: items that meet one
+    lead, items that say nothing either way follow, and items that plainly break one
+    join the existing backfill tier. Nothing is deleted, and that is deliberate. It
+    differs from the hard filtering the keyword phrases get because the two are not
+    the same kind of claim: a keyword match is a checkable fact about the text,
+    while a qualifier verdict is a model inferring a fuzzy social attribute from a
+    truncated snippet. "I'm new to running Meta ads" from a Series B growth lead
+    reads as a beginner in 600 characters, so false negatives are the expected
+    failure and demotion is the honest response to them. Deleting would also need
+    new empty-sample handling, since classify_sample raises on an empty sample,
+    which would turn a disappointing run into a failed one.
+
+    A multiplier instead of a tier does not work. With confirmed at 1.0 and unknown
+    at 0.6, a confirmed item at base 0.3 scores 0.30 while a silent item at base 0.9
+    scores 0.54, so engagement drowns the constraint that was the point of the
+    brief. Tiers in _fair_order are absolute, while the fairness cap stays shared
+    across every seam.
+
+    Because every requirement is stored as a positive sentence, only an explicit "n"
+    demotes: absence of evidence costs an item nothing.
     """
     relevance = relevance or {}
     timestamp = time.time() if now is None else now
@@ -855,95 +1000,431 @@ def rank_items(
     def ordered(items: Sequence[dict], kind: str, substance_check: bool) -> List[dict]:
         items = [item for item in items if isinstance(item, dict)]
         base = _base_scores(items, timestamp)
-        eligible: List[Tuple[float, dict]] = []
+        confirmed: List[Tuple[float, dict]] = []
+        unconfirmed: List[Tuple[float, dict]] = []
         backfill: List[Tuple[float, dict]] = []
         for position, (item, score) in enumerate(zip(items, base)):
             rating = relevance.get(relevance_key(kind, item, position))
             if rating is None:
                 weight = UNTRIAGED_WEIGHT
+                tier = "unconfirmed"
             else:
-                weight = RELEVANCE_WEIGHTS.get(rating, RELEVANCE_WEIGHTS[1])
+                verdict = _as_verdict(rating)
+                weight = RELEVANCE_WEIGHTS.get(verdict.topic, RELEVANCE_WEIGHTS[1])
+                tier = qualifier_tier(verdict)
             if weight <= 0 or (substance_check and not _has_substance(item)):
                 # Ranked by base score alone: relevance said no, so it no longer
-                # gets a say in how the leftovers are ordered.
+                # gets a say in how the leftovers are ordered. Checked before the
+                # qualifier tier, so an off-topic item stays in backfill however
+                # well its author qualifies.
                 backfill.append((score, item))
+            elif tier == "violated":
+                backfill.append((score, item))
+            elif tier == "confirmed":
+                confirmed.append((weight * score, item))
             else:
-                eligible.append((weight * score, item))
-        return _fair_order(eligible, backfill)
+                unconfirmed.append((weight * score, item))
+        # With no requirements every item is "unconfirmed", so `confirmed` is empty
+        # and this is exactly the two-tier order it was before.
+        return _fair_order(confirmed, unconfirmed, backfill)
 
     return ordered(posts, "post", True), ordered(comments, "comment", False)
 
 
-# ── Selection: relevance triage ───────────────────────────────────────────────
-def _triage_preview(item: dict, chars: int = TRIAGE_PREVIEW_CHARS) -> str:
-    item = item or {}
-    text = " ".join("{} {}".format(item.get("title") or "", item.get("body") or "").split())
-    return text[:chars]
+# ── Injected callables ────────────────────────────────────────────────────────
+# The same contract pipeline._call documents, kept here because pipeline imports
+# analysis and the dependency cannot run the other way. Both exist for one reason:
+# the triage and decomposition functions are substitution points, and a fake that
+# predates a new keyword argument has to keep working.
+def _accepts(func: Callable, name: str) -> bool:
+    """Whether `func` will take a keyword argument called `name`."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == name and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
 
 
-def _triage_lines(items: Sequence[dict], start: int = 1) -> str:
-    lines = []
-    for position, item in enumerate(items, start):
-        kind = "comment" if (item or {}).get("kind") == "comment" else "post"
-        lines.append("{}. [{}] {}".format(position, kind, _triage_preview(item)))
-    return "\n".join(lines)
+def _call(func: Callable, *args, **kwargs):
+    """Call an injected callable, dropping any keyword it cannot take.
+
+    A `None` value is dropped as well as an undeclared keyword, so passing
+    `soft_deadline=None` (no deadline in play) behaves exactly as passing nothing.
+    """
+    return func(*args, **{
+        name: value
+        for name, value in kwargs.items()
+        if value is not None and _accepts(func, name)
+    })
 
 
-def _triage_prompt(items: Sequence[dict], query: str, profile: str, start: int) -> str:
-    return (
-        "You are rating Reddit items for relevance to a research brief. "
-        "You never invent content.\n\n"
-        "Brief: {query}\n"
-        "Researcher: {profile}\n\n"
-        "Below are {count} numbered items, each a short preview of a post or comment.\n\n"
-        "{listing}\n\n"
-        'Return ONLY a JSON object: {{"ratings": [{{"i": {start}, "r": 2}}, ...]}}\n\n'
-        "Rules:\n"
-        "- Include EVERY item number shown above, exactly once.\n"
-        '- "r" is 2 (directly about the brief\'s topic), 1 (adjacent: the same '
-        "audience or a neighbouring problem, partly related, or too short to tell), "
-        "or 0 (a different audience or subject entirely, or spam).\n"
-        "- When unsure, use 1. No markdown fences, no commentary. JSON only."
-    ).format(
+def _past(deadline: Optional[float]) -> bool:
+    """True once an absolute time.monotonic() deadline has gone by."""
+    return deadline is not None and time.monotonic() >= deadline
+
+
+# ── Selection: brief decomposition ────────────────────────────────────────────
+def _as_brief(value: Any) -> Brief:
+    """Read a bare query string as a Brief, so old callers keep working."""
+    if isinstance(value, Brief):
+        return value
+    return Brief("" if value is None else str(value), ())
+
+
+def _decompose_prompt(query: str, profile: str) -> str:
+    return """You are reading a content research brief and splitting it in two: the topic to
+search Reddit for, and any constraint the brief states about WHO posted a thread
+or WHAT KIND of thread it is.
+
+Brief: {query}
+Researcher: {profile}
+
+Return ONLY a JSON object with exactly these keys:
+
+{{
+  "topic": "...",
+  "requirements": [{{"text": "...", "kind": "require"}}]
+}}
+
+Rules:
+- "topic" is the subject matter alone, under {topic_chars} characters, with every
+  constraint about who posted removed. It is what to search for, nothing else.
+- "requirements" holds ONLY constraints about who posted the thread or what kind
+  of thread it is. Seniority, job, company stage, company size and the kind of
+  thread it is all belong here. Nothing about the subject matter belongs here.
+- Most briefs state no such constraint at all. When this one states none, return
+  an empty list. That is the normal answer and it is not a failure.
+- Never invent a constraint the brief does not state, and never turn the topic
+  into a requirement.
+- At most {max_requirements} requirements. Keep each one under
+  {requirement_chars} characters.
+- Phrase every requirement as a POSITIVE sentence a thread either meets or
+  breaks, starting with "The author" or "The thread". A brief that rules
+  something out still becomes a positive sentence, with "not" inside it: "not
+  looking for posts by beginners" becomes "The author is not a beginner."
+- "kind" is "require" when the brief asks for it and "exclude" when the brief
+  rules it out. Both are phrased positively either way; "kind" only records which
+  way the brief said it.
+- Do not include URLs, links, image syntax or markdown formatting in any string.
+- Never use an em dash or an en dash in any string you return. Use a comma or
+  start a new sentence instead.
+
+No markdown fences, no commentary. JSON only.""".format(
         query=query,
         profile=profile or "not given",
-        count=len(items),
-        listing=_triage_lines(items, start),
-        start=start,
+        topic_chars=MAX_BRIEF_TOPIC_CHARS,
+        max_requirements=MAX_REQUIREMENTS,
+        requirement_chars=MAX_REQUIREMENT_CHARS,
     )
 
 
-def _triage_output_tokens(n_items: int) -> int:
+def sanitize_brief(raw: Any, query: str) -> Brief:
+    """Coerce the decomposition call's output into a Brief. Never raises.
+
+    Every failure mode returns Brief(query, ()), which is precisely the behaviour
+    the triage had before requirements existed: the whole brief goes in as the
+    topic and no qualifier is checked. That is what makes this call safe to add.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+
+    topic = strip_markdown(raw.get("topic"))[:MAX_BRIEF_TOPIC_CHARS].strip()
+
+    requirements: List[Requirement] = []
+    entries = raw.get("requirements")
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, str):
+            entry = {"text": entry, "kind": "require"}
+        if not isinstance(entry, dict):
+            continue
+        text = strip_markdown(entry.get("text"))[:MAX_REQUIREMENT_CHARS].strip()
+        if not text:
+            continue
+        kind = str(entry.get("kind") or "").strip().lower()
+        requirements.append(Requirement(text, "exclude" if kind == "exclude" else "require"))
+        if len(requirements) >= MAX_REQUIREMENTS:
+            break
+
+    # A topic the model did not give us is not a reason to lose the requirements it
+    # did: the raw query is what the triage used as its topic before this call
+    # existed, so falling back to it changes nothing about the rating.
+    return Brief(topic or query, tuple(requirements))
+
+
+def decompose_brief(
+    query: str,
+    profile: str = "",
+    chat: Optional[Any] = None,
+) -> Brief:
+    """Split the brief into its topic and the constraints it states about authors.
+
+    One extra call per run, before the triage, with thinking off: naming what a
+    sentence asks for is reading comprehension, not deliberation.
+
+    Deliberately its own call rather than folded into discovery, because discovery
+    does not run at all for manual subreddits, so the constraints would silently
+    vanish for exactly the power users most likely to write a brief that has them.
+    Deliberately not decided per triage batch either: the same brief would be
+    re-interpreted 7 to 12 times, so two items with identical text would get
+    different verdicts according to which batch they landed in.
+
+    Fails open to Brief(query, ()) on anything at all, which reproduces today's
+    behaviour exactly. A brief that could not be read is never worth failing a run
+    over, and running without the constraints is what every run did until now.
+    """
+    text = " ".join(str(query or "").split())
+    if not text:
+        return Brief(str(query or ""), ())
+
+    chat = chat or chat_json
+    try:
+        raw, _ = chat(
+            _decompose_prompt(text, " ".join(str(profile or "").split())),
+            DECOMPOSE_MAX_TOKENS,
+            "brief-decomposition",
+            thinking=False,
+        )
+        brief = sanitize_brief(raw, query)
+    except Exception as exc:  # noqa: BLE001 - fail open, this call is never fatal
+        logger.warning(
+            "brief decomposition failed, running on the topic alone: %s", exc
+        )
+        return Brief(query, ())
+
+    logger.info(
+        "brief read as %r with %s requirement(s)", brief.topic, len(brief.requirements)
+    )
+    return brief
+
+
+# ── Selection: relevance triage ───────────────────────────────────────────────
+def _triage_flair(item: dict) -> str:
+    """"(flair: ...) " from the author's and the thread's flair, or "".
+
+    Both flairs, author first, because a "Series B | Head of Growth" author flair
+    and a "Case Study" link flair say different things and either can be the only
+    signal in the whole item about who is writing.
+    """
+    parts: List[str] = []
+    for field in ("author_flair_text", "link_flair_text"):
+        value = strip_markdown((item or {}).get(field))
+        if value and value not in parts:
+            parts.append(value)
+    text = " / ".join(parts)[:TRIAGE_FLAIR_CHARS].strip()
+    return "(flair: {}) ".format(text) if text else ""
+
+
+def _triage_preview(
+    item: dict, chars: int = TRIAGE_PREVIEW_CHARS, flair: bool = False
+) -> str:
+    """The one line of text the triage judges an item from.
+
+    Never the username. A handle carries no qualifier information and inviting a
+    model to read seniority off "growthguy99" is inviting it to invent one.
+
+    Flair is off by default so a run with no requirements sends the line it always
+    sent: flair says nothing about a topic, and the common case is meant to have no
+    regression surface at all.
+    """
+    item = item or {}
+    text = " ".join("{} {}".format(item.get("title") or "", item.get("body") or "").split())
+    if not flair:
+        return text[:chars]
+    # Truncated inside the same budget rather than added on top of it, so `chars`
+    # stays the honest per-item cap the batch arithmetic is computed from.
+    return (_triage_flair(item) + text)[:chars]
+
+
+def _triage_lines(
+    items: Sequence[dict],
+    start: int = 1,
+    preview_chars: int = TRIAGE_PREVIEW_CHARS,
+    flair: bool = False,
+) -> str:
+    lines = []
+    for position, item in enumerate(items, start):
+        kind = "comment" if (item or {}).get("kind") == "comment" else "post"
+        lines.append(
+            "{}. [{}] {}".format(
+                position, kind, _triage_preview(item, preview_chars, flair)
+            )
+        )
+    return "\n".join(lines)
+
+
+def _requirement_lines(requirements: Sequence[Requirement]) -> str:
+    return "\n".join(
+        "{}. {}".format(position, requirement.text)
+        for position, requirement in enumerate(requirements, 1)
+    )
+
+
+def _triage_prompt(
+    items: Sequence[dict],
+    query: str,
+    profile: str,
+    start: int,
+    brief: Optional[Any] = None,
+) -> str:
+    """The triage prompt, in one of two shapes.
+
+    With no requirements this returns the prompt byte for byte as it was before
+    qualifiers existed, asking for {"i", "r"} and nothing else. That is the whole
+    point of omitting "q" rather than sending an empty one: the common case keeps
+    today's prompt, today's batch size and today's call count, so it has no
+    regression surface at all.
+    """
+    brief = _as_brief(brief if brief is not None else query)
+    if not brief.requirements:
+        return (
+            "You are rating Reddit items for relevance to a research brief. "
+            "You never invent content.\n\n"
+            "Brief: {query}\n"
+            "Researcher: {profile}\n\n"
+            "Below are {count} numbered items, each a short preview of a post or comment.\n\n"
+            "{listing}\n\n"
+            'Return ONLY a JSON object: {{"ratings": [{{"i": {start}, "r": 2}}, ...]}}\n\n'
+            "Rules:\n"
+            "- Include EVERY item number shown above, exactly once.\n"
+            '- "r" is 2 (directly about the brief\'s topic), 1 (adjacent: the same '
+            "audience or a neighbouring problem, partly related, or too short to tell), "
+            "or 0 (a different audience or subject entirely, or spam).\n"
+            "- When unsure, use 1. No markdown fences, no commentary. JSON only."
+        ).format(
+            query=query,
+            profile=profile or "not given",
+            count=len(items),
+            listing=_triage_lines(items, start),
+            start=start,
+        )
+
+    count = len(brief.requirements)
+    return (
+        "You are rating Reddit items for a research brief. You never invent content.\n\n"
+        "Topic: {topic}\n"
+        "Researcher: {profile}\n\n"
+        "The brief also states {n} constraint(s) about who posted a thread or what "
+        "kind of thread it is:\n"
+        "{requirements}\n\n"
+        "Below are {count} numbered items, each a short preview of a post or comment. "
+        "Some items open with the author's or the thread's flair, which is often the "
+        "only thing an item says about who wrote it.\n\n"
+        "{listing}\n\n"
+        'Return ONLY a JSON object: {{"ratings": [{{"i": {start}, "r": 2, '
+        '"q": "{example}"}}, ...]}}\n\n'
+        "Rules:\n"
+        "- Include EVERY item number shown above, exactly once.\n"
+        '- "r" is 2 (directly about the topic above), 1 (adjacent: the same audience '
+        "or a neighbouring problem, partly related, or too short to tell), or 0 (a "
+        "different audience or subject entirely, or spam). When unsure, use 1.\n"
+        '- "q" is exactly {n} character(s), one per constraint in the order listed '
+        "above.\n"
+        '- Use "y" only when the item itself says something that meets that '
+        'constraint, "n" only when it says something that plainly breaks it, and '
+        '"u" when it does not say.\n'
+        '- Most Reddit posts never say who wrote them, so "u" is the honest answer '
+        "most of the time. Use it freely. Never guess from a writing style, a "
+        "subject, a tone or a flair that does not mention it. Never guess from a "
+        'username. "u" is the correct answer, not a failure.\n'
+        '- Judge "r" on the topic only and "q" on the constraints only. An item can '
+        'be squarely on topic and still be "n", and off topic and still be "y".\n'
+        "- No markdown fences, no commentary. JSON only. Never use an em dash or an "
+        "en dash in any string you return."
+    ).format(
+        topic=brief.topic,
+        profile=profile or "not given",
+        n=count,
+        requirements=_requirement_lines(brief.requirements),
+        count=len(items),
+        listing=_triage_lines(items, start, TRIAGE_QUALIFIER_PREVIEW_CHARS, flair=True),
+        start=start,
+        example="u" * count,
+    )
+
+
+def _triage_output_tokens(
+    n_items: int, per_item: int = TRIAGE_OUTPUT_TOKENS_PER_ITEM
+) -> int:
     """Room for one pretty-printed {"i", "r"} object per item, padded the same
-    way as _classification_output_tokens and for the same reason."""
-    return min(TRIAGE_MAX_TOKENS, TRIAGE_OUTPUT_TOKENS_PER_ITEM * max(1, n_items) + 300)
+    way as _classification_output_tokens and for the same reason. A qualifier run
+    passes the larger per-item figure, because "q" is one more line per item."""
+    return min(TRIAGE_MAX_TOKENS, per_item * max(1, n_items) + 300)
 
 
-def _triage_batch_size(query: str, profile: str) -> int:
+def _triage_shape(brief: Optional[Any]) -> Tuple[int, int]:
+    """(preview chars, output tokens per item) for this brief's triage calls.
+
+    One function so the batch arithmetic and the calls themselves can never
+    disagree about how long a preview is or how much answer to reserve for it.
+    """
+    if _as_brief(brief).requirements:
+        return TRIAGE_QUALIFIER_PREVIEW_CHARS, TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM
+    return TRIAGE_PREVIEW_CHARS, TRIAGE_OUTPUT_TOKENS_PER_ITEM
+
+
+def _triage_batch_size(query: str, profile: str, brief: Optional[Any] = None) -> int:
     """Items per triage call, sized so one call fits its share of the budget.
 
     TRIAGE_BUDGET_SHARE existed as a constant nobody consulted, which is how a
     preview-length change can silently push a batch past what the request will
     take. The arithmetic: each listed item costs its preview plus its numbering
-    and kind tag, and reserves TRIAGE_OUTPUT_TOKENS_PER_ITEM for the rating that
+    and kind tag, and reserves the per-item output tokens for the rating that
     comes back. Whatever is left of the share after the fixed instructions decides
     how many items fit, capped at TRIAGE_BATCH_SIZE so a huge budget does not
     produce one enormous call.
+
+    A qualifier brief doubles the preview and raises the output reservation, which
+    is why TRIAGE_BUDGET_SHARE went up with it: at the old share this returned
+    about 76, which is 11 sequential calls for an 800 item pool instead of 7.
     """
+    brief = _as_brief(brief if brief is not None else query)
+    preview_chars, output_per_item = _triage_shape(brief)
     allowance = int(token_budget() * TRIAGE_BUDGET_SHARE)
-    overhead = estimate_tokens(_triage_prompt([], query, profile, 1)) + 100
-    per_item = TRIAGE_PREVIEW_CHARS // CHARS_PER_TOKEN + 8 + TRIAGE_OUTPUT_TOKENS_PER_ITEM
+    overhead = estimate_tokens(_triage_prompt([], query, profile, 1, brief)) + 100
+    per_item = preview_chars // CHARS_PER_TOKEN + 8 + output_per_item
     fits = (allowance - overhead) // max(1, per_item)
     return max(1, min(TRIAGE_BATCH_SIZE, int(fits)))
 
 
-def _sanitize_ratings(raw: dict, batch_size: int, start: int) -> Dict[int, int]:
-    """Every item in the batch gets a rating; anything malformed becomes a 1.
+def _sanitize_qualifiers(raw: Any, n_requirements: int) -> str:
+    """One character per requirement, "u" for anything the model did not say.
 
-    Defaulting to 1 on every failure mode is the fail-open rule: a rating the
-    model fumbled must cost that item nothing, in either direction.
+    "u" is the fail-open value for every malformed shape: a missing "q", a null, a
+    list, an int, a string of the wrong length either way, an unrecognised letter.
+    It must never collapse into "n", because "the item does not say" and "the item
+    breaks this" are different facts and only the second one demotes.
     """
-    ratings = {position: 1 for position in range(start, start + batch_size)}
+    if n_requirements <= 0:
+        return ""
+    text = raw if isinstance(raw, str) else ""
+    out = []
+    for char in text[:n_requirements]:
+        lowered = char.lower()
+        out.append(lowered if lowered in ("y", "n", "u") else "u")
+    # Short answers are padded, long ones were truncated above.
+    out.extend("u" * (n_requirements - len(out)))
+    return "".join(out)
+
+
+def _sanitize_ratings(
+    raw: dict, batch_size: int, start: int, n_requirements: int = 0
+) -> Dict[int, Verdict]:
+    """Every item in the batch gets a verdict; anything malformed fails open.
+
+    A fumbled topic rating becomes 1 and a fumbled qualifier character becomes "u",
+    in both cases costing that item nothing in either direction. The two are
+    sanitised independently, so a malformed "q" cannot disturb a valid "r" on the
+    same entry, or the other way round.
+    """
+    default = Verdict(1, "u" * max(0, n_requirements))
+    ratings = {position: default for position in range(start, start + batch_size)}
     entries = raw.get("ratings") if isinstance(raw, dict) else None
     seen = set()
     for entry in entries if isinstance(entries, list) else []:
@@ -956,11 +1437,13 @@ def _sanitize_ratings(raw: dict, batch_size: int, start: int) -> Dict[int, int]:
             continue
         seen.add(index)
         rating = entry.get("r")
-        if isinstance(rating, bool) or not isinstance(rating, (int, float)):
-            continue
-        rating = int(rating)
-        if rating in (0, 1, 2):
-            ratings[index] = rating
+        topic = default.topic
+        if not isinstance(rating, bool) and isinstance(rating, (int, float)):
+            if int(rating) in (0, 1, 2):
+                topic = int(rating)
+        ratings[index] = Verdict(
+            topic, _sanitize_qualifiers(entry.get("q"), n_requirements)
+        )
     return ratings
 
 
@@ -969,30 +1452,51 @@ def rate_relevance(
     query: str,
     profile: str,
     chat: Optional[Any] = None,
-) -> Optional[Dict[int, int]]:
-    """Rate every candidate's relevance to the query, 0..2, keyed by 1-based
-    position in `items`.
+    brief: Optional[Any] = None,
+    soft_deadline: Optional[float] = None,
+) -> Optional[Dict[int, Verdict]]:
+    """Rate every candidate against the brief, keyed by 1-based position in `items`.
+
+    Each value is a Verdict: the 0..2 topic rating, plus one character per
+    requirement the brief states. With no requirements the qualifier string is
+    empty and the prompt, the batch size and the call count are exactly what they
+    were before requirements existed.
 
     Batches keep each call small; indices are global across batches so results
     merge by simple union. A batch that fails after chat_json's own retries is
-    dropped (its items fall back to the untriaged default of 1 in rank_items);
-    only when every batch fails does this return None, telling the caller to
-    select deterministically. Triage failure is never worth failing a run over.
+    dropped (its items fall back to the untriaged tier in rank_items); only when
+    every batch fails does this return None, telling the caller to select
+    deterministically. Triage failure is never worth failing a run over.
+
+    `soft_deadline` is an absolute time.monotonic() value. Once it has passed, no
+    new batch is issued: these calls are uninterruptible once started, there are 7
+    or more of them, and the items that never get rated already have an honest home
+    in the UNTRIAGED_WEIGHT tier. Stopping early degrades the ranking; overrunning
+    fails the whole run.
     """
     chat = chat or chat_json
-    ratings: Dict[int, int] = {}
+    brief = _as_brief(brief if brief is not None else query)
+    n_requirements = len(brief.requirements)
+    ratings: Dict[int, Verdict] = {}
     batches = 0
     failures = 0
-    batch_size = _triage_batch_size(query, profile)
+    batch_size = _triage_batch_size(query, profile, brief)
+    _, output_per_item = _triage_shape(brief)
 
     for offset in range(0, len(items), batch_size):
+        if _past(soft_deadline):
+            logger.warning(
+                "out of time after %s triage batch(es); %s items stay untriaged",
+                batches, len(items) - offset,
+            )
+            break
         batch = items[offset : offset + batch_size]
         start = offset + 1
         batches += 1
         try:
             raw, _ = chat(
-                _triage_prompt(batch, query, profile, start),
-                _triage_output_tokens(len(batch)),
+                _triage_prompt(batch, query, profile, start, brief),
+                _triage_output_tokens(len(batch), output_per_item),
                 "relevance-triage",
                 thinking=False,
             )
@@ -1003,7 +1507,7 @@ def rate_relevance(
                 start, exc,
             )
             continue
-        ratings.update(_sanitize_ratings(raw, len(batch), start))
+        ratings.update(_sanitize_ratings(raw, len(batch), start, n_requirements))
 
     if batches > 0 and failures == batches:
         return None
@@ -1849,11 +2353,32 @@ def _triage_pool(items: Sequence[dict], scores: Sequence[float], cap: int) -> Li
     return [index for _, index in paired[:cap]]
 
 
+def _empty_qualifier_counts() -> Dict[str, int]:
+    return {"confirmed": 0, "unconfirmed": 0, "violated": 0}
+
+
+def analysed_qualifier_counts(items: Sequence[dict]) -> Dict[str, int]:
+    """Count the qualifier tiers of the items that actually got analysed.
+
+    Reads the `qualifier_tier` stamp _select_sample left on each item. It has to be
+    a stamp rather than a second lookup, because relevance_key depends on the item's
+    position in its PRE-ranking pool, and ranking destroys exactly that. An item
+    with no stamp was never triaged, and an untriaged item ranks in the unconfirmed
+    tier, so that is what it counts as here too.
+    """
+    counts = _empty_qualifier_counts()
+    for item in items or []:
+        tier = (item or {}).get("qualifier_tier")
+        counts[tier if tier in counts else "unconfirmed"] += 1
+    return counts
+
+
 def _select_sample(
     posts: Sequence[dict],
     comments: Sequence[dict],
     query: str,
     profile: str,
+    soft_deadline: Optional[float] = None,
 ) -> Tuple[List[dict], List[dict], dict]:
     """Rank both pools for selection and say how the ranking was decided.
 
@@ -1861,6 +2386,10 @@ def _select_sample(
     for the strongest candidates only (a triage call over the whole pool would
     spend tokens rating items that could never win a slot anyway); Python computes
     every ranking decision from those ratings.
+
+    `soft_deadline` is an absolute time.monotonic() value, threaded down to the
+    triage so it stops issuing batches rather than overrunning the run's budget.
+    Past it, neither the decomposition call nor the triage is made at all.
     """
     posts = [item for item in posts or [] if isinstance(item, dict)]
     comments = [item for item in comments or [] if isinstance(item, dict)]
@@ -1878,10 +2407,20 @@ def _select_sample(
     pool_keys = [relevance_key("post", posts[index], index) for index in post_positions] + [
         relevance_key("comment", comments[index], index) for index in comment_positions
     ]
-    ratings = rate_relevance(pool, query, profile) if query else None
+
+    # One decomposition per run, immediately before the triage that consumes it, so
+    # every batch is judged against the same reading of the brief.
+    brief = _as_brief(query)
+    ratings = None
+    if query and not _past(soft_deadline):
+        brief = _as_brief(decompose_brief(query, profile))
+        ratings = _call(
+            rate_relevance, pool, query, profile,
+            brief=brief, soft_deadline=soft_deadline,
+        )
 
     if ratings is None:
-        relevance: Optional[Dict[Tuple[str, str], int]] = None
+        relevance: Optional[Dict[Tuple[str, str], Verdict]] = None
         selection = {
             "method": "deterministic-fallback",
             "triaged": 0,
@@ -1890,16 +2429,42 @@ def _select_sample(
     else:
         relevance = {}
         counts = {"0": 0, "1": 0, "2": 0}
+        qualifier_counts = _empty_qualifier_counts()
+        # met / violated / unknown per requirement, in the brief's own order.
+        per_requirement = [
+            {"met": 0, "violated": 0, "unknown": 0} for _ in brief.requirements
+        ]
         for position, value in ratings.items():
             if not (1 <= position <= len(pool_keys)):
                 continue
-            relevance[pool_keys[position - 1]] = value
-            counts[str(value)] += 1
+            verdict = _as_verdict(value)
+            relevance[pool_keys[position - 1]] = verdict
+            counts[str(verdict.topic)] += 1
+            tier = qualifier_tier(verdict)
+            qualifier_counts[tier] += 1
+            # The stamp survives ranking, which is the only reason the analysed
+            # sample can be counted at all (see analysed_qualifier_counts).
+            pool[position - 1]["qualifier_tier"] = tier
+            for index, char in enumerate(verdict.qualifiers[: len(per_requirement)]):
+                key = {"y": "met", "n": "violated"}.get(char, "unknown")
+                per_requirement[index][key] += 1
+
         selection = {
             "method": "relevance+engagement",
             "triaged": len(relevance),
             "relevance_counts": counts,
         }
+        if brief.requirements:
+            # Only ever written when the brief actually stated a requirement, so a
+            # topical run's selection block is the exact shape it has always been.
+            selection["method"] = "relevance+qualifiers"
+            selection["pool"] = len(pool)
+            selection["topic"] = brief.topic
+            selection["requirements"] = [
+                dict(text=requirement.text, kind=requirement.kind, **per_requirement[index])
+                for index, requirement in enumerate(brief.requirements)
+            ]
+            selection["qualifier_counts"] = qualifier_counts
 
     ranked_posts, ranked_comments = rank_items(posts, comments, relevance, now)
     return ranked_posts, ranked_comments, selection
@@ -1911,19 +2476,25 @@ def classify_sample(
     subreddits: Sequence[str],
     query: str = "",
     profile: str = "",
+    soft_deadline: Optional[float] = None,
 ) -> Tuple[List[dict], int, dict]:
     """Select the best sample, fit it to the token budget, classify it, shrink and
     retry if rejected.
 
     Returns (items, preview_chars, classification). The items list is authoritative
     from here on: every index in the classification refers to it.
+
+    `soft_deadline` reaches the selection triage, which is several uninterruptible
+    model calls and the one stage that can overrun a run's budget invisibly.
     """
     if not posts and not comments:
         raise ValueError("There was nothing to analyse in this sample.")
 
     # Ranked once, outside the refit loop: a refit changes how much of the ranking
     # is used, never the ranking itself.
-    ranked_posts, ranked_comments, selection = _select_sample(posts, comments, query, profile)
+    ranked_posts, ranked_comments, selection = _select_sample(
+        posts, comments, query, profile, soft_deadline
+    )
 
     # Local to this run on purpose. A rejection tells us this prompt was too big for
     # the provider right now, which is not a reason to shrink every other report the
@@ -1935,6 +2506,12 @@ def classify_sample(
         try:
             classification = classify_items(items, subreddits, preview_chars)
             classification["capacity_limited"] = is_capacity_limited(items, preview_chars, posts, comments)
+            # Copied rather than mutated: which items got analysed is decided per
+            # refit attempt, and a shared dict would carry the losing attempt's
+            # counts. Present only for a brief that stated a requirement.
+            if "qualifier_counts" in selection:
+                selection = dict(selection)
+                selection["qualifier_analysed"] = analysed_qualifier_counts(items)
             classification["selection"] = selection
             return items, preview_chars, classification
         except PayloadTooLarge:

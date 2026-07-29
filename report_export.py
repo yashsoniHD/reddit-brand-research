@@ -350,19 +350,47 @@ def report_markdown(bundle: dict, drafts=None) -> str:
     add("- Comments fetched: {} · analysed: {}".format(
         sample.get("comments_fetched", 0), sample.get("comments_analysed", 0)))
     selection = sample.get("selection", {})
+    requirements = selection.get("requirements") or []
     if selection.get("method") == "relevance+engagement":
         add("- Selection: the {} highest-scoring candidates were rated for relevance to "
             "your search by the model, then ranked in code by relevance, community "
             "engagement and recency, with no single community taking more than half "
             "the sample while others had items to offer.".format(selection.get("triaged", 0)))
+    elif selection.get("method") == "relevance+qualifiers":
+        add("- Selection: the {} highest-scoring candidates were rated for relevance to "
+            "your search by the model and checked against the requirements below, then "
+            "ranked in code by relevance, those requirements, community engagement and "
+            "recency, with no single community taking more than half the sample while "
+            "others had items to offer.".format(selection.get("triaged", 0)))
     elif selection.get("method") == "relevance-off":
-        add("- Selection: the relevance filter was turned off for this run, so items "
-            "were ranked in code by community engagement and recency, with no single "
-            "community taking more than half the sample while others had items to offer.")
+        if requirements:
+            add("- Selection: the relevance filter was turned off for this run, so items "
+                "were ranked in code by community engagement and recency only. Your "
+                "brief's requirements about who posted, listed below, were not applied.")
+        else:
+            add("- Selection: the relevance filter was turned off for this run, so items "
+                "were ranked in code by community engagement and recency, with no single "
+                "community taking more than half the sample while others had items to offer.")
     else:
         add("- Selection: items were ranked in code by community engagement and "
             "recency, with no single community taking more than half the sample "
             "while others had items to offer.")
+    if requirements:
+        add("- Your brief asked for more than a topic, so each rated candidate was also "
+            "checked against {}:".format("it" if len(requirements) == 1 else "these requirements"))
+        for requirement in requirements:
+            add("  - {}".format(_requirement_line(requirement)))
+        if selection.get("method") == "relevance+qualifiers":
+            add("- Threads that showed a requirement were analysed first. Threads that "
+                "contradicted one were pushed behind everything else rather than removed: "
+                "the call comes from a model reading a short preview, and a wrong call "
+                "would throw away a good thread.")
+            qualifier_analysed = selection.get("qualifier_analysed")
+            if isinstance(qualifier_analysed, dict):
+                add("- {}".format(_qualifier_analysed_line(qualifier_analysed)))
+            add("- Seniority and funding stage are whatever the author wrote about "
+                "themselves, not anything this tool verified: this is self-reported, and "
+                "the system is trusting a stranger's claim about their own company.")
     if sample.get("posts_truncated") or sample.get("comments_truncated"):
         add("- Truncation: the {} top-ranked posts and the {} top-ranked comments were analysed.".format(
             sample.get("posts_analysed", 0), sample.get("comments_analysed", 0)))
@@ -499,6 +527,44 @@ def _thousands(value) -> str:
         return "{:,}".format(int(value))
     except (TypeError, ValueError):
         return "0"
+
+
+def _requirement_line(requirement: dict) -> str:
+    """One requirement's text plus its three triage counts, phrased with
+    `kind` the same way the on-screen report does: "require" reads as
+    something the brief asked for, "exclude" as something it ruled out.
+    `text` is already a positive sentence either way (a must-not is
+    normalised to something like "The author is not a beginner or a solo
+    founder"), so it is never re-negated here. Runs through `_escape` because
+    the text originates from a model."""
+    framing = "You asked for this" if requirement.get("kind") == "require" else "You ruled this out"
+    return "{}: {} {} threads showed it, {} contradicted it, and {} did not say.".format(
+        framing,
+        _escape(requirement.get("text", "")),
+        _thousands(requirement.get("met", 0)),
+        _thousands(requirement.get("violated", 0)),
+        _thousands(requirement.get("unknown", 0)),
+    )
+
+
+def _qualifier_analysed_line(counts: dict) -> str:
+    """How the final analysed sample split on the requirements, not the whole
+    triaged pool: the number that tells a reader how much of what follows is
+    actually confirmed versus merely not contradicted."""
+    confirmed = counts.get("confirmed", 0) or 0
+    unconfirmed = counts.get("unconfirmed", 0) or 0
+    violated = counts.get("violated", 0) or 0
+    total = confirmed + unconfirmed + violated
+    tail = ""
+    if violated:
+        tail = ", and {} were kept despite contradicting a requirement because nothing " \
+            "better was available".format(_thousands(violated))
+    return (
+        "Of the {} items actually analysed, {} showed clear evidence for a requirement "
+        "and {} never said either way{}.".format(
+            _thousands(total), _thousands(confirmed), _thousands(unconfirmed), tail
+        )
+    )
 
 
 # CSV formula injection: a cell starting with any of these opens a formula in

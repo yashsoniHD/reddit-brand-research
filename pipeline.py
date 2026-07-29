@@ -60,6 +60,19 @@ DEADLINE_RESERVE_SECONDS = 60
 # buckets with nothing to report, and both are built from posts only.
 PHRASE_MIN_ITEMS = analysis.LOW_DATA_THRESHOLD
 PHRASE_MIN_POSTS = 1
+# How many items in the analysed sample have to actually meet a brief's author
+# constraints before the report stops warning about it. The same threshold the
+# product already owns for thin evidence: below LOW_DATA_THRESHOLD the report
+# already tells the reader its findings are directional, and "we found three
+# threads by funded-startup operators" is exactly that situation. The degradation
+# itself is automatic (the sample fills confirmed, then unconfirmed, then
+# backfill), so the only thing left to get right is saying so out loud.
+QUALIFIER_MIN_CONFIRMED = analysis.LOW_DATA_THRESHOLD
+_REQUIREMENTS_NOT_APPLIED = (
+    "The relevance filter was off, so this report was selected on engagement and "
+    "recency alone. Anything your brief asked for about who posted a thread, or "
+    "what kind of thread it is, was not applied."
+)
 
 _OUT_OF_TIME = (
     "This run took longer than we can keep it open. Try a shorter time range, or "
@@ -389,6 +402,46 @@ def _phrase_pool_is_enough(n_posts: int, n_items: int) -> bool:
     return n_posts >= PHRASE_MIN_POSTS and n_items >= PHRASE_MIN_ITEMS
 
 
+def _requirement_list(requirements: Sequence[dict]) -> str:
+    """The brief's own constraint sentences, run together for the middle of a notice."""
+    texts = [
+        str((requirement or {}).get("text") or "").rstrip(".")
+        for requirement in requirements or []
+    ]
+    return "; ".join(text for text in texts if text)
+
+
+def _qualifier_notice(selection: dict, items_analysed: int) -> str:
+    """A warning when barely any analysed item actually meets the brief's constraints.
+
+    Nothing is removed for breaking a constraint, so a run like this still produces
+    a full report; without this sentence the reader has no way to tell that most of
+    what they are reading is items we could not place rather than items that match.
+    Specific on purpose about why, because "we found three" reads like a bug and
+    "most Reddit posts never say who wrote them" is the actual reason.
+    """
+    selection = selection or {}
+    requirements = selection.get("requirements") or []
+    analysed = selection.get("qualifier_analysed") or {}
+    if not requirements:
+        return ""
+    confirmed = int(analysed.get("confirmed") or 0)
+    if confirmed >= QUALIFIER_MIN_CONFIRMED:
+        return ""
+    return (
+        "Only {confirmed} of the {total} threads and replies in this report say "
+        "anything that meets what you asked for about who posted ({requirements}). "
+        "Most Reddit posts never say who wrote them, so the rest are ones we could "
+        "not tell either way, and they rank behind the ones we could. Nothing was "
+        "removed for contradicting it. Seniority and company stage are whatever the "
+        "author says they are."
+    ).format(
+        confirmed=confirmed,
+        total=items_analysed,
+        requirements=_requirement_list(requirements),
+    )
+
+
 def _resolve_citations(
     indices: Sequence[int], items: Sequence[dict], comments: Sequence[dict]
 ) -> List[dict]:
@@ -713,12 +766,31 @@ def run_report(
     # triage; the selection metadata is relabelled below so the report says
     # "turned off" rather than "unavailable".
     say("Classifying the sample…")
-    items, preview_chars, classification = classify(
-        posts, comments, used, model_query if relevance_filter else "", profile
+    # Through `_call` for the deadline: the selection triage is several
+    # uninterruptible model calls, and it is the one stage that could overrun the
+    # whole budget without anything noticing. An injected fake that predates the
+    # keyword simply does not receive it.
+    items, preview_chars, classification = _call(
+        classify,
+        posts, comments, used, model_query if relevance_filter else "", profile,
+        soft_deadline=soft_deadline,
     )
     n_posts_analysed = sum(1 for item in items if item.get("kind") != "comment")
     n_comments_analysed = len(items) - n_posts_analysed
     say("Classified {} posts and {} comments…".format(n_posts_analysed, n_comments_analysed))
+
+    if relevance_filter:
+        qualifier_notice = _qualifier_notice(classification.get("selection") or {}, len(items))
+        if qualifier_notice:
+            notices.append(qualifier_notice)
+    else:
+        # Said unconditionally rather than only for a brief that carried
+        # constraints, because with the filter off no model ever read the brief, so
+        # there is nothing to condition on. A reader who turned the toggle off and
+        # wrote a plain topical brief gets one extra sentence; a reader who wrote a
+        # constraint-rich brief gets the explanation for why it was ignored, which
+        # is the failure this exists to prevent.
+        notices.append(_REQUIREMENTS_NOT_APPLIED)
 
     check("synthesis")
     say("Writing your content ideas…")

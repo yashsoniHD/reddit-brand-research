@@ -1,6 +1,12 @@
 import { Drawer } from "@/components/report/section";
 import { compact, joinQuoted, phraseDropReason, thousands } from "@/lib/format";
-import { bundleContentTypes, type Bundle, type ContentType, type FilterInfo } from "@/lib/types";
+import {
+  bundleContentTypes,
+  type Bundle,
+  type ContentType,
+  type FilterInfo,
+  type RequirementInfo,
+} from "@/lib/types";
 
 const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
   text: "text post",
@@ -35,6 +41,35 @@ function droppedFilterCopy(dropped: string[]): string {
   return dropped
     .map((phrase) => ` "${phrase}" was not used: ${phraseDropReason(phrase)}.`)
     .join("");
+}
+
+/**
+ * One requirement's text plus its three triage counts, phrased with `kind`:
+ * "require" reads as something the brief asked for, "exclude" as something it
+ * ruled out. `text` is already a positive sentence either way, so it is never
+ * re-negated here.
+ */
+function requirementCopy(requirement: RequirementInfo): string {
+  const framing = requirement.kind === "require" ? "You asked for this" : "You ruled this out";
+  return `${framing}: ${requirement.text} ${thousands(requirement.met)} threads showed it, ${thousands(requirement.violated)} contradicted it, and ${thousands(requirement.unknown)} did not say.`;
+}
+
+/**
+ * How the final analysed sample split on the requirements, not the whole
+ * triaged pool. Called out separately because it is the number that tells a
+ * reader how much of what they are about to read is actually confirmed.
+ */
+function qualifierAnalysedCopy(counts: {
+  confirmed: number;
+  unconfirmed: number;
+  violated: number;
+}): string {
+  const total = counts.confirmed + counts.unconfirmed + counts.violated;
+  const backfillNote =
+    counts.violated > 0
+      ? `, and ${thousands(counts.violated)} were kept despite contradicting a requirement because nothing better was available`
+      : "";
+  return ` Of the ${thousands(total)} items actually analysed, ${thousands(counts.confirmed)} showed clear evidence for a requirement and ${thousands(counts.unconfirmed)} never said either way${backfillNote}.`;
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -105,12 +140,57 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
         <Row label="Selection">
           {sample?.selection?.method === "relevance+engagement"
             ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`
-            : sample?.selection?.method === "relevance-off"
-              ? "The relevance filter was turned off for this run, so items were ranked in code by community engagement and recency."
-              : "Items were ranked in code by community engagement and recency; the relevance rating was unavailable for this run."}{" "}
+            : sample?.selection?.method === "relevance+qualifiers"
+              ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated) and checked against the requirements below, then ranked in code by relevance, those requirements, community engagement and recency.`
+              : sample?.selection?.method === "relevance-off"
+                ? sample?.selection?.requirements?.length
+                  ? "The relevance filter was turned off for this run, so items were ranked in code by community engagement and recency only. Your brief's requirements about who posted, below, were not applied."
+                  : "The relevance filter was turned off for this run, so items were ranked in code by community engagement and recency."
+                : "Items were ranked in code by community engagement and recency; the relevance rating was unavailable for this run."}{" "}
           No single community takes more than half the sample while others have items
           to offer.
         </Row>
+        {sample?.selection?.requirements?.length ? (
+          <Row
+            label={sample.selection.requirements.length === 1 ? "Requirement" : "Requirements"}
+          >
+            {sample.selection.method === "relevance+qualifiers" ? (
+              <>
+                <p className="m-0">
+                  Your brief asked for more than a topic, so every rated candidate was also
+                  checked against{" "}
+                  {sample.selection.requirements.length === 1 ? "it" : "each of these"}.
+                </p>
+                <ul className="m-0 mt-2 list-disc pl-4">
+                  {sample.selection.requirements.map((requirement, index) => (
+                    <li key={index}>{requirementCopy(requirement)}</li>
+                  ))}
+                </ul>
+                <p className="m-0 mt-2">
+                  Threads that showed a requirement were analysed first. Threads that
+                  contradicted one were pushed behind everything else rather than removed: the
+                  call comes from a model reading a short preview, and a wrong call would throw
+                  away a good thread.
+                  {sample.selection.qualifier_analysed
+                    ? qualifierAnalysedCopy(sample.selection.qualifier_analysed)
+                    : ""}
+                </p>
+                <p className="m-0 mt-2">
+                  Seniority and funding stage are whatever the author wrote about themselves,
+                  not anything this tool verified: this is self-reported, and the system is
+                  trusting a stranger&apos;s claim about their own company.
+                </p>
+              </>
+            ) : (
+              <p className="m-0">
+                Your brief also described who should have posted:{" "}
+                {sample.selection.requirements.map((requirement) => requirement.text).join("; ")}
+                . These requirements were not applied because the relevance filter was off for
+                this run, so the sample was ranked on community engagement and recency only.
+              </p>
+            )}
+          </Row>
+        ) : null}
         <Row label="Truncation">
           When more was fetched than the sample can hold, the top-ranked posts and
           comments are the ones analysed.

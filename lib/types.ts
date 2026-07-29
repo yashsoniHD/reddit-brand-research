@@ -18,7 +18,11 @@
  * Later additive fields, all optional: quoted phrases inside the query become
  * hard keyword filters (`Inputs.phrases`, `SampleInfo.filter`, and `author`,
  * `author_flair_text`, `link_flair_text`, `upvote_ratio`, `phrase_match` on
- * `RedditItem`). None of this bumps BUNDLE_VERSION; see `isBundleV4`.
+ * `RedditItem`). A brief can also decompose into a topic plus up to three
+ * requirements about who posted a thread (`SelectionInfo.topic`, `.pool`,
+ * `.requirements`, `.qualifier_counts`, `.qualifier_analysed`, and
+ * `qualifier_tier` on `RedditItem`). None of this bumps BUNDLE_VERSION; see
+ * `isBundleV4`.
  */
 
 export const BUNDLE_VERSION = 4;
@@ -57,6 +61,15 @@ export interface RedditItem {
    * filtering existed.
    */
   phrase_match?: boolean;
+  /**
+   * Which selection tier this item landed in when the brief carried
+   * requirements: "confirmed" met at least one and violated none, "violated"
+   * contradicted at least one, "unconfirmed" is everything else (by far the
+   * most common, since most posts never say who the author is). Optional:
+   * absent when the brief had no requirements, and on every bundle written
+   * before qualifier-aware triage existed.
+   */
+  qualifier_tier?: "confirmed" | "unconfirmed" | "violated";
 }
 
 /** Resolved server-side by `stats.citations_for`, never by the model. */
@@ -124,11 +137,34 @@ export interface Inputs {
   phrases?: string[];
 }
 
+/**
+ * One requirement decomposed from the brief, describing who should (or
+ * should not) have posted a thread, plus how the analysed sample treated it.
+ *
+ * `text` is always a positive sentence regardless of `kind`: a must-not is
+ * normalised to something like "The author is not a beginner or a solo
+ * founder", so a reader never has to mentally re-negate it. `kind` survives
+ * only so copy can say "you asked for" (require) versus "you ruled out"
+ * (exclude). `met`, `violated` and `unknown` are counts of triaged
+ * candidates, not of the final analysed sample; `unknown` is the common case,
+ * since most Reddit posts never state who the author is.
+ */
+export interface RequirementInfo {
+  text: string;
+  kind: "require" | "exclude";
+  met: number;
+  violated: number;
+  unknown: number;
+}
+
 /** How the analysed sample was chosen from the fetched pool. */
 export interface SelectionInfo {
   /**
-   * "relevance+engagement" when the triage call rated candidates;
-   * "deterministic-fallback" when selection ran on engagement and recency alone.
+   * "relevance+engagement" when the triage call rated candidates on topic
+   * only; "relevance+qualifiers" when the brief also carried requirements
+   * about who posted, so candidates were rated against those too;
+   * "deterministic-fallback" when selection ran on engagement and recency
+   * alone.
    */
   method: string;
   /** Candidates the model actually rated (0 on fallback). */
@@ -138,6 +174,32 @@ export interface SelectionInfo {
    * Optional: a deterministic-fallback run rates nothing and may omit it.
    */
   relevance_counts?: Record<"0" | "1" | "2", number>;
+  /**
+   * What the brief's topic was read as, once separated from any
+   * requirements. Optional: present only alongside `requirements`.
+   */
+  topic?: string;
+  /** Candidates considered for triage. Optional, same reasons as `topic`. */
+  pool?: number;
+  /**
+   * The brief's decomposed requirements, in the order they were asked.
+   * Optional: absent when the brief carried none, and on every bundle written
+   * before qualifier-aware triage existed.
+   */
+  requirements?: RequirementInfo[];
+  /**
+   * How every triaged candidate landed against the requirements as a whole:
+   * confirmed met at least one and violated none, violated contradicted at
+   * least one, unconfirmed is everything else. Optional, same reasons as
+   * `requirements`.
+   */
+  qualifier_counts?: { confirmed: number; unconfirmed: number; violated: number };
+  /**
+   * The same three counts, but over only the items that made the final
+   * analysed sample rather than every triaged candidate. Optional, same
+   * reasons as `requirements`.
+   */
+  qualifier_analysed?: { confirmed: number; unconfirmed: number; violated: number };
 }
 
 /**
