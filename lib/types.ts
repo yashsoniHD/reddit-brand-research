@@ -14,6 +14,11 @@
  *
  * The bundle is the single unit of state on this side too: it is what the
  * stream delivers, what history stores, and what every section renders.
+ *
+ * Later additive fields, all optional: quoted phrases inside the query become
+ * hard keyword filters (`Inputs.phrases`, `SampleInfo.filter`, and `author`,
+ * `author_flair_text`, `link_flair_text`, `upvote_ratio`, `phrase_match` on
+ * `RedditItem`). None of this bumps BUNDLE_VERSION; see `isBundleV4`.
  */
 
 export const BUNDLE_VERSION = 4;
@@ -34,6 +39,24 @@ export interface RedditItem {
   created_utc: number;
   /** YYYY-MM-DD */
   date: string;
+  /**
+   * Optional: absent on every bundle written before the archive's own
+   * author fields were captured. Never rendered; see the privacy note on
+   * `author` in the project plan, capturing it is fine, showing it is not.
+   */
+  author?: string;
+  /** Optional, same reasons as `author`. */
+  author_flair_text?: string;
+  /** Posts only. Optional, same reasons as `author`. */
+  link_flair_text?: string;
+  /** Posts only. Optional, same reasons as `author`. */
+  upvote_ratio?: number;
+  /**
+   * Whether this item matched every active phrase filter. Optional: absent
+   * when no phrases were active, and on every bundle written before phrase
+   * filtering existed.
+   */
+  phrase_match?: boolean;
 }
 
 /** Resolved server-side by `stats.citations_for`, never by the model. */
@@ -93,6 +116,12 @@ export interface Inputs {
   content_type?: ContentType;
   /** Optional: absent on bundles written before the engine recorded it. */
   discovery?: DiscoveryMode;
+  /**
+   * Quoted phrases parsed out of `query`, in the order they first appeared.
+   * Optional: absent when the query had none, and on every bundle written
+   * before phrase filtering existed.
+   */
+  phrases?: string[];
 }
 
 /** How the analysed sample was chosen from the fetched pool. */
@@ -111,6 +140,27 @@ export interface SelectionInfo {
   relevance_counts?: Record<"0" | "1" | "2", number>;
 }
 
+/**
+ * How the quoted-phrase filter played out for this run.
+ *
+ * `exact` means only threads containing every phrase were read. `loose` means
+ * too few did, so the archive-matched pool was kept and the phrase treated as
+ * a preference rather than a filter. `unfiltered` means even that came back
+ * too thin, so the filter was dropped entirely and the run covers recent
+ * activity instead.
+ */
+export interface FilterInfo {
+  phrases: string[];
+  mode: "exact" | "loose" | "unfiltered";
+  posts_matched: number;
+  comments_matched: number;
+  /** Pool size before the filter decision was made. */
+  posts_scanned: number;
+  comments_scanned: number;
+  /** Phrases refused before fetching, e.g. too short or too long. */
+  dropped: string[];
+}
+
 export interface SampleInfo {
   posts_fetched: number;
   comments_fetched: number;
@@ -122,6 +172,8 @@ export interface SampleInfo {
   low_data: boolean;
   capacity_limited: boolean;
   selection: SelectionInfo;
+  /** Present only when a quoted-phrase filter was active for this run. */
+  filter?: FilterInfo;
 }
 
 export interface Topic {
@@ -318,11 +370,17 @@ export const MAX_DRAFT_EVIDENCE = 6;
 /* ── Constants mirrored from the engine ───────────────────────────────────── */
 
 export const MIN_QUERY_CHARS = 10;
-export const MAX_QUERY_CHARS = 300;
+export const MAX_QUERY_CHARS = 500;
 export const MAX_PROFILE_CHARS = 500;
 export const TIME_WINDOWS = [7, 14, 30] as const;
 export const DEFAULT_DAYS = 30;
 export const MAX_MANUAL_SUBREDDITS = 4;
+
+/** Quoted-phrase filter limits, mirrored from `keywords.py`. */
+export const MAX_PHRASES = 3;
+export const MIN_PHRASE_CHARS = 3;
+export const MAX_PHRASE_CHARS = 60;
+export const MAX_PHRASE_WORDS = 8;
 
 /** The checkbox group, in the order it renders. None ticked means "any". */
 export const CONTENT_TYPE_CHOICES: { value: ContentType; label: string }[] = [

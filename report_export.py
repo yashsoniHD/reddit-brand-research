@@ -10,7 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from typing import List, Sequence
+from typing import Dict, List, Sequence
 
 import reddit_data
 import stats
@@ -56,7 +56,25 @@ def filename_stem(bundle: dict, kind: str = "") -> str:
 # Markdown control characters that let inline text break out of its context:
 # `|` breaks a table cell, `\n` forges a new block, and `< > [ ] (` can open a
 # link/image/HTML tag. Escaped wherever LLM- or Reddit-sourced text lands.
-_MARKDOWN_SPECIAL_CHARS = (("<", "\\<"), (">", "\\>"), ("[", "\\["), ("]", "\\]"), ("(", "\\("))
+#
+# Backslash is escaped FIRST and is load-bearing: every other entry below
+# inserts a literal backslash in front of the character it escapes, so if
+# backslash were escaped last, those just-inserted backslashes would get
+# doubled instead of the backslash that was actually in the source text. A
+# raw "\[x\]\(/evil\)" would then survive as a live `[x](/evil)` link once a
+# renderer applies its own backslash-escape rule and halves the backslashes
+# back down. Escaping backslash first means every backslash the renderer
+# sees, original or inserted, is intentional and halves back to a literal
+# character, never to a bare markdown control character.
+_MARKDOWN_SPECIAL_CHARS = (
+    ("\\", "\\\\"),
+    ("|", "\\|"),
+    ("<", "\\<"),
+    (">", "\\>"),
+    ("[", "\\["),
+    ("]", "\\]"),
+    ("(", "\\("),
+)
 _BARE_URL = re.compile(r"https?://[^\s)>\]]+")
 
 
@@ -74,24 +92,48 @@ def _escape(text) -> str:
     forge a heading or link, or get auto-linked as if it were a citation."""
     cleaned = str(text or "").replace("\n", " ").strip()
     cleaned = _defang_urls(cleaned)
-    cleaned = cleaned.replace("|", "\\|")
     for char, escaped in _MARKDOWN_SPECIAL_CHARS:
         cleaned = cleaned.replace(char, escaped)
     return cleaned
 
 
+_REDDIT_URL_PREFIXES = ("https://reddit.com/", "https://www.reddit.com/")
+# A denylist of characters illegal in a URL, deliberately not an allowlist of
+# permitted ones. Reddit permalinks carry raw Unicode, e.g.
+# /comments/x/cuánto_cobrarían_por_este_proyecto/, and an ASCII allowlist
+# tested against the 2587 real URLs in sample_report.json rejected 32 of
+# them for exactly that reason. Whitespace, the markdown link delimiters,
+# quotes, backtick, backslash and control characters are what could break out
+# of `(...)` or smuggle a second link target; everything else, Unicode
+# included, is left alone.
+_UNSAFE_IN_LINK_TARGET = re.compile(r"""[\s()<>"'`\\]|[\x00-\x1f]""")
+
+
+def _link(label, url) -> str:
+    """`[label](url)` for a real Reddit permalink, escaped plain text otherwise."""
+    text = _escape(label)
+    target = str(url or "")
+    if target.startswith(_REDDIT_URL_PREFIXES) and not _UNSAFE_IN_LINK_TARGET.search(target):
+        return "[{}]({})".format(text, target)
+    return text
+
+
 def _citation_links(citations: Sequence[dict]) -> str:
     parts = []
     for citation in citations or []:
-        label = _escape(citation.get("text", ""))[:90]
+        label = str(citation.get("text", "") or "")[:90]
         url = citation.get("url", "")
         date = citation.get("date", "")
         if url:
-            parts.append("[{}]({}) ({})".format(label, url, date))
+            parts.append("{} ({})".format(_link(label, url), date))
     return "; ".join(parts)
 
 
-def report_markdown(bundle: dict) -> str:
+def report_markdown(bundle: dict, drafts=None) -> str:
+    # `drafts` is accepted and ignored for now, so that embedding saved drafts
+    # in the export later is a one-line change at the call site rather than a
+    # signature change. Not implemented in this pass.
+    del drafts
     inputs = bundle.get("inputs", {})
     sample = bundle.get("sample", {})
     analysis = bundle.get("analysis", {})
@@ -213,8 +255,8 @@ def report_markdown(bundle: dict) -> str:
             add(_escape(topic["finding"]))
             add("")
         for citation in topic.get("citations", []):
-            add("- [{}]({}) · {} · {} upvotes".format(
-                _escape(citation.get("text", "")), citation.get("url", ""),
+            add("- {} · {} · {} upvotes".format(
+                _link(citation.get("text", ""), citation.get("url", "")),
                 citation.get("date", ""), citation.get("score", 0),
             ))
         add("")
@@ -335,12 +377,106 @@ def report_markdown(bundle: dict) -> str:
     add("- Topic volumes and sentiment percentages are computed from per-item model "
         "classifications, not estimated by the model.")
     add("- Every citation link resolves to the archived source item, not to model output.")
+    add("- Full list of every analysed post and its link: see Source threads below.")
     add("- Model: {}".format(bundle.get("model_label", "")))
     add("- Source: public Reddit data via the {}.".format(bundle.get("source", "archive")))
     add("- Generated: {}".format(bundle.get("generated_at", "")))
     add("")
 
+    # Last on purpose: the module's stated principle is that a report without
+    # its caveats is worse than no report, so the appendix goes after the
+    # methodology block rather than burying it under 150-plus entries.
+    out.extend(_source_threads_section(bundle))
+
     return "\n".join(out)
+
+
+# Above the real MAX_POSTS_ANALYSED = 150 ceiling (analysis.py), so a normal
+# run never gets truncated here. It exists as a defensive cap because
+# POST /api/export runs this builder over a client-supplied bundle with no
+# size limit of its own: without it, a hand-crafted bundle could ask for an
+# arbitrarily long appendix.
+MAX_SOURCE_THREADS = 200
+
+
+def _item_sentiments(bundle: dict) -> Dict[int, str]:
+    """Index -> sentiment label for the analysed sample, shared by the
+    appendix and posts_csv so the join lives in one place."""
+    return stats.sentiment_by_index(
+        bundle.get("analysis", {}).get("item_sentiments", []), len(bundle.get("items", []))
+    )
+
+
+def _sentiment_label(sentiments: Dict[int, str], index) -> str:
+    return SENTIMENT_TITLES.get(sentiments.get(index), "Not analysed")
+
+
+def _source_entry(index: int, item: dict, sentiment: str) -> List[str]:
+    """One numbered appendix entry: a linked title line, a metadata line, and
+    an optional quoted-body line. Bullets rather than a table row, because 150
+    rows of up to 299-character titles force horizontal scroll on GitHub and
+    an unwieldy width-constrained block in Notion and Obsidian."""
+    title = item.get("title") or "(untitled post)"
+    lines = [
+        "{}. **{}** · r/{}".format(index, _link(title, item.get("url", "")), item.get("subreddit", "")),
+        "   - {} · {} upvotes · {} comments · {}".format(
+            item.get("date", "") or "n/a",
+            _thousands(item.get("score", 0)),
+            _thousands(item.get("comments", 0)),
+            sentiment,
+        ),
+    ]
+    body = _escape(item.get("body", ""))
+    if body:
+        lines.append("   - > {}".format(body))
+    return lines
+
+
+def _source_threads_section(bundle: dict) -> List[str]:
+    """Every analysed post, in the order it was ranked, so the whole sample is
+    auditable rather than only the items that ended up cited.
+
+    Iterates `bundle["items"]` (the analysed sample), not `bundle["posts"]`
+    (the fetched pool): the pool is unbounded and already has a fitting
+    medium in posts_csv, while the appendix's own stated purpose is to match
+    the report's "posts analysed" count. Comments are skipped: they have no
+    title (reddit_data.py sets it to ""), so each entry would be a bare
+    truncated blockquote; comments_csv is the fitting medium for those.
+
+    Numbered with `enumerate(items, 1)`, so the list marker is exactly the
+    citation index `stats.citations_for` prints elsewhere in the report. This
+    depends on `analysis.select_items` placing posts first and contiguous in
+    `items`, which is what makes analysed-post indices start at 1 with no
+    gaps; verified against the bundled sample.
+    """
+    items = bundle.get("items", [])
+    sentiments = _item_sentiments(bundle)
+
+    entries: List[List[str]] = []
+    for index, item in enumerate(items, 1):
+        if item.get("kind") == "comment":
+            continue
+        if len(entries) >= MAX_SOURCE_THREADS:
+            break
+        entries.append(_source_entry(index, item, _sentiment_label(sentiments, index)))
+
+    out = ["## Source threads", ""]
+    if not entries:
+        out.append("No posts were analysed in this run.")
+        out.append("")
+        return out
+
+    out.append(
+        "Every post the analysis read, in the order it ranked them. The number is "
+        "the citation index used above, so evidence link #12 is entry 12 here. "
+        "Bodies are quoted as fetched and cut to a few hundred characters. The "
+        "full fetched pools are in the CSV exports."
+    )
+    out.append("")
+    for entry in entries:
+        out.extend(entry)
+    out.append("")
+    return out
 
 
 def _sample_line(sample: dict, kind: str) -> str:
@@ -390,9 +526,7 @@ def _csv(header: Sequence[str], rows: Sequence[Sequence]) -> str:
 
 
 def posts_csv(bundle: dict) -> str:
-    sentiments = stats.sentiment_by_index(
-        bundle.get("analysis", {}).get("item_sentiments", []), len(bundle.get("items", []))
-    )
+    sentiments = _item_sentiments(bundle)
     index_by_id = {}
     for position, item in enumerate(bundle.get("items", []), 1):
         if item.get("kind") != "comment":
@@ -407,7 +541,7 @@ def posts_csv(bundle: dict) -> str:
             post.get("date", ""),
             post.get("score", 0),
             post.get("comments", 0),
-            SENTIMENT_TITLES.get(sentiments.get(index), "Not analysed"),
+            _sentiment_label(sentiments, index),
             post.get("url", ""),
         ])
     return _csv(
@@ -416,16 +550,24 @@ def posts_csv(bundle: dict) -> str:
 
 
 def comments_csv(bundle: dict) -> str:
+    sentiments = _item_sentiments(bundle)
+    index_by_id = {}
+    for position, item in enumerate(bundle.get("items", []), 1):
+        if item.get("kind") == "comment":
+            index_by_id[item.get("id")] = position
+
     rows = []
     for comment in bundle.get("comments", []):
+        index = index_by_id.get(comment.get("id"))
         rows.append([
             comment.get("subreddit", ""),
             " ".join((comment.get("body") or "").split()),
             comment.get("date", ""),
             comment.get("score", 0),
+            _sentiment_label(sentiments, index),
             comment.get("url", ""),
         ])
-    return _csv(["subreddit", "comment", "date", "upvotes", "url"], rows)
+    return _csv(["subreddit", "comment", "date", "upvotes", "sentiment", "url"], rows)
 
 
 def ideas_csv(bundle: dict) -> str:

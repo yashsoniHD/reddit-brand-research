@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { joinQuoted, phraseDropReason } from "@/lib/format";
+import { parsePhrases } from "@/lib/keywords";
 import { checkCommunities } from "@/lib/validate";
 import {
   CONTENT_TYPE_CHOICES,
@@ -69,6 +71,30 @@ function FieldHint({ children }: { children: React.ReactNode }) {
   return (
     <p className="text-[0.8125rem] leading-relaxed text-muted-foreground">{children}</p>
   );
+}
+
+/**
+ * The query field's entire discoverability for keyword filtering: no new
+ * field exists, so this single line is the only place that says quoting a
+ * phrase changes what gets read.
+ */
+function phraseFeedback(query: string): string {
+  const { phrases, dropped } = parsePhrases(query);
+
+  if (dropped.length > 0) {
+    const [first, ...rest] = dropped;
+    const more = rest.length > 0 ? ` (${rest.length} more not used)` : "";
+    const reason = `"${first}" was not used: ${phraseDropReason(first)}.${more}`;
+    return phrases.length > 0
+      ? `Reading only threads that mention ${joinQuoted(phrases)}. ${reason}`
+      : reason;
+  }
+
+  if (phrases.length > 0) {
+    return `Reading only threads that mention ${joinQuoted(phrases)}.`;
+  }
+
+  return `Tip: put "quotes" around a phrase to read only threads that mention it.`;
 }
 
 export function QueryForm({
@@ -146,9 +172,14 @@ export function QueryForm({
           placeholder="e.g. Productivity struggles freelance designers have juggling multiple clients and deadlines"
           className="resize-y rounded-xl px-3.5 py-3 text-base leading-relaxed md:text-base"
         />
-        <p className="num self-end text-xs text-muted-foreground">
-          {values.query.length} of {MAX_QUERY_CHARS} characters
-        </p>
+        <div className="flex items-baseline justify-between gap-3">
+          <p className="text-[0.8125rem] leading-relaxed text-muted-foreground">
+            {phraseFeedback(values.query)}
+          </p>
+          <p className="num shrink-0 self-end text-xs text-muted-foreground">
+            {values.query.length} of {MAX_QUERY_CHARS} characters
+          </p>
+        </div>
       </div>
 
       <details

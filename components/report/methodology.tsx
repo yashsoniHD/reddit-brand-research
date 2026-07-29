@@ -1,6 +1,6 @@
 import { Drawer } from "@/components/report/section";
-import { compact, thousands } from "@/lib/format";
-import { bundleContentTypes, type Bundle, type ContentType } from "@/lib/types";
+import { compact, joinQuoted, phraseDropReason, thousands } from "@/lib/format";
+import { bundleContentTypes, type Bundle, type ContentType, type FilterInfo } from "@/lib/types";
 
 const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
   text: "text post",
@@ -9,6 +9,33 @@ const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
   poll: "poll",
   article: "long-form article",
 };
+
+/**
+ * Explains the quoted-phrase filter for the mode the run actually landed on.
+ * Every mode states plainly that matching is case-insensitive and whole-word,
+ * because that is the one rule a reader needs to judge whether a thread they
+ * expected to see should have matched.
+ */
+function filterCopy(filter: FilterInfo): string {
+  const phraseList = joinQuoted(filter.phrases);
+  const counts = `${thousands(filter.posts_scanned)} posts and ${thousands(filter.comments_scanned)} comments were scanned; ${thousands(filter.posts_matched)} posts and ${thousands(filter.comments_matched)} comments matched.`;
+
+  if (filter.mode === "exact") {
+    return `Only threads mentioning ${phraseList} were read. ${counts} Matching is case-insensitive and whole-word.`;
+  }
+  if (filter.mode === "loose") {
+    return `Too few threads mentioned ${phraseList} exactly to build a report on, so this run read what the archive matched on those words instead and treated the phrase as a preference rather than a hard filter. ${counts} Matching is case-insensitive and whole-word.`;
+  }
+  return `Too few recent threads mentioned ${phraseList}, so the filter was dropped and this report covers recent activity instead. Matching would have been case-insensitive and whole-word.`;
+}
+
+/** Names each refused phrase and, per phrase, why it was not used. */
+function droppedFilterCopy(dropped: string[]): string {
+  if (dropped.length === 0) return "";
+  return dropped
+    .map((phrase) => ` "${phrase}" was not used: ${phraseDropReason(phrase)}.`)
+    .join("");
+}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -69,6 +96,12 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
             ? ` Within the analysed sample: ${compact(analysed.upvotes)} upvotes and ${compact(analysed.comments)} comments.`
             : ""}
         </Row>
+        {sample?.filter ? (
+          <Row label={sample.filter.phrases.length === 1 ? "Keyword filter" : "Keyword filters"}>
+            {filterCopy(sample.filter)}
+            {droppedFilterCopy(sample.filter.dropped)}
+          </Row>
+        ) : null}
         <Row label="Selection">
           {sample?.selection?.method === "relevance+engagement"
             ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`

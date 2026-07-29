@@ -244,6 +244,90 @@ class TestExportBuilderExceptions:
         assert response.json() == {"message": "That export could not be built."}
 
 
+class TestMarkdownLinkTargets:
+    """`_link` is the one place a raw URL is allowed to become `[label](url)`.
+    A denylist of characters illegal in a URL, deliberately not an allowlist
+    of permitted ones: Reddit permalinks carry raw Unicode (see the
+    "cuánto_cobrarían" case below), and an ASCII allowlist was tested against
+    the 2587 real URLs in sample_report.json and silently downgraded 32 of
+    them to plain text."""
+
+    def test_a_breakout_permalink_renders_as_text_not_a_link(self):
+        url = "https://reddit.com/r/x/) [Free money](https://evil.example/"
+        rendered = report_export._link("Free money", url)
+        assert "](" not in rendered
+        assert "evil.example" not in rendered
+
+    def test_a_non_reddit_host_is_not_linked(self):
+        rendered = report_export._link("Click here", "https://evil.example/steal")
+        assert "](" not in rendered
+
+    def test_a_javascript_url_is_not_linked(self):
+        rendered = report_export._link("Click here", "javascript:alert(1)")
+        assert "](" not in rendered
+
+    def test_a_unicode_permalink_is_still_linked(self):
+        # The regression guard: someone re-tightening _link into an ASCII
+        # allowlist would break this exact case.
+        url = "https://reddit.com/r/x/comments/1/cuánto_cobrarían_por_este_proyecto/"
+        rendered = report_export._link("t", url)
+        assert rendered == "[t]({})".format(url)
+
+    def test_www_reddit_permalink_is_linked(self):
+        url = "https://www.reddit.com/r/x/comments/1/a/"
+        rendered = report_export._link("t", url)
+        assert rendered == "[t]({})".format(url)
+
+    def test_citation_links_routes_through_the_guard(self):
+        citations = [{"text": "Free money", "url": "https://evil.example/", "date": "2026-01-01"}]
+        rendered = report_export._citation_links(citations)
+        assert "](https://evil.example" not in rendered
+
+    def test_inline_topic_citation_line_routes_through_the_guard(self):
+        bundle = {
+            "inputs": {"query": "x"},
+            "analysis": {
+                "topics": [
+                    {
+                        "id": 1, "label": "Topic", "count": 1, "share": 100, "finding": "",
+                        "item_indices": [1],
+                        "citations": [
+                            {"text": "t", "url": "https://evil.example/", "date": "2026-01-01", "score": 1}
+                        ],
+                    }
+                ]
+            },
+        }
+        markdown = report_export.report_markdown(bundle)
+        assert "](https://evil.example" not in markdown
+
+    def test_a_source_thread_title_cannot_break_out(self):
+        item = {
+            "kind": "post", "id": "p1", "subreddit": "x", "title": "| [ ] ( ) breakout",
+            "body": "", "score": 1, "comments": 0,
+            "url": "https://reddit.com/r/x/comments/1/a/", "date": "2026-01-01",
+        }
+        bundle = {"inputs": {"query": "x"}, "items": [item], "analysis": {"item_sentiments": []}}
+        markdown = report_export.report_markdown(bundle)
+        section = markdown[markdown.index("## Source threads"):]
+        assert "\\| \\[ \\] \\(" in section
+
+    def test_a_bare_url_in_a_quoted_body_is_still_defanged(self):
+        item = {
+            "kind": "post", "id": "p1", "subreddit": "x", "title": "t",
+            "body": "check http://evil.example/x for details", "score": 1, "comments": 0,
+            "url": "https://reddit.com/r/x/comments/1/a/", "date": "2026-01-01",
+        }
+        bundle = {"inputs": {"query": "x"}, "items": [item], "analysis": {"item_sentiments": []}}
+        markdown = report_export.report_markdown(bundle)
+        assert "`http://evil.example/x`" in markdown
+        assert "[http://evil.example" not in markdown
+
+    def test_a_backslash_cannot_neutralise_the_escaping(self):
+        rendered = report_export._escape("\\[x\\]\\(/evil\\)")
+        assert "[x](/evil)" not in rendered
+
+
 class TestCsvFormulaInjectionGuard:
     def test_leading_equals_is_prefixed_with_a_quote(self):
         text = report_export._csv(["header"], [["=cmd|'/c calc'!A1"]])

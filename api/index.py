@@ -168,6 +168,7 @@ EXPORTERS = {
     "markdown": (report_export.report_markdown, "text/markdown; charset=utf-8", "md", "report"),
     "ideas-csv": (report_export.ideas_csv, "text/csv; charset=utf-8", "csv", "ideas"),
     "posts-csv": (report_export.posts_csv, "text/csv; charset=utf-8", "csv", "posts"),
+    "comments-csv": (report_export.comments_csv, "text/csv; charset=utf-8", "csv", "comments"),
 }
 
 
@@ -301,7 +302,8 @@ def _save_report(query: str, profile: str, bundle) -> Optional[str]:
 
 
 def _run_report_lines(
-    query: str, profile: str, days: int, subreddits, relevance_filter: bool, content_types=None
+    query: str, profile: str, days: int, subreddits, relevance_filter: bool, content_types=None,
+    phrases=None,
 ):
     """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
 
@@ -346,6 +348,11 @@ def _run_report_lines(
             # An engine from before the setting took several values: it can still
             # honour one, and one is what the overwhelming majority of runs pick.
             run_kwargs["content_type"] = (content_types or [None])[0]
+        if _accepts_kwarg(pipeline.run_report, "phrases"):
+            # The quoted phrases the validator found in the query. An engine that
+            # predates the keyword filter simply never sees them, and the run it
+            # does instead is the run it would have done before the feature landed.
+            run_kwargs["phrases"] = list(phrases or [])
         if _accepts_kwarg(pipeline.run_report, "cancel"):
             run_kwargs["cancel"] = cancel_event
         if _accepts_kwarg(pipeline.run_report, "deadline"):
@@ -457,6 +464,10 @@ async def post_report(request: Request):
         checked["subreddits"],
         checked["relevance_filter"],
         content_types=chosen_types,
+        # `.get(...) or []` rather than `checked["phrases"]`: an engine from before
+        # the keyword filter returns no such key, and version skew must not be a
+        # KeyError on the boundary.
+        phrases=checked.get("phrases") or [],
     )
     return StreamingResponse(generator, media_type="application/x-ndjson")
 

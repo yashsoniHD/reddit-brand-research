@@ -1,4 +1,10 @@
-import type { Bundle } from "./types";
+import {
+  MAX_PHRASES,
+  MAX_PHRASE_CHARS,
+  MAX_PHRASE_WORDS,
+  MIN_PHRASE_CHARS,
+  type Bundle,
+} from "./types";
 
 /** 12,400 */
 export function thousands(value: number | undefined | null): string {
@@ -41,6 +47,30 @@ export function truncateWords(text: string | undefined | null, limit: number): s
   // A single word longer than the limit has no boundary to fall back to.
   const body = lastSpace > limit * 0.5 ? cut.slice(0, lastSpace) : cut;
   return `${body.replace(/[,;:.\-–]+$/, "").trimEnd()}…`;
+}
+
+/**
+ * Why a quoted phrase was refused. Re-derived from the same limits
+ * `parsePhrases` applies: a dropped phrase does not carry its own reason, so
+ * anything already inside the length and word limits was dropped only
+ * because more than MAX_PHRASES were quoted.
+ */
+export function phraseDropReason(phrase: string): string {
+  if (phrase.length < MIN_PHRASE_CHARS || phrase.length > MAX_PHRASE_CHARS) {
+    return `a phrase must be between ${MIN_PHRASE_CHARS} and ${MAX_PHRASE_CHARS} characters`;
+  }
+  if (phrase.split(" ").length > MAX_PHRASE_WORDS) {
+    return `a phrase can have at most ${MAX_PHRASE_WORDS} words`;
+  }
+  return `only the first ${MAX_PHRASES} quoted phrases are used`;
+}
+
+/** `"a"`, `"a" and "b"`, or `"a", "b" and "c"`. */
+export function joinQuoted(items: string[]): string {
+  const quoted = items.map((item) => `"${item}"`);
+  if (quoted.length <= 1) return quoted.join("");
+  if (quoted.length === 2) return `${quoted[0]} and ${quoted[1]}`;
+  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
 }
 
 export const REPORT_TITLE_CHARS = 72;

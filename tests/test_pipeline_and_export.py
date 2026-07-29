@@ -152,7 +152,40 @@ class TestValidateInputs:
         assert pipeline.validate_inputs("short", "")["errors"]
 
     def test_rejects_an_overlong_query(self):
-        assert pipeline.validate_inputs("q" * 400, "")["errors"]
+        assert pipeline.validate_inputs("q" * 600, "")["errors"]
+
+    def test_a_four_hundred_character_query_is_accepted(self):
+        # The cap moved from 300 to 500 for constraint-rich briefs: a brief this
+        # long with a quoted phrase in it is the case the keyword filter exists for.
+        assert pipeline.validate_inputs("q" * 400, "")["errors"] == []
+
+    def test_a_query_one_character_over_the_cap_is_still_rejected(self):
+        errors = pipeline.validate_inputs("q" * 501, "")["errors"]
+        assert errors and "500" in errors[0]
+
+    def test_phrases_are_parsed_out_of_the_query(self):
+        result = pipeline.validate_inputs('detailed posts about "meta ads" for b2b saas', "")
+        assert result["errors"] == []
+        assert result["phrases"] == ["meta ads"]
+
+    def test_an_unquoted_query_yields_no_phrases_and_no_errors(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "")
+        assert result["phrases"] == []
+        assert result["errors"] == []
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            'detailed posts about "meta ads for b2b saas',          # unbalanced quote
+            'posts about "ab" for b2b saas teams',                   # under the char floor
+            'posts about "' + "word " * 12 + '" for b2b saas',       # over the word ceiling
+            "posts about don't quote me on b2b saas spend",          # an apostrophe
+        ],
+    )
+    def test_a_malformed_phrase_is_never_a_validation_error(self, query):
+        # The whole compatibility guarantee: a badly quoted brief behaves exactly
+        # as it did before the keyword filter existed.
+        assert pipeline.validate_inputs(query, "")["errors"] == []
 
     def test_rejects_an_overlong_profile(self):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "p" * 600)
@@ -785,6 +818,16 @@ class TestCancelAndDeadline:
         assert bundle["sample"]["selection"]["method"] == "relevance-off"
         assert bundle["sample"]["selection"]["triaged"] == 0
 
+    def test_a_bare_two_arg_lambda_still_runs_a_full_report_with_a_deadline_in_play(self):
+        # The compatibility contract: a fetcher that predates the keyword-forwarding
+        # plumbing entirely (no **kwargs, no deadline parameter) must still work
+        # when a deadline is passed down through _call.
+        bundle = build_bundle(
+            fetch_posts=lambda s, d: fake_posts(s, d, 3),
+            deadline=time.monotonic() + 3600,
+        )
+        assert bundle["sample"]["posts_fetched"] == 3
+
 
 class TestTopicFindingCoherence:
     """Guards the whole path from a mis-keyed model response to the rendered topic."""
@@ -823,24 +866,145 @@ class TestTopicFindingCoherence:
 
 
 # ── Exports ───────────────────────────────────────────────────────────────────
+def _post_item(index, subreddit="testsub", body="body text"):
+    return {
+        "kind": "post", "id": "p{}".format(index), "subreddit": subreddit,
+        "title": "Post {}".format(index), "body": body, "score": 10 + index,
+        "comments": index, "url": "https://reddit.com/r/{}/comments/t{}/".format(subreddit, index),
+        "date": "2026-07-{:02d}".format(1 + index % 28), "created_utc": 1700000000 + index,
+    }
+
+
+def _comment_item(index, subreddit="testsub"):
+    return {
+        "kind": "comment", "id": "c{}".format(index), "subreddit": subreddit,
+        "title": "", "body": "comment body {}".format(index), "score": index,
+        "url": "https://reddit.com/r/{}/comments/x/c{}/".format(subreddit, index),
+        "date": "2026-07-20", "created_utc": 1700000000 + index,
+    }
+
+
+def _appendix_bundle(items, item_sentiments=None):
+    """A minimal bundle carrying only what report_markdown needs to render the
+    Source threads appendix, so these tests do not have to run the full
+    pipeline to hand-build hundreds of items (see the 500-item cap test)."""
+    return {
+        "bundle_version": 4,
+        "inputs": {"query": "test query"},
+        "items": items,
+        "analysis": {"item_sentiments": item_sentiments or []},
+    }
+
+
 class TestExports:
     def test_markdown_contains_every_section_and_honest_counts(self):
         markdown = report_export.report_markdown(build_bundle())
         for heading in ["# Content ideas: {}".format(DEFAULT_QUERY), "## Executive summary", "## Sample",
                         "## Communities analysed", "## Trending topics", "## Sentiment",
-                        "## Pain points", "## Content ideas", "## Methodology"]:
+                        "## Pain points", "## Content ideas", "## Methodology", "## Source threads"]:
             assert heading in markdown
         assert "Posts analysed" in markdown
         assert "https://reddit.com/" in markdown
 
     def test_no_brand_mention_traces_in_the_markdown(self):
         markdown = report_export.report_markdown(build_bundle())
-        assert "brand" not in markdown.lower()
+        # Scoped to everything before the appendix: the appendix now injects
+        # real Reddit titles and bodies, which are not "our copy" and are not
+        # what this assertion is about (a real title legitimately containing
+        # "brand" must not turn this into a mystery failure).
+        body = markdown[: markdown.index("## Source threads")]
+        assert "brand" not in body.lower()
 
     def test_no_platform_traces_in_the_markdown(self):
         markdown = report_export.report_markdown(build_bundle())
-        assert "Platform" not in markdown
-        assert "LinkedIn + Instagram" not in markdown
+        body = markdown[: markdown.index("## Source threads")]
+        assert "Platform" not in body
+        assert "LinkedIn + Instagram" not in body
+
+    def test_appendix_lists_every_analysed_post_with_its_link(self):
+        items = [_post_item(1), _post_item(2), _post_item(3), _comment_item(4)]
+        markdown = report_export.report_markdown(_appendix_bundle(items))
+        section = markdown[markdown.index("## Source threads"):]
+        analysed_posts = [item for item in items if item["kind"] != "comment"]
+        assert section.count(". **[") == len(analysed_posts)
+        for item in analysed_posts:
+            assert item["url"] in section
+
+    def test_appendix_entry_numbers_match_citation_indices(self):
+        # Guards the analysis.select_items contiguity coupling: the list
+        # marker has to equal the citation index stats.citations_for uses.
+        items = [_post_item(1), _post_item(2), _post_item(3), _comment_item(4)]
+        markdown = report_export.report_markdown(_appendix_bundle(items))
+        section = markdown[markdown.index("## Source threads"):]
+        lines = section.split("\n")
+        for index, item in enumerate(items, 1):
+            if item["kind"] == "comment":
+                continue
+            marker = "{}. ".format(index)
+            line = next(candidate for candidate in lines if candidate.startswith(marker))
+            assert item["url"] in line
+
+    def test_appendix_meta_line_has_subreddit_date_engagement_and_sentiment(self):
+        item = _post_item(1)
+        bundle = _appendix_bundle([item], item_sentiments=[{"i": 1, "s": "pos"}])
+        markdown = report_export.report_markdown(bundle)
+        section = markdown[markdown.index("## Source threads"):]
+        assert "r/{}".format(item["subreddit"]) in section
+        assert item["date"] in section
+        assert "{} upvotes".format(item["score"]) in section
+        assert "{} comments".format(item["comments"]) in section
+        assert "Positive" in section
+
+    def test_appendix_quotes_body_and_skips_blockquote_when_empty(self):
+        with_body = _post_item(1, body="a genuinely useful detail")
+        without_body = _post_item(2, body="")
+        markdown = report_export.report_markdown(_appendix_bundle([with_body, without_body]))
+        section = markdown[markdown.index("## Source threads"):]
+        assert "> a genuinely useful detail" in section
+        # Exactly one blockquote line: the second entry has no body and must
+        # not render a bare "- >" line.
+        assert section.count("   - > ") == 1
+
+    def test_appendix_never_lists_analysed_comments(self):
+        comment = _comment_item(1)
+        markdown = report_export.report_markdown(_appendix_bundle([_post_item(2), comment]))
+        # Slice at the heading first: fake comment URLs can legitimately
+        # appear earlier in the document via citations, so checking the whole
+        # document would be checking the wrong thing.
+        section = markdown[markdown.index("## Source threads"):]
+        assert comment["url"] not in section
+
+    def test_appendix_comes_after_methodology(self):
+        markdown = report_export.report_markdown(_appendix_bundle([_post_item(1)]))
+        assert markdown.index("## Methodology") < markdown.index("## Source threads")
+
+    def test_methodology_points_at_the_appendix(self):
+        markdown = report_export.report_markdown(_appendix_bundle([_post_item(1)]))
+        methodology = markdown[markdown.index("## Methodology"): markdown.index("## Source threads")]
+        assert "Source threads" in methodology
+
+    def test_appendix_empty_case_when_all_items_are_comments(self):
+        markdown = report_export.report_markdown(
+            _appendix_bundle([_comment_item(1), _comment_item(2)])
+        )
+        assert "No posts were analysed in this run." in markdown
+
+    def test_appendix_never_exceeds_max_source_threads(self):
+        items = [_post_item(i) for i in range(1, 501)]
+        markdown = report_export.report_markdown(_appendix_bundle(items))
+        section = markdown[markdown.index("## Source threads"):]
+        assert section.count(". **[") == report_export.MAX_SOURCE_THREADS
+
+    def test_comments_csv_header_has_a_sentiment_column(self):
+        header = report_export.comments_csv(build_bundle()).strip().split("\n")[0]
+        assert header == "subreddit,comment,date,upvotes,sentiment,url"
+
+    def test_comments_csv_joins_sentiment_for_an_analysed_comment(self):
+        rows = report_export.comments_csv(build_bundle()).strip().split("\n")
+        # fake_classify labels items 5 and 6 (the two comments) "neg" and "pos"
+        # respectively; verified against the fake's own deterministic pattern.
+        assert rows[1].split(",")[-2] == "Negative"
+        assert rows[2].split(",")[-2] == "Positive"
 
     def test_communities_analysed_section_shows_reason_and_subscribers(self):
         bundle = build_bundle(
@@ -1000,11 +1164,20 @@ class TestSampleReport:
         assert sum(sample["stats"]["sentiment"]["percentages"].values()) == 100
 
     def test_sample_renders_through_the_normal_exporters(self, sample):
+        # The only test exercising real Reddit text through report_markdown:
+        # verifies the appendix appears and lists exactly the analysed posts,
+        # not the fetched pool.
         markdown = report_export.report_markdown(sample)
         assert "## Executive summary" in markdown
         assert "## Communities analysed" in markdown
+        assert "## Source threads" in markdown
         assert report_export.posts_csv(sample)
         assert report_export.ideas_csv(sample)
+        assert report_export.comments_csv(sample)
+
+        section = markdown[markdown.index("## Source threads"):]
+        analysed_posts = [item for item in sample["items"] if item.get("kind") != "comment"]
+        assert section.count(". **[") == len(analysed_posts)
 
 
 class TestDeadlineKeepsWhatItRead:
@@ -1070,3 +1243,76 @@ class TestDeadlineKeepsWhatItRead:
                 discover=make_discover(["one", "two"]),
                 fetch_posts=cancel_after_first, cancel=cancel,
             )
+
+
+class TestCallForwardsArbitraryKeywords:
+    """`_call` is the injection point every fetch/discovery fake goes through, so
+    it has to forward whatever keywords a follow-up wires in (today: `deadline`;
+    later: `phrases`) while still tolerating callables that predate all of it."""
+
+    def test_drops_a_keyword_the_target_does_not_declare(self):
+        def two_arg(a, b):
+            return (a, b)
+
+        assert pipeline._call(two_arg, 1, 2, phrases=["x"]) == (1, 2)
+
+    def test_forwards_a_keyword_the_target_declares(self):
+        def takes_phrases(a, b, phrases=None):
+            return phrases
+
+        assert pipeline._call(takes_phrases, 1, 2, phrases=["x", "y"]) == ["x", "y"]
+
+    def test_forwards_a_keyword_to_a_callable_declaring_var_keyword(self):
+        def catches_anything(a, b, **kwargs):
+            return kwargs
+
+        assert pipeline._call(catches_anything, 1, 2, phrases=["x"]) == {"phrases": ["x"]}
+
+    def test_omits_a_keyword_whose_value_is_none(self):
+        # Matches the pre-existing deadline behaviour: a None value never reaches
+        # the target, even when the target would otherwise accept the keyword.
+        captured = {}
+
+        def takes_deadline(a, b, deadline="sentinel"):
+            captured["deadline"] = deadline
+            return deadline
+
+        pipeline._call(takes_deadline, 1, 2, deadline=None)
+        assert captured["deadline"] == "sentinel"  # default survived; None was dropped
+
+        # A callable that cannot take the keyword at all must still be called
+        # (with just the positional args), not skipped.
+        assert pipeline._call(lambda s, d: (s, d), 1, 2, deadline=None) == (1, 2)
+
+    def test_forwards_multiple_keywords_independently(self):
+        def takes_both(a, b, deadline=None, phrases=None):
+            return (deadline, phrases)
+
+        assert pipeline._call(takes_both, 1, 2, deadline=99, phrases=["x"]) == (99, ["x"])
+
+    def test_accepts_recognises_a_functools_partial(self):
+        import functools
+
+        def three_arg(a, b, deadline=None):
+            return deadline
+
+        partial_func = functools.partial(three_arg, 1)
+        assert pipeline._accepts(partial_func, "deadline") is True
+
+    def test_accepts_recognises_a_bound_method(self):
+        class Fetcher:
+            def fetch(self, subreddit, days, deadline=None):
+                return deadline
+
+        assert pipeline._accepts(Fetcher().fetch, "deadline") is True
+
+    def test_accepts_recognises_var_keyword_regardless_of_name(self):
+        def catches_anything(a, b, **anything):
+            return anything
+
+        assert pipeline._accepts(catches_anything, "phrases") is True
+        assert pipeline._accepts(catches_anything, "deadline") is True
+
+    def test_accepts_rejects_a_bare_lambda(self):
+        assert pipeline._accepts(lambda s, d: [], "deadline") is False
+        assert pipeline._accepts(lambda s, d: [], "phrases") is False

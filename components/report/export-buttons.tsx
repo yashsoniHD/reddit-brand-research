@@ -12,6 +12,7 @@ const EXPORTS: Array<{ kind: ExportKind; label: string }> = [
   { kind: "markdown", label: "Report (.md)" },
   { kind: "ideas-csv", label: "Ideas (.csv)" },
   { kind: "posts-csv", label: "Source posts (.csv)" },
+  { kind: "comments-csv", label: "Source comments (.csv)" },
 ];
 
 const COPIED_MS = 2200;

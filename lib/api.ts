@@ -373,12 +373,13 @@ export async function draftPost(
   return { kind: "error", message: DRAFT_FAILED };
 }
 
-export type ExportKind = "markdown" | "ideas-csv" | "posts-csv";
+export type ExportKind = "markdown" | "ideas-csv" | "posts-csv" | "comments-csv";
 
 const EXPORT_PATHS: Record<ExportKind, string> = {
   markdown: "/api/export/markdown",
   "ideas-csv": "/api/export/ideas-csv",
   "posts-csv": "/api/export/posts-csv",
+  "comments-csv": "/api/export/comments-csv",
 };
 
 /**
@@ -414,5 +415,6 @@ export async function downloadExport(bundle: Bundle, kind: ExportKind): Promise<
 function fallbackName(kind: ExportKind): string {
   if (kind === "markdown") return "content-ideas.md";
   if (kind === "ideas-csv") return "content-ideas-ideas.csv";
-  return "content-ideas-posts.csv";
+  if (kind === "posts-csv") return "content-ideas-posts.csv";
+  return "content-ideas-comments.csv";
 }

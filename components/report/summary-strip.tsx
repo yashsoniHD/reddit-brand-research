@@ -1,6 +1,6 @@
-import { CalendarRange, Clock, FileText, Users } from "lucide-react";
+import { CalendarRange, Clock, FileText, Quote, Users } from "lucide-react";
 
-import { reportTitle, thousands, truncate } from "@/lib/format";
+import { joinQuoted, reportTitle, thousands, truncate } from "@/lib/format";
 import type { Bundle } from "@/lib/types";
 
 const SUMMARY_QUERY_CHARS = 90;
@@ -27,11 +27,20 @@ export function SummaryStrip({ bundle }: { bundle: Bundle }) {
   // query itself: two near-identical truncations of one sentence read as a bug.
   const generated = Boolean(String(bundle.analysis?.report_title ?? "").trim());
   const query = generated ? truncate(inputs.query, SUMMARY_QUERY_CHARS) : "";
+  // Only worth a fact once it actually shaped the sample: a dropped filter
+  // (mode "unfiltered") did not, so it stays out of this strip and lives only
+  // in the methodology drawer.
+  const filter = sample?.filter;
+  const activePhrase =
+    filter && filter.mode !== "unfiltered" && filter.phrases.length > 0
+      ? joinQuoted(filter.phrases)
+      : "";
 
   const facts = [
     { icon: Users, value: communities || "no communities" },
     { icon: CalendarRange, value: bundle.stats?.date_range?.short_label || "last 30 days" },
     { icon: FileText, value: `${thousands(sample?.items_analysed)} items read` },
+    ...(activePhrase ? [{ icon: Quote, value: `mentions ${activePhrase}` }] : []),
   ];
 
   return (

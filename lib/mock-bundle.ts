@@ -123,6 +123,12 @@ function isoDate(stamp: number): string {
   return new Date(stamp * 1000).toISOString().slice(0, 10);
 }
 
+// Demo-only phrase filter: which post and comment positions "matched" the
+// fictional "cold outreach" filter, so the render paths that key off
+// `phrase_match` and `author` have something to show without a backend.
+const PHRASE_MATCH_POST_POSITIONS = new Set([0, 6, 15]);
+const PHRASE_MATCH_COMMENT_POSITIONS = new Set([3, 16]);
+
 function makePosts(): RedditItem[] {
   return POST_SEEDS.map(([title, body], position) => {
     const created = Math.floor((WINDOW_END - position * 0.72 * DAY_MS) / 1000);
@@ -138,6 +144,10 @@ function makePosts(): RedditItem[] {
       url: `https://reddit.com/r/${subreddit}/comments/demo_p${position + 1}/`,
       created_utc: created,
       date: isoDate(created),
+      author: `demo_user_${(position % 5) + 1}`,
+      link_flair_text: position % 4 === 0 ? "Discussion" : undefined,
+      upvote_ratio: Math.round((0.99 - position * 0.01) * 100) / 100,
+      phrase_match: PHRASE_MATCH_POST_POSITIONS.has(position),
     };
   });
 }
@@ -156,6 +166,8 @@ function makeComments(): RedditItem[] {
       url: `https://reddit.com/r/${subreddit}/comments/demo_p${position + 1}/demo_c${position + 1}/`,
       created_utc: created,
       date: isoDate(created),
+      author: `demo_user_${(position % 5) + 1}`,
+      phrase_match: PHRASE_MATCH_COMMENT_POSITIONS.has(position),
     };
   });
 }
@@ -392,10 +404,11 @@ export const MOCK_BUNDLE: Bundle = {
   model_label: "Demo data (no model was called)",
   source: "Demo fixture, not the Arctic Shift archive",
   inputs: {
-    query: "How small design studios win clients without cold outreach",
+    query: 'How small design studios win clients without "cold outreach"',
     profile: "I run a two person branding studio for early stage software companies.",
     subreddits: [...SUBS],
     days: 14,
+    phrases: ["cold outreach"],
   },
   discovery: {
     communities: [
@@ -445,6 +458,15 @@ export const MOCK_BUNDLE: Bundle = {
       method: "relevance+engagement",
       triaged: 85,
       relevance_counts: { "0": 9, "1": 31, "2": 45 },
+    },
+    filter: {
+      phrases: ["cold outreach"],
+      mode: "exact",
+      posts_matched: PHRASE_MATCH_POST_POSITIONS.size,
+      comments_matched: PHRASE_MATCH_COMMENT_POSITIONS.size,
+      posts_scanned: 240,
+      comments_scanned: 610,
+      dropped: ["ok"],
     },
   },
   analysis: {

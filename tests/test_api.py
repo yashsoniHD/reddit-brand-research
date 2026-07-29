@@ -391,21 +391,41 @@ class TestExportEndpoints:
             'content-ideas-ai-tools-for-founders-2026-07-26-posts.csv"'
         )
 
-    def test_the_two_csv_exports_never_share_a_filename(self, monkeypatch):
-        """The regression this guards: both CSVs used to be built from the bare
-        stem plus ".csv", so the second download landed on top of the first."""
+    def test_comments_csv_export_uses_the_comments_builder(self, monkeypatch):
+        self._patch_exporter(
+            monkeypatch, "comments-csv", "subreddit,comment\nx,y\n", "text/csv; charset=utf-8", "csv", "comments"
+        )
+
+        response = client.post("/api/export/comments-csv", json={"bundle": self.BUNDLE})
+        assert response.status_code == 200
+        assert response.text == "subreddit,comment\nx,y\n"
+        assert response.headers["content-disposition"].endswith(
+            '-comments.csv"'
+        )
+
+    def test_the_three_csv_exports_never_share_a_filename(self, monkeypatch):
+        """The regression this guards: all three CSVs used to be built from the
+        bare stem plus ".csv", so a later download landed on top of an earlier
+        one instead of getting its own file."""
         self._patch_exporter(
             monkeypatch, "ideas-csv", "a\n", "text/csv; charset=utf-8", "csv", "ideas"
         )
         self._patch_exporter(
             monkeypatch, "posts-csv", "b\n", "text/csv; charset=utf-8", "csv", "posts"
         )
+        self._patch_exporter(
+            monkeypatch, "comments-csv", "c\n", "text/csv; charset=utf-8", "csv", "comments"
+        )
 
         ideas = client.post("/api/export/ideas-csv", json={"bundle": self.BUNDLE})
         posts = client.post("/api/export/posts-csv", json={"bundle": self.BUNDLE})
-        assert (
-            ideas.headers["content-disposition"] != posts.headers["content-disposition"]
-        )
+        comments = client.post("/api/export/comments-csv", json={"bundle": self.BUNDLE})
+        names = {
+            ideas.headers["content-disposition"],
+            posts.headers["content-disposition"],
+            comments.headers["content-disposition"],
+        }
+        assert len(names) == 3
 
     def test_unknown_export_kind_is_a_404(self):
         response = client.post("/api/export/spreadsheet", json={"bundle": self.BUNDLE})
