@@ -301,27 +301,101 @@ class Verdict(NamedTuple):
     qualifiers: str
 
 # ── Formats ───────────────────────────────────────────────────────────────────
-# The product writes for one professional feed, so there is no platform to choose and
-# nothing about a platform in the output. Naming the formats explicitly is still what
-# keeps ideas publishable: left to itself the model returns "Blog post" and
-# "Newsletter", which nobody can publish as written.
-IDEA_FORMATS = ("Text post", "Carousel (PDF)", "Poll", "Long-form article", "Video script")
+# Naming the formats explicitly is what keeps ideas publishable: left to itself the
+# model returns "Blog post" and "Newsletter", which nobody can publish as written.
+# The set spans every channel the product writes for, because a run that names no
+# channel may use any of them.
+IDEA_FORMATS = (
+    "Text post",
+    "Carousel",
+    "Poll",
+    "Long-form article",
+    "Video script",
+    "Short-form video script",
+    "Thread",
+    "Newsletter issue",
+)
 # When the user picks content types, every idea comes back in one of those formats.
-# These keys are the wire values pipeline.validate_inputs accepts.
+# These keys are the wire values pipeline.validate_inputs accepts. "video" is the
+# long-form script and "short_video" the vertical one: a YouTube walkthrough and a
+# Reel are not the same artefact, and a creator who asks for one does not want the
+# other. "issue" rather than "newsletter" so the format key cannot be confused with
+# the channel key of the same name.
 CONTENT_TYPE_FORMATS = {
     "text": "Text post",
-    "carousel": "Carousel (PDF)",
+    "carousel": "Carousel",
     "video": "Video script",
     "poll": "Poll",
     "article": "Long-form article",
+    "short_video": "Short-form video script",
+    "thread": "Thread",
+    "issue": "Newsletter issue",
 }
 # Both spellings of every format the user can ask for, so an idea the model
-# labelled "carousel" is recognised as the "Carousel (PDF)" that was requested
-# rather than coerced away from the format it already has.
+# labelled "carousel" is recognised as the "Carousel" that was requested rather
+# than coerced away from the format it already has.
 _FORMAT_ALIASES = {}
 for _key, _label in CONTENT_TYPE_FORMATS.items():
     _FORMAT_ALIASES[_key] = _label
     _FORMAT_ALIASES[_label.lower()] = _label
+# The names the model reaches for on its own. Every one of these is a format we do
+# offer under a different label, so coercing them away would throw out an idea that
+# already has the right shape.
+_FORMAT_ALIASES.update(
+    {
+        "carousel (pdf)": "Carousel",
+        "document post": "Carousel",
+        "reel": "Short-form video script",
+        "reel script": "Short-form video script",
+        "short": "Short-form video script",
+        "short video": "Short-form video script",
+        "shorts script": "Short-form video script",
+        "tiktok": "Short-form video script",
+        "tiktok script": "Short-form video script",
+        "tweet": "Text post",
+        "x post": "Text post",
+        "x thread": "Thread",
+        "twitter thread": "Thread",
+        "newsletter": "Newsletter issue",
+        "email": "Newsletter issue",
+        "article": "Long-form article",
+    }
+)
+
+# ── Channels ──────────────────────────────────────────────────────────────────
+# Where the user actually publishes. Optional: a run that names none is
+# channel-neutral, which is the default and what every report written before
+# channels existed was. Naming one narrows the formats the ideas may take and
+# changes how the drafts are written, because a caption, a spoken script and an
+# email are not the same craft.
+CHANNELS = {
+    "linkedin": "LinkedIn",
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "x": "X",
+    "youtube": "YouTube",
+    "newsletter": "Newsletter",
+}
+# The formats each channel can actually ship. A poll is a native object on LinkedIn,
+# Instagram and X and does not exist on TikTok or in an inbox; a vertical script is
+# the only thing TikTok takes.
+CHANNEL_FORMATS = {
+    "linkedin": ("text", "carousel", "poll", "article", "video"),
+    "instagram": ("carousel", "short_video", "text", "poll"),
+    "tiktok": ("short_video",),
+    "x": ("text", "thread", "poll"),
+    "youtube": ("video", "short_video"),
+    "newsletter": ("issue", "article"),
+}
+
+
+def _wanted_keys(values: Optional[Sequence[str]]) -> set:
+    """The lowercased, stripped, non-empty entries of a selection."""
+    return {
+        str(value).strip().lower()
+        for value in (values or [])
+        if str(value).strip()
+    }
 
 
 def chosen_formats(content_types: Optional[Sequence[str]]) -> List[str]:
@@ -331,20 +405,72 @@ def chosen_formats(content_types: Optional[Sequence[str]]) -> List[str]:
     layer's job, and an unrecognised type here should leave the ideas alone
     instead of pinning them to something nobody asked for.
     """
-    wanted = {
-        str(value).strip().lower()
-        for value in (content_types or [])
-        if str(value).strip()
-    }
+    wanted = _wanted_keys(content_types)
     return [
         label for key, label in CONTENT_TYPE_FORMATS.items() if key in wanted
     ]
+
+
+def channel_formats(channels: Optional[Sequence[str]]) -> List[str]:
+    """The idea-format labels the named channels can ship, in menu order.
+
+    The union rather than the intersection: someone posting to both TikTok and a
+    newsletter wants vertical scripts AND issues, not the empty set the two have
+    in common. Unknown channels are dropped for the same reason unknown content
+    types are, and no channels means no restriction.
+    """
+    wanted = _wanted_keys(channels)
+    allowed = {
+        key
+        for channel, keys in CHANNEL_FORMATS.items()
+        if channel in wanted
+        for key in keys
+    }
+    return [
+        label for key, label in CONTENT_TYPE_FORMATS.items() if key in allowed
+    ]
+
+
+def allowed_formats(
+    channels: Optional[Sequence[str]] = None,
+    content_types: Optional[Sequence[str]] = None,
+) -> Tuple[List[str], bool]:
+    """The formats an idea may take, plus whether a format pin had to be dropped.
+
+    Two independent pins can contradict each other: a shared link can carry
+    `ch=tiktok&type=poll`, and TikTok has no polls. Refusing the run would break
+    old links, and honouring the format pin would hand a TikTok creator something
+    they cannot post, so the channel wins and the caller is told the pin was
+    dropped. That flag becomes a notice on the report rather than an error.
+
+    Empty in both arguments means every format, which is the channel-neutral
+    default and what `chosen_formats` already meant on its own.
+    """
+    by_channel = channel_formats(channels)
+    by_type = chosen_formats(content_types)
+
+    if not by_channel:
+        return by_type, False
+    if not by_type:
+        return by_channel, False
+
+    both = [label for label in by_channel if label in set(by_type)]
+    if both:
+        return both, False
+    return by_channel, True
 
 # ── Draft posts ───────────────────────────────────────────────────────────────
 # Long enough to say something, short enough to survive the feed's "see more" fold.
 DRAFT_MIN_WORDS = 120
 DRAFT_MAX_WORDS = 220
+# The channel-neutral hashtag ceiling, used when no channel was named. Per-channel
+# ceilings live in CHANNEL_DRAFT_RULES: three is right for a professional feed and
+# absurd in an email.
 DRAFT_MAX_HASHTAGS = 3
+# Every poll UI that exists refuses more than four options, so a fifth one is not a
+# stylistic slip, it is a draft that cannot be posted as written. Channels with no
+# poll object at all carry None in CHANNEL_DRAFT_RULES and never get offered one.
+DRAFT_MAX_POLL_OPTIONS = 4
 # Enough evidence to give the post real substance, capped because the draft should
 # read as one person's point of view, not a literature review.
 DRAFT_MAX_EVIDENCE = 6
@@ -354,7 +480,7 @@ DRAFT_EVIDENCE_CHARS = 600
 # A carousel, a script and an article are not the same artefact as a text post, so
 # the draft call writes each one in its own shape and to its own length.
 DRAFT_FORMAT_RULES = {
-    "Carousel (PDF)": (
+    "Carousel": (
         "Write this as slide-by-slide carousel copy. Start every slide on its own "
         'line with "Slide 1:", "Slide 2:" and so on, 6 to 9 slides in total. Slide 1 '
         "is the hook and nothing else. Each middle slide carries one idea in at most "
@@ -380,16 +506,153 @@ DRAFT_FORMAT_RULES = {
         "Write this as a plain feed post: short paragraphs of one to three sentences, "
         "separated by a blank line, because a wall of text does not get read."
     ),
+    "Short-form video script": (
+        "Write this as a vertical short-form script. Open with the hook as the first "
+        'spoken words, then label each beat on its own line ("Beat 1:", "Beat 2:" and '
+        "so on), 3 to 5 beats. Every beat is what is said out loud, never a camera "
+        "direction. The first beat has to earn the next three seconds, so put the "
+        "most surprising thing in it. End on a spoken question."
+    ),
+    "Thread": (
+        "Write this as a thread. Start every post on its own line with \"Post 1:\", "
+        '"Post 2:" and so on, 5 to 9 posts in total. Post 1 is the hook and has to '
+        "stand alone, because it is the only one most people see. Keep every post "
+        "under 280 characters including its label. No post may be a fragment that "
+        "only makes sense after the previous one. The last post asks for a reply."
+    ),
+    "Newsletter issue": (
+        'Write this as an email to a list. First line is "Subject:" followed by a '
+        'subject line of at most 60 characters. Second line is "Preview:" followed by '
+        "one sentence that complements the subject rather than repeating it. Then the "
+        "body: open with the hook, then 3 to 5 sections, each introduced by a plain "
+        "one-line heading with no markdown or numbering. Close by inviting a reply to "
+        "the email."
+    ),
 }
 # (minimum, maximum) words per format. A carousel and a script are counted in
 # slides and beats, so their word bands are wider than a single text post's.
 DRAFT_FORMAT_WORDS = {
-    "Carousel (PDF)": (110, 260),
+    "Carousel": (110, 260),
     "Video script": (150, 300),
     "Long-form article": (350, 650),
     "Poll": (80, 180),
     "Text post": (DRAFT_MIN_WORDS, DRAFT_MAX_WORDS),
+    # Five beats of speech is a 45-second video; more than this is a different format.
+    "Short-form video script": (60, 150),
+    # Nine posts at 280 characters is roughly 350 words of hard ceiling.
+    "Thread": (150, 350),
+    "Newsletter issue": (300, 600),
 }
+# Per-channel drafting rules. `hashtags` is the ceiling, `poll_options` is the
+# platform's own cap (None where the channel has no poll object at all, in which
+# case the draft prompt never offers one), and `voice` is the one line that tells
+# the model what it is actually writing. Every value here is a property of the
+# channel's product surface, not a style preference.
+CHANNEL_DRAFT_RULES = {
+    "linkedin": {
+        "artefact": "a LinkedIn post",
+        "hashtags": 3,
+        "poll_options": 4,
+        "voice": (
+            "This is a professional feed. Write as a practitioner talking to peers "
+            "who do the same work, not as a brand addressing a market."
+        ),
+    },
+    "instagram": {
+        "artefact": "an Instagram post",
+        "hashtags": 10,
+        "poll_options": 4,
+        "voice": (
+            "This is a caption under an image or a carousel. Only the first line and "
+            "a half survive the truncation, so the hook has to land there. Warm and "
+            "direct, spoken to one person rather than an audience."
+        ),
+    },
+    "tiktok": {
+        "artefact": "a TikTok video",
+        "hashtags": 5,
+        "poll_options": None,
+        "voice": (
+            "This is spoken to camera. The first three seconds decide whether anyone "
+            "stays, so lead with the surprise, not the setup. Contractions, short "
+            "sentences, no written-word phrasing nobody says out loud."
+        ),
+    },
+    "x": {
+        "artefact": "a post for X",
+        "hashtags": 1,
+        "poll_options": 4,
+        "voice": (
+            "This is X. Compression is the whole craft: every sentence earns its "
+            "characters or goes. Hashtags read as spam here, so use at most one and "
+            "preferably none."
+        ),
+    },
+    "youtube": {
+        "artefact": "a YouTube video",
+        "hashtags": 3,
+        "poll_options": None,
+        "voice": (
+            "This is a spoken script. Open on the payoff so nobody clicks away, then "
+            "earn each of the next thirty seconds. Write what is said, never a "
+            "camera direction or a production note."
+        ),
+    },
+    "newsletter": {
+        "artefact": "a newsletter email",
+        "hashtags": 0,
+        "poll_options": None,
+        "voice": (
+            "This is an email to people who chose to hear from you, so it can be "
+            "longer and quieter than a feed post. No hashtags: they mean nothing in "
+            "an inbox."
+        ),
+    },
+}
+
+
+def channel_label(channel: Optional[str]) -> str:
+    """The display name of a channel, or "" for anything we do not offer."""
+    return CHANNELS.get(str(channel or "").strip().lower(), "")
+
+
+def channel_labels(channels: Optional[Sequence[str]]) -> List[str]:
+    """The display names of the named channels, in menu order."""
+    wanted = _wanted_keys(channels)
+    return [label for key, label in CHANNELS.items() if key in wanted]
+
+
+def join_labels(labels: Sequence[str]) -> str:
+    """"LinkedIn, Instagram and X". Prose for a sentence, not a machine-read list.
+
+    Public because the pipeline's notices and the Markdown export need the same
+    phrasing the prompts use, and three different comma conventions for the same
+    list of channels would read as three different features.
+    """
+    names = [label for label in labels if label]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return "{} and {}".format(", ".join(names[:-1]), names[-1])
+
+
+def draft_rules(channel: Optional[str]) -> dict:
+    """The drafting rules for a channel, falling back to channel-neutral ones.
+
+    The fallback is what every draft written before channels existed got: three
+    hashtags, four poll options, and no instruction about voice beyond the format's
+    own. A run that named no channel should not suddenly start writing for one.
+    """
+    return CHANNEL_DRAFT_RULES.get(
+        str(channel or "").strip().lower(),
+        {
+            "artefact": "a social post",
+            "hashtags": DRAFT_MAX_HASHTAGS,
+            "poll_options": DRAFT_MAX_POLL_OPTIONS,
+            "voice": "",
+        },
+    )
 # Thinking stays on for drafting, so this covers the model's reasoning as well as a
 # 220-word post.
 DRAFT_MAX_TOKENS = 8000
@@ -2022,6 +2285,7 @@ def sanitize_synthesis(
     query: str = "",
     content_types: Optional[Sequence[str]] = None,
     profile: str = "",
+    channels: Optional[Sequence[str]] = None,
 ) -> dict:
     """Coerce call 2's output; drop anything that cannot be rendered honestly.
 
@@ -2034,21 +2298,22 @@ def sanitize_synthesis(
     """
     raw = raw if isinstance(raw, dict) else {}
     descriptions = _match_topic_descriptions(raw.get("topic_descriptions"), topics)
-    # When the user asked for particular content types, those are the formats,
-    # whatever the model wrote in the field. Nothing else in the report would
-    # honour a stray "Poll" among fourteen carousels. An idea outside the set
-    # goes to the chosen format used least so far, which both keeps the promise
-    # and pulls the spread back towards even.
-    allowed_formats = chosen_formats(content_types)
-    format_counts = {label: 0 for label in allowed_formats}
+    # When the run named channels or content types, those are the formats, whatever
+    # the model wrote in the field. Nothing else in the report would honour a stray
+    # "Poll" among fourteen carousels, and a poll handed to a TikTok creator is not
+    # something they can post at all. An idea outside the set goes to the allowed
+    # format used least so far, which both keeps the promise and pulls the spread
+    # back towards even.
+    permitted, _dropped_pin = allowed_formats(channels, content_types)
+    format_counts = {label: 0 for label in permitted}
 
     def pinned_format(value: str) -> str:
-        if not allowed_formats:
+        if not permitted:
             return value
         label = _FORMAT_ALIASES.get(value.strip().lower(), "")
         if label not in format_counts:
             label = min(
-                allowed_formats, key=lambda name: (format_counts[name], allowed_formats.index(name))
+                permitted, key=lambda name: (format_counts[name], permitted.index(name))
             )
         format_counts[label] += 1
         return label
@@ -2206,7 +2471,7 @@ def _synthesis_listing_indices(
 
 
 _HOOK_RULES = """- "hook" is the literal first line of the post or script, at most {max_hook}
-  characters, written to stop a professional feed scroll. Not a description of the
+  characters, written to stop {scroll}. Not a description of the
   hook, the words themselves. Use the community's own language, never "In today's post".
 - Every hook must contain at least one of these three things: a specific number, a
   short phrase quoted from the evidence, or a concrete named situation. A hook with
@@ -2260,6 +2525,7 @@ def _synthesis_prompt(
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
     content_types: Optional[Sequence[str]] = None,
+    channels: Optional[Sequence[str]] = None,
 ) -> str:
     topic_lines = []
     for topic in topics:
@@ -2289,19 +2555,19 @@ def _synthesis_prompt(
     if profile:
         profile_line = "\nThey describe themselves as: {}\n".format(profile)
 
-    allowed_formats = chosen_formats(content_types)
-    if len(allowed_formats) == 1:
+    permitted, _dropped_pin = allowed_formats(channels, content_types)
+    if len(permitted) == 1:
         format_rule = (
-            '- "format" must be exactly "{}" for EVERY idea. They asked for that one '
-            "format, so write every idea to work in it.".format(allowed_formats[0])
+            '- "format" must be exactly "{}" for EVERY idea. That is the one format '
+            "this run is for, so write every idea to work in it.".format(permitted[0])
         )
-    elif allowed_formats:
+    elif permitted:
         format_rule = (
-            '- "format" must be exactly one of these {n} labels: {labels}. They asked '
-            "for those formats and no others, so every idea has to work in one of "
+            '- "format" must be exactly one of these {n} labels: {labels}. Those are '
+            "the only formats this run is for, so every idea has to work in one of "
             "them. Spread the ideas roughly evenly across the {n} formats rather than "
             "writing most of them in one, and pick the format that suits each "
-            "idea.".format(n=len(allowed_formats), labels=", ".join(allowed_formats))
+            "idea.".format(n=len(permitted), labels=", ".join(permitted))
         )
     else:
         format_rule = '- "format" must be exactly one of these: {}'.format(
@@ -2312,10 +2578,22 @@ def _synthesis_prompt(
     if profile:
         own_brand = "their own product, brand or service"
 
-    return """You are a content strategist for someone growing an audience on LinkedIn.
+    # Where they publish, when they said. A channel changes what "native" means, so
+    # the model is told the places rather than left to assume one.
+    labels = channel_labels(channels)
+    channel_line = ""
+    if labels:
+        channel_line = (
+            "\nThey publish on: {}. Every idea has to work natively there, in the "
+            "shapes and the register those places actually reward.\n".format(
+                join_labels(labels)
+            )
+        )
+
+    return """You are a content strategist for a creator growing an audience.
 
 They are researching: {query}
-{profile_line}
+{profile_line}{channel_line}
 The research covers {communities} over {n} recent items (posts and comments) from
 those communities. A previous pass grouped them into these topics:
 
@@ -2376,6 +2654,7 @@ Rules:
 No markdown fences, no commentary. JSON only.""".format(
         query=query,
         profile_line=profile_line,
+        channel_line=channel_line,
         communities=", ".join("r/{}".format(name) for name in subreddits),
         n=len(items),
         topics="\n".join(topic_lines) or "  (none identified)",
@@ -2385,7 +2664,14 @@ No markdown fences, no commentary. JSON only.""".format(
         min_ideas=MIN_CONTENT_IDEAS,
         max_ideas=MAX_CONTENT_IDEAS,
         max_title=MAX_REPORT_TITLE_CHARS,
-        hook_rules=_HOOK_RULES.format(max_hook=MAX_HOOK_CHARS),
+        hook_rules=_HOOK_RULES.format(
+            max_hook=MAX_HOOK_CHARS,
+            scroll=(
+                "a scroll on {}".format(join_labels(labels))
+                if labels
+                else "a feed scroll"
+            ),
+        ),
         format_rule=format_rule,
         own_brand=own_brand,
     )
@@ -2675,16 +2961,20 @@ def synthesize(
     subreddits: Sequence[str],
     preview_chars: int = BODY_PREVIEW_CHARS,
     content_types: Optional[Sequence[str]] = None,
+    channels: Optional[Sequence[str]] = None,
 ) -> dict:
     """Call 2: turn the labels into publishable content ideas with evidence."""
     logger.info(
-        "synthesising ideas for %r (content types: %s)",
-        query, ", ".join(content_types or []) or "any",
+        "synthesising ideas for %r (content types: %s, channels: %s)",
+        query,
+        ", ".join(content_types or []) or "any",
+        ", ".join(channels or []) or "any",
     )
     try:
         raw, model = _chat_json(
             _synthesis_prompt(
-                items, topics, query, profile, subreddits, preview_chars, content_types
+                items, topics, query, profile, subreddits, preview_chars, content_types,
+                channels,
             ),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
@@ -2695,11 +2985,15 @@ def synthesize(
         # was rejected for what we sent, and cutting the model's room to answer would
         # trade a rejection for a truncated, unparseable one.
         raw, model = _chat_json(
-            _synthesis_prompt(items, topics, query, profile, subreddits, 90, content_types),
+            _synthesis_prompt(
+                items, topics, query, profile, subreddits, 90, content_types, channels
+            ),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
         )
-    result = sanitize_synthesis(raw, len(items), topics, query, content_types, profile)
+    result = sanitize_synthesis(
+        raw, len(items), topics, query, content_types, profile, channels
+    )
     result["model"] = model
     matched = len(result["topic_descriptions"])
     if topics and matched < len(topics):
@@ -2729,12 +3023,16 @@ def _sanitize_post_line(line: str) -> str:
     return strip_markdown(_LIST_MARKER_PATTERN.sub("", line))
 
 
-def _cap_hashtags(lines: List[str]) -> List[str]:
+def _cap_hashtags(lines: List[str], maximum: int = DRAFT_MAX_HASHTAGS) -> List[str]:
     """Trim a trailing hashtag line to the agreed maximum.
 
     Models reliably overshoot hashtags, and a wall of twelve of them is the clearest
     possible signal that a post was machine-written. Only a line that is purely
     hashtags is touched, so a hashtag used mid-sentence is left alone.
+
+    `maximum` comes from the channel: ten is normal under an Instagram carousel and
+    ten in an email is nonsense. Zero drops the line entirely rather than leaving an
+    empty one behind.
     """
     for position in range(len(lines) - 1, -1, -1):
         line = lines[position]
@@ -2742,14 +3040,17 @@ def _cap_hashtags(lines: List[str]) -> List[str]:
             continue
         if _HASHTAG_LINE_PATTERN.match(line):
             tags = line.split()
-            if len(tags) > DRAFT_MAX_HASHTAGS:
-                logger.info("trimmed %s hashtags to %s", len(tags), DRAFT_MAX_HASHTAGS)
-                lines[position] = " ".join(tags[:DRAFT_MAX_HASHTAGS])
+            if len(tags) > maximum:
+                logger.info("trimmed %s hashtags to %s", len(tags), maximum)
+                if maximum <= 0:
+                    del lines[position]
+                else:
+                    lines[position] = " ".join(tags[:maximum])
         break
     return lines
 
 
-def sanitize_post(value: Any) -> str:
+def sanitize_post(value: Any, max_hashtags: int = DRAFT_MAX_HASHTAGS) -> str:
     """Clean a draft without destroying its shape.
 
     `strip_markdown` flattens all whitespace, which is right for a one-line field and
@@ -2757,6 +3058,9 @@ def sanitize_post(value: Any) -> str:
     readable in a feed. So it is applied per line, and the line structure is rebuilt
     around it. Runs of blank lines collapse to one, because two blank lines look like
     a mistake rather than a pause.
+
+    `max_hashtags` defaults to the channel-neutral ceiling so every existing caller
+    keeps its behaviour.
     """
     raw = "" if value is None else str(value)
     lines = [_sanitize_post_line(line) for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
@@ -2766,19 +3070,19 @@ def sanitize_post(value: Any) -> str:
         if not line and (not kept or not kept[-1]):
             continue
         kept.append(line)
+
+    # Capped before the trailing blanks are trimmed, not after: a zero cap deletes
+    # the hashtag line outright, and the blank line that separated it from the post
+    # would otherwise survive as a trailing newline.
+    kept = _cap_hashtags(kept, max_hashtags)
     while kept and not kept[-1]:
         kept.pop()
 
-    return "\n".join(_cap_hashtags(kept))
+    return "\n".join(kept)
 
 
-# LinkedIn's own poll UI refuses more than four options, so a fifth one is not a
-# stylistic slip, it is a draft that cannot be posted as written.
-DRAFT_MAX_POLL_OPTIONS = 4
-
-
-def _cap_poll_options(post: str) -> str:
-    """Drop any "Option:" line past the fourth so a poll draft stays postable.
+def _cap_poll_options(post: str, maximum: int = DRAFT_MAX_POLL_OPTIONS) -> str:
+    """Drop any "Option:" line past `maximum` so a poll draft stays postable.
 
     The prompt asks for two to four options, but the model sometimes overshoots.
     Non-option lines and the order of everything kept are left untouched.
@@ -2789,7 +3093,7 @@ def _cap_poll_options(post: str) -> str:
     for line in lines:
         if line.startswith("Option:"):
             options_seen += 1
-            if options_seen > DRAFT_MAX_POLL_OPTIONS:
+            if options_seen > maximum:
                 continue
         kept.append(line)
     return "\n".join(kept)
@@ -2810,20 +3114,33 @@ def _draft_format(idea: dict) -> str:
     for label in DRAFT_FORMAT_RULES:
         if label.lower() == wanted:
             return label
-    # A partial match covers "Carousel" for "Carousel (PDF)" and similar near
-    # misses; anything else is written as a plain feed post.
-    for label in DRAFT_FORMAT_RULES:
+    # The alias map is the same one the synthesis sanitiser trusts, so a draft and
+    # the idea it came from resolve "reel" or "carousel (pdf)" identically.
+    aliased = _FORMAT_ALIASES.get(wanted)
+    if aliased in DRAFT_FORMAT_RULES:
+        return aliased
+    # A partial match covers the near misses the alias map does not list by name.
+    # Longest label first, so "short-form video script" is not swallowed by the
+    # shorter "video script" it contains. Anything left is a plain feed post.
+    for label in sorted(DRAFT_FORMAT_RULES, key=len, reverse=True):
         head = label.split(" (")[0].lower()
         if wanted and (wanted.startswith(head) or head.startswith(wanted)):
             return label
     return "Text post"
 
 
-def _draft_prompt(idea: dict, evidence: Sequence[Any], query: str, profile: str) -> str:
+def _draft_prompt(
+    idea: dict,
+    evidence: Sequence[Any],
+    query: str,
+    profile: str,
+    channel: Optional[str] = None,
+) -> str:
     idea = idea if isinstance(idea, dict) else {}
     excerpts = _evidence_lines(evidence)
     fmt = _draft_format(idea)
     min_words, max_words = DRAFT_FORMAT_WORDS[fmt]
+    rules = draft_rules(channel)
 
     context = []
     if query:
@@ -2844,9 +3161,9 @@ def _draft_prompt(idea: dict, evidence: Sequence[Any], query: str, profile: str)
         if value:
             brief.append("  {}: {}".format(caption, value))
 
-    return """You are ghostwriting a LinkedIn post for the person described below. You
+    return """You are ghostwriting {a_post} for the person described below. You
 write the way a practitioner talks: specific, plain, and worth someone's time.
-
+{voice}
 {context}
 
 Write the post for this idea:
@@ -2883,7 +3200,7 @@ Rules for "post":
   "most people", no "studies show".
 - End with one line that invites a reply, phrased as a genuine question rather than
   "What do you think?".
-- Then at most {max_hashtags} hashtags on the final line. Zero is fine.
+{hashtag_rule}
 - Plain text only. No markdown, no bold, no bullet characters, no headings, no links,
   no URLs, no emoji.
 - Never use an em dash or an en dash. Use a comma or start a new sentence instead.
@@ -2891,42 +3208,67 @@ Rules for "post":
   This is the author speaking from their own experience.
 
 No markdown fences, no commentary. JSON only.""".format(
+        a_post=rules.get("artefact") or "a social post",
+        voice="\n{}\n".format(rules["voice"]) if rules.get("voice") else "",
         context=context_block or "  (no extra context given)",
         brief="\n".join(brief) or "  (no idea details given)",
         excerpts=excerpts or "  (no excerpts available)",
         format_rule=DRAFT_FORMAT_RULES[fmt],
         min_words=min_words,
         max_words=max_words,
-        max_hashtags=DRAFT_MAX_HASHTAGS,
+        hashtag_rule=(
+            "- No hashtags at all."
+            if not rules["hashtags"]
+            else "- Then at most {} hashtags on the final line. Zero is "
+            "fine.".format(rules["hashtags"])
+        ),
     )
 
 
 def draft_post(
-    idea: dict, evidence: Sequence[Any] = (), query: str = "", profile: str = ""
+    idea: dict,
+    evidence: Sequence[Any] = (),
+    query: str = "",
+    profile: str = "",
+    channel: Optional[str] = None,
 ) -> dict:
     """Turn one content idea into a post the user can publish as written.
 
     Returns {"post": str}. Thinking stays on: this is the one call whose whole output
     is prose a person will put their name on, so it is worth the extra seconds.
 
+    `channel` decides the voice, the hashtag ceiling and the poll cap. An unknown one
+    or none at all falls back to the channel-neutral rules, which is what every draft
+    written before channels existed got.
+
     Raises ValueError with a user-ready sentence, like the other public calls, so the
     caller can show it without translating anything.
     """
-    logger.info("drafting a post for %r", strip_markdown((idea or {}).get("title"))[:60])
+    logger.info(
+        "drafting a %s post for %r",
+        channel_label(channel) or "channel-neutral",
+        strip_markdown((idea or {}).get("title"))[:60],
+    )
+    rules = draft_rules(channel)
     raw, model = _chat_json(
-        _draft_prompt(idea or {}, evidence, query, profile), DRAFT_MAX_TOKENS, "draft"
+        _draft_prompt(idea or {}, evidence, query, profile, channel),
+        DRAFT_MAX_TOKENS,
+        "draft",
     )
 
-    post = sanitize_post(raw.get("post"))
+    post = sanitize_post(raw.get("post"), rules["hashtags"])
     if not post:
         logger.error("draft came back with no usable text")
         raise ValueError(_DRAFT_FAILED)
 
     fmt = _draft_format(idea or {})
     if fmt == "Poll":
-        capped = _cap_poll_options(post)
+        # A channel with no poll object never gets offered the format, so the neutral
+        # cap is the sensible floor rather than a reason to skip the trim.
+        maximum = rules["poll_options"] or DRAFT_MAX_POLL_OPTIONS
+        capped = _cap_poll_options(post, maximum)
         if capped != post:
-            logger.info("trimmed a poll draft down to %s options", DRAFT_MAX_POLL_OPTIONS)
+            logger.info("trimmed a poll draft down to %s options", maximum)
             post = capped
 
     words = len(post.split())

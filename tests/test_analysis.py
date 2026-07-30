@@ -505,9 +505,35 @@ class TestSynthesisPrompt:
         prompt = analysis._synthesis_prompt([], [], "skincare routines for oily skin", "", ["x"])
         assert "skincare routines for oily skin" in prompt
 
-    def test_prompt_targets_linkedin_implicitly(self):
+    def test_the_prompt_names_no_channel_when_the_run_named_none(self):
+        # The product used to write for LinkedIn implicitly. A channel-neutral run
+        # must not name a channel at all, or every idea gets shaped for a place the
+        # user never chose.
         prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
-        assert "LinkedIn" in prompt
+        assert "They publish on" not in prompt
+        assert "a creator growing an audience" in prompt
+        assert "stop a feed scroll" in prompt
+        # Deliberately not a loop over every label. Two of them are substrings of
+        # text the prompt legitimately contains: "X" appears in the hook rules'
+        # own banned examples ("Struggling with X? Here is how."), and
+        # "Newsletter" inside the format label "Newsletter issue". "LinkedIn" is
+        # the one that actually regressed here, and it collides with nothing.
+        assert "LinkedIn" not in prompt
+
+    def test_the_prompt_names_the_channels_the_run_asked_for(self):
+        prompt = analysis._synthesis_prompt(
+            [], [], "q", "", ["x"], channels=["instagram", "tiktok"]
+        )
+        assert "They publish on: Instagram and TikTok." in prompt
+        # And the hook rule stops talking about a generic feed.
+        assert "stop a scroll on Instagram and TikTok" in prompt
+        assert "LinkedIn" not in prompt
+
+    def test_a_channel_narrows_the_format_menu_to_what_it_can_ship(self):
+        prompt = analysis._synthesis_prompt([], [], "q", "", ["x"], channels=["tiktok"])
+        assert '"Short-form video script" for EVERY idea' in prompt
+        for absent in ("Poll", "Carousel", "Long-form article"):
+            assert absent not in prompt
 
     def test_prompt_lists_the_flat_format_menu(self):
         prompt = analysis._synthesis_prompt([], [], "q", "", ["x"])
@@ -554,7 +580,7 @@ class TestContentType:
         prompt = analysis._synthesis_prompt(
             [], [], "q", "", ["x"], content_types=["carousel"]
         )
-        assert '"Carousel (PDF)" for EVERY idea' in prompt
+        assert '"Carousel" for EVERY idea' in prompt
         assert "Video script" not in prompt
 
     def test_no_content_type_keeps_the_full_format_menu(self):
@@ -566,7 +592,7 @@ class TestContentType:
         prompt = analysis._synthesis_prompt(
             [], [], "q", "", ["x"], content_types=["poll", "carousel"]
         )
-        assert "Carousel (PDF)" in prompt and "Poll" in prompt
+        assert "Carousel" in prompt and "Poll" in prompt
         assert "roughly evenly" in prompt
         # The formats nobody asked for are not on the menu at all.
         assert "Video script" not in prompt and "Long-form article" not in prompt
@@ -582,12 +608,14 @@ class TestContentType:
 
     @pytest.mark.parametrize(
         "content_type,expected",
-        [("text", "Text post"), ("carousel", "Carousel (PDF)"),
-         ("video", "Video script"), ("poll", "Poll"), ("article", "Long-form article")],
+        [("text", "Text post"), ("carousel", "Carousel"),
+         ("video", "Video script"), ("poll", "Poll"), ("article", "Long-form article"),
+         ("short_video", "Short-form video script"), ("thread", "Thread"),
+         ("issue", "Newsletter issue")],
     )
     def test_every_idea_is_forced_to_the_chosen_format(self, content_type, expected):
         raw = {"content_ideas": [
-            {"title": "A", "format": "Newsletter"},
+            {"title": "A", "format": "Skywriting"},
             {"title": "B", "format": ""},
             {"title": "C"},
         ]}
@@ -602,35 +630,35 @@ class TestContentType:
     def test_an_idea_already_in_a_chosen_format_keeps_it(self):
         raw = {"content_ideas": [
             {"title": "A", "format": "Poll"},
-            {"title": "B", "format": "Carousel (PDF)"},
+            {"title": "B", "format": "Carousel"},
         ]}
         result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
         assert [idea["format"] for idea in result["content_ideas"]] == [
-            "Poll", "Carousel (PDF)"
+            "Poll", "Carousel"
         ]
 
     def test_the_model_may_name_a_chosen_format_by_its_wire_value(self):
         raw = {"content_ideas": [{"title": "A", "format": "carousel"}]}
         result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
-        assert result["content_ideas"][0]["format"] == "Carousel (PDF)"
+        assert result["content_ideas"][0]["format"] == "Carousel"
 
     def test_an_idea_outside_the_set_goes_to_the_least_used_chosen_format(self):
         # Three carousels and a newsletter: the newsletter becomes the poll,
         # because that is the chosen format the set has used least.
         raw = {"content_ideas": [
-            {"title": "A", "format": "Carousel (PDF)"},
-            {"title": "B", "format": "Carousel (PDF)"},
-            {"title": "C", "format": "Carousel (PDF)"},
-            {"title": "D", "format": "Newsletter"},
+            {"title": "A", "format": "Carousel"},
+            {"title": "B", "format": "Carousel"},
+            {"title": "C", "format": "Carousel"},
+            {"title": "D", "format": "Skywriting"},
         ]}
         result = analysis.sanitize_synthesis(raw, 3, content_types=["carousel", "poll"])
         assert [idea["format"] for idea in result["content_ideas"]] == [
-            "Carousel (PDF)", "Carousel (PDF)", "Carousel (PDF)", "Poll"
+            "Carousel", "Carousel", "Carousel", "Poll"
         ]
 
     def test_a_run_of_unusable_formats_is_spread_across_the_chosen_ones(self):
         raw = {"content_ideas": [
-            {"title": "i{}".format(i), "format": "Newsletter"} for i in range(4)
+            {"title": "i{}".format(i), "format": "Skywriting"} for i in range(4)
         ]}
         result = analysis.sanitize_synthesis(
             raw, 3, content_types=["poll", "text", "video"]
@@ -644,14 +672,15 @@ class TestContentType:
         raw = {"content_ideas": [
             {"title": "A", "format": "Poll"},
             {"title": "B", "format": "Poll"},
-            {"title": "C", "format": "Newsletter"},
+            {"title": "C", "format": "Skywriting"},
         ]}
         result = analysis.sanitize_synthesis(raw, 3, content_types=["poll", "text"])
         assert result["content_ideas"][2]["format"] == "Text post"
 
-    def test_the_map_covers_exactly_the_five_offered_types(self):
+    def test_the_map_covers_exactly_the_offered_types(self):
         assert set(analysis.CONTENT_TYPE_FORMATS) == {
-            "text", "carousel", "video", "poll", "article"
+            "text", "carousel", "video", "poll", "article",
+            "short_video", "thread", "issue",
         }
         for label in analysis.CONTENT_TYPE_FORMATS.values():
             assert label in analysis.IDEA_FORMATS
@@ -661,6 +690,182 @@ class TestContentType:
         # format the model is told it may use, but which the user cannot ask
         # for, is a gap in the selector.
         assert set(analysis.CONTENT_TYPE_FORMATS.values()) == set(analysis.IDEA_FORMATS)
+
+
+class TestChannelTaxonomy:
+    """The channel maps decide what a creator can be offered, so they are checked
+    for internal consistency rather than trusted."""
+
+    def test_every_channel_has_formats_and_draft_rules(self):
+        assert set(analysis.CHANNEL_FORMATS) == set(analysis.CHANNELS)
+        assert set(analysis.CHANNEL_DRAFT_RULES) == set(analysis.CHANNELS)
+
+    def test_every_channel_format_is_a_real_content_type(self):
+        # A channel pointing at a format key that does not exist would silently
+        # narrow that channel's menu to nothing.
+        for keys in analysis.CHANNEL_FORMATS.values():
+            assert keys, "a channel with no formats can ship nothing"
+            for key in keys:
+                assert key in analysis.CONTENT_TYPE_FORMATS
+
+    def test_every_format_is_shippable_somewhere(self):
+        # A format no channel can ship is one a creator can pick and then never
+        # be offered again once they name where they publish.
+        covered = {
+            key for keys in analysis.CHANNEL_FORMATS.values() for key in keys
+        }
+        assert covered == set(analysis.CONTENT_TYPE_FORMATS)
+
+    def test_every_draft_rule_names_a_format_this_module_can_write(self):
+        for label in analysis.IDEA_FORMATS:
+            assert label in analysis.DRAFT_FORMAT_RULES
+            assert label in analysis.DRAFT_FORMAT_WORDS
+
+    def test_channel_formats_is_the_union_not_the_intersection(self):
+        # TikTok and a newsletter share no format at all. Someone posting to both
+        # wants each channel's formats, not the empty set they have in common.
+        both = analysis.channel_formats(["tiktok", "newsletter"])
+        assert "Short-form video script" in both
+        assert "Newsletter issue" in both
+
+    def test_channel_formats_is_in_menu_order(self):
+        assert analysis.channel_formats(["instagram"]) == [
+            "Text post", "Carousel", "Poll", "Short-form video script"
+        ]
+
+    def test_no_channels_means_no_restriction(self):
+        assert analysis.channel_formats([]) == []
+        assert analysis.channel_formats(None) == []
+
+    def test_an_unknown_channel_is_dropped_rather_than_narrowing_anything(self):
+        assert analysis.channel_formats(["myspace"]) == []
+        assert analysis.channel_formats(["myspace", "tiktok"]) == [
+            "Short-form video script"
+        ]
+
+    def test_channel_labels_and_join(self):
+        assert analysis.channel_labels(["x", "linkedin", "nope"]) == ["LinkedIn", "X"]
+        assert analysis.join_labels(["LinkedIn"]) == "LinkedIn"
+        assert analysis.join_labels(["LinkedIn", "X"]) == "LinkedIn and X"
+        assert (
+            analysis.join_labels(["LinkedIn", "X", "TikTok"])
+            == "LinkedIn, X and TikTok"
+        )
+        assert analysis.join_labels([]) == ""
+
+
+class TestAllowedFormats:
+    """Two independent pins can contradict each other, and which one wins is a
+    promise to the user either way."""
+
+    def test_neither_pin_means_every_format(self):
+        assert analysis.allowed_formats(None, None) == ([], False)
+
+    def test_a_content_type_pin_alone_is_unchanged(self):
+        assert analysis.allowed_formats(None, ["poll"]) == (["Poll"], False)
+
+    def test_a_channel_pin_alone_gives_that_channel_its_formats(self):
+        assert analysis.allowed_formats(["tiktok"], None) == (
+            ["Short-form video script"], False
+        )
+
+    def test_compatible_pins_intersect(self):
+        assert analysis.allowed_formats(["instagram"], ["carousel", "poll"]) == (
+            ["Carousel", "Poll"], False
+        )
+
+    def test_a_pin_the_channel_cannot_ship_loses_to_the_channel(self):
+        # A shared link can carry ch=tiktok&type=poll. Refusing would break the
+        # link; honouring the poll would hand back something unpostable. The
+        # channel wins and the caller is told, so the report can say so.
+        formats, dropped = analysis.allowed_formats(["tiktok"], ["poll"])
+        assert formats == ["Short-form video script"]
+        assert dropped is True
+
+    def test_a_partly_impossible_pin_keeps_the_possible_part_silently(self):
+        # Carousel is shippable on Instagram and a poll is too, but a thread is
+        # not. Something survived, so nothing was really dropped from the user's
+        # intent and there is nothing to announce.
+        formats, dropped = analysis.allowed_formats(
+            ["instagram"], ["carousel", "thread"]
+        )
+        assert formats == ["Carousel"]
+        assert dropped is False
+
+    def test_the_sanitiser_pins_ideas_to_what_the_channel_can_ship(self):
+        raw = {"content_ideas": [
+            {"title": "A", "format": "Poll"},
+            {"title": "B", "format": "Long-form article"},
+        ]}
+        result = analysis.sanitize_synthesis(raw, 3, channels=["tiktok"])
+        assert [idea["format"] for idea in result["content_ideas"]] == [
+            "Short-form video script"
+        ] * 2
+
+
+class TestChannelDrafting:
+    IDEA = {"title": "t", "hook": "h", "format": "Text post", "angle": "a"}
+
+    def test_a_neutral_draft_names_no_channel_and_keeps_the_old_caps(self):
+        prompt = analysis._draft_prompt(self.IDEA, [], "q", "")
+        assert "a social post" in prompt
+        assert "LinkedIn" not in prompt
+        assert "at most 3 hashtags" in prompt
+
+    @pytest.mark.parametrize(
+        "channel,artefact",
+        [
+            ("linkedin", "a LinkedIn post"),
+            ("instagram", "an Instagram post"),
+            ("tiktok", "a TikTok video"),
+            ("x", "a post for X"),
+            ("youtube", "a YouTube video"),
+            ("newsletter", "a newsletter email"),
+        ],
+    )
+    def test_each_channel_names_the_artefact_it_actually_produces(
+        self, channel, artefact
+    ):
+        prompt = analysis._draft_prompt(self.IDEA, [], "q", "", channel)
+        assert "ghostwriting {}".format(artefact) in prompt
+
+    def test_the_hashtag_ceiling_follows_the_channel(self):
+        instagram = analysis._draft_prompt(self.IDEA, [], "q", "", "instagram")
+        assert "at most 10 hashtags" in instagram
+        x = analysis._draft_prompt(self.IDEA, [], "q", "", "x")
+        assert "at most 1 hashtags" in x
+
+    def test_a_newsletter_is_told_not_to_use_hashtags_at_all(self):
+        prompt = analysis._draft_prompt(self.IDEA, [], "q", "", "newsletter")
+        assert "No hashtags at all." in prompt
+        assert "at most" not in prompt.split("hashtag")[0][-40:]
+
+    def test_a_zero_hashtag_cap_removes_the_line_without_a_trailing_blank(self):
+        # The cap used to be a constant that was always at least one, so this
+        # branch is newer than the whitespace normaliser it runs after.
+        assert analysis.sanitize_post("Body here.\n\n#a #b #c", 0) == "Body here."
+
+    def test_an_unknown_channel_falls_back_to_the_neutral_rules(self):
+        rules = analysis.draft_rules("myspace")
+        assert rules["hashtags"] == analysis.DRAFT_MAX_HASHTAGS
+        assert rules["poll_options"] == analysis.DRAFT_MAX_POLL_OPTIONS
+        assert rules["voice"] == ""
+
+    def test_the_new_formats_each_get_their_own_shape(self):
+        for fmt, marker in (
+            ("Short-form video script", "vertical short-form script"),
+            ("Thread", "under 280 characters"),
+            ("Newsletter issue", "Subject:"),
+        ):
+            prompt = analysis._draft_prompt(
+                dict(self.IDEA, format=fmt), [], "q", ""
+            )
+            assert marker in prompt
+
+    def test_no_channel_voice_line_contains_a_dash(self):
+        # Same rule the prompts impose on the model: they must not model the habit.
+        for rules in analysis.CHANNEL_DRAFT_RULES.values():
+            assert "—" not in rules["voice"] and "–" not in rules["voice"]
 
 
 class TestIdeaCount:
@@ -872,7 +1077,7 @@ class TestDraftGrounding:
     @pytest.mark.parametrize(
         "fmt,marker",
         [
-            ("Carousel (PDF)", "Slide 1:"),
+            ("Carousel", "Slide 1:"),
             ("Video script", "Beat 1:"),
             ("Long-form article", "structured long-form article"),
             ("Poll", "poll question"),
@@ -896,7 +1101,16 @@ class TestDraftGrounding:
         assert "short paragraphs" in prompt
 
     def test_a_near_miss_format_name_still_matches(self):
-        assert analysis._draft_format({"format": "Carousel"}) == "Carousel (PDF)"
+        # The label the engine no longer uses still resolves, because stored
+        # bundles and replayed links are full of it.
+        assert analysis._draft_format({"format": "Carousel (PDF)"}) == "Carousel"
+        assert analysis._draft_format({"format": "reel"}) == "Short-form video script"
+        # The long and the short video script must not swallow each other.
+        assert analysis._draft_format({"format": "video"}) == "Video script"
+        assert (
+            analysis._draft_format({"format": "Short-form video script"})
+            == "Short-form video script"
+        )
 
     def test_the_word_band_follows_the_format(self):
         article = analysis._draft_prompt(
@@ -1120,7 +1334,7 @@ class TestDraftPost:
         assert len(lines.split("\n")) == analysis.DRAFT_MAX_EVIDENCE
 
     def test_a_poll_draft_with_too_many_options_is_capped_at_four(self, monkeypatch):
-        # LinkedIn's poll UI caps at four options; a live run once produced six, so
+        # Every poll UI caps at four options; a live run once produced six, so
         # this pins the backstop that keeps the first four and drops the rest.
         post = (
             "Hook line.\n\nSome context.\n\nWhich do you use?\n"

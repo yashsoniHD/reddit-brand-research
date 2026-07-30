@@ -192,6 +192,32 @@ class TestContentTypesPassThrough:
         assert lines[0]["type"] == "invalid"
         assert '"reel"' in lines[0]["errors"][0]
 
+    def test_a_list_of_channels_reaches_the_engine(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        lines = _lines(
+            client.post(
+                "/api/report", json={**VALID_BODY, "channels": ["tiktok", "instagram"]}
+            )
+        )
+        assert lines[-1]["type"] == "report"
+        assert captured["channels"] == ["instagram", "tiktok"]
+
+    def test_no_channels_reaches_the_engine_as_an_empty_list(self, monkeypatch):
+        captured = self._capture(monkeypatch)
+        _lines(client.post("/api/report", json=VALID_BODY))
+        assert captured["channels"] == []
+
+    def test_an_unknown_channel_is_invalid_before_anything_runs(self):
+        lines = _lines(
+            client.post("/api/report", json={**VALID_BODY, "channels": ["myspace"]})
+        )
+        assert lines[0]["type"] == "invalid"
+        assert '"myspace"' in lines[0]["errors"][0]
+
+    def test_channels_that_are_not_a_list_are_invalid(self):
+        lines = _lines(client.post("/api/report", json={**VALID_BODY, "channels": 7}))
+        assert lines[0]["type"] == "invalid"
+
     def test_content_types_that_are_not_a_list_are_invalid(self):
         lines = _lines(
             client.post("/api/report", json={**VALID_BODY, "content_types": 7})
@@ -538,6 +564,70 @@ class TestDraftEndpoint:
         assert evidence == self.VALID_DRAFT_BODY["evidence"]
         assert query == self.VALID_DRAFT_BODY["query"]
         assert profile == ""
+
+    def test_a_known_channel_reaches_the_engine(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile, channel=None):
+            captured["channel"] = channel
+            return {"post": "ok"}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        response = client.post(
+            "/api/draft", json={**self.VALID_DRAFT_BODY, "channel": "instagram"}
+        )
+
+        assert response.status_code == 200
+        assert captured["channel"] == "instagram"
+
+    def test_an_unknown_channel_is_dropped_rather_than_refused(self, monkeypatch):
+        # The post is still writable channel-neutral, so a stale client must not
+        # lose a draft over a channel this build does not know.
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile, channel=None):
+            captured["channel"] = channel
+            return {"post": "ok"}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        response = client.post(
+            "/api/draft", json={**self.VALID_DRAFT_BODY, "channel": "myspace"}
+        )
+
+        assert response.status_code == 200
+        assert captured["channel"] is None
+
+    def test_a_channel_of_the_wrong_type_is_dropped(self, monkeypatch):
+        captured = {}
+
+        def fake_draft_post(idea, evidence, query, profile, channel=None):
+            captured["channel"] = channel
+            return {"post": "ok"}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", fake_draft_post)
+        response = client.post(
+            "/api/draft", json={**self.VALID_DRAFT_BODY, "channel": 7}
+        )
+
+        assert response.status_code == 200
+        assert captured["channel"] is None
+
+    def test_a_draft_engine_that_predates_channels_is_never_passed_one(self, monkeypatch):
+        # The channel goes through the same signature probe the report kwargs do,
+        # so an older engine keeps working instead of raising a TypeError.
+        captured = {}
+
+        def old_signature(idea, evidence, query, profile):
+            captured["called"] = True
+            return {"post": "ok"}
+
+        monkeypatch.setattr(api_index.analysis, "draft_post", old_signature)
+        response = client.post(
+            "/api/draft", json={**self.VALID_DRAFT_BODY, "channel": "tiktok"}
+        )
+
+        assert response.status_code == 200
+        assert captured["called"] is True
 
     def test_value_error_from_the_engine_becomes_a_500_with_the_verbatim_message(self, monkeypatch):
         def fake_draft_post(idea, evidence, query, profile):

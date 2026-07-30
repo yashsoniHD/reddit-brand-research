@@ -308,7 +308,7 @@ def _save_report(query: str, profile: str, bundle) -> Optional[str]:
 
 def _run_report_lines(
     query: str, profile: str, days: int, subreddits, relevance_filter: bool, content_types=None,
-    phrases=None,
+    phrases=None, channels=None,
 ):
     """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
 
@@ -353,6 +353,10 @@ def _run_report_lines(
             # An engine from before the setting took several values: it can still
             # honour one, and one is what the overwhelming majority of runs pick.
             run_kwargs["content_type"] = (content_types or [None])[0]
+        if _accepts_kwarg(pipeline.run_report, "channels"):
+            # Where the user publishes. An engine that predates channels runs
+            # channel-neutral, which is exactly what it did before they existed.
+            run_kwargs["channels"] = list(channels or [])
         if _accepts_kwarg(pipeline.run_report, "phrases"):
             # The quoted phrases the validator found in the query. An engine that
             # predates the keyword filter simply never sees them, and the run it
@@ -438,6 +442,8 @@ async def post_report(request: Request):
         validate_kwargs["content_types"] = body.get("content_types")
     if _accepts_kwarg(pipeline.validate_inputs, "content_type"):
         validate_kwargs["content_type"] = body.get("content_type")
+    if _accepts_kwarg(pipeline.validate_inputs, "channels"):
+        validate_kwargs["channels"] = body.get("channels")
 
     checked = pipeline.validate_inputs(
         body.get("query", ""),
@@ -471,8 +477,10 @@ async def post_report(request: Request):
         content_types=chosen_types,
         # `.get(...) or []` rather than `checked["phrases"]`: an engine from before
         # the keyword filter returns no such key, and version skew must not be a
-        # KeyError on the boundary.
+        # KeyError on the boundary. `channels` is read the same way for the same
+        # reason.
         phrases=checked.get("phrases") or [],
+        channels=checked.get("channels") or [],
     )
     return StreamingResponse(generator, media_type="application/x-ndjson")
 
@@ -573,10 +581,14 @@ async def get_sample_available():
 
 @app.post("/api/draft")
 async def post_draft(request: Request):
-    """Draft a publish-ready LinkedIn post for one content idea.
+    """Draft a publish-ready post for one content idea.
 
     Plain JSON, no streaming: unlike /api/report this is a single Gemini call
     that returns in normal request time, not a multi-minute pipeline.
+
+    An optional `channel` picks the voice, the hashtag ceiling and the poll cap.
+    An unknown one is ignored rather than refused: the post is still writable
+    channel-neutral, and a stale client should not lose a draft over it.
 
     Response shapes (exactly two, both plain JSON so the frontend only ever
     reads either "post" or "error" and never has to branch on status code
@@ -650,9 +662,16 @@ async def post_draft(request: Request):
     ]
     query = str(body.get("query") or "")[: pipeline.MAX_QUERY_CHARS]
     profile = str(body.get("profile") or "")[: pipeline.MAX_PROFILE_CHARS]
+    channel = _draft_channel(body)
+
+    draft_kwargs = {}
+    if channel and _accepts_kwarg(analysis.draft_post, "channel"):
+        draft_kwargs["channel"] = channel
 
     try:
-        result = analysis.draft_post(clean_idea, clean_evidence, query, profile)
+        result = analysis.draft_post(
+            clean_idea, clean_evidence, query, profile, **draft_kwargs
+        )
     except ValueError as exc:
         # A user-ready sentence from the model layer, same treatment as the
         # RunError/ValueError branch in _run_report_lines.
@@ -671,6 +690,22 @@ async def post_draft(request: Request):
         _persist_draft(saved_to[0], saved_to[1], result["post"])
 
     return {"post": result["post"]}
+
+
+def _draft_channel(body: dict) -> str:
+    """The channel a draft request named, or "" for channel-neutral.
+
+    Dropped rather than refused when it is not one we support, matching how the
+    engine treats an unknown channel everywhere else: the draft is still writable
+    without it, and a stale link should not cost the reader a post.
+    """
+    value = body.get("channel")
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    # getattr, not attribute access: this file is deployed against engines either
+    # side of the change, and an older analysis module has no CHANNELS at all.
+    return text if text in getattr(analysis, "CHANNELS", {}) else ""
 
 
 def _draft_target(body: dict):

@@ -10,6 +10,8 @@ Exercises exactly the code path the web app uses, with no web app involved.
 Pass --subreddits to skip discovery entirely and analyse specific communities instead,
 which is useful for deterministic regeneration and for debugging one community.
 Pass --content-types to keep every idea inside the formats you name.
+Pass --channels to write the ideas and drafts for particular places to publish;
+a channel narrows the formats to the ones it can actually ship.
 """
 
 from __future__ import annotations
@@ -55,6 +57,11 @@ def main() -> int:
         help="keep every idea inside these formats (advanced; default a mix)",
     )
     parser.add_argument(
+        "--channels", dest="channels", nargs="+",
+        choices=list(pipeline.CHANNELS),
+        help="write for these channels (advanced; default channel-neutral)",
+    )
+    parser.add_argument(
         "--timeout", type=float,
         help="seconds before the run stops starting new work and reports what it has",
     )
@@ -69,6 +76,7 @@ def main() -> int:
         days=args.days, subreddits=args.subreddits,
         relevance_filter=not args.no_relevance,
         content_types=args.content_types,
+        channels=args.channels,
     )
     if checked["errors"]:
         for error in checked["errors"]:
@@ -84,6 +92,7 @@ def main() -> int:
             subreddits=checked["subreddits"],
             relevance_filter=checked["relevance_filter"],
             content_types=checked["content_types"],
+            channels=checked["channels"],
             progress=lambda message: print("  · {}".format(message)),
             deadline=deadline,
         )
@@ -116,6 +125,8 @@ def main() -> int:
     print("query:               {}".format(bundle["inputs"]["query"]))
     print("content types:       {}".format(
         ", ".join(bundle["inputs"].get("content_types") or []) or "a mix"))
+    print("channels:            {}".format(
+        ", ".join(bundle["inputs"].get("channels") or []) or "channel-neutral"))
     print("communities:         {} (chosen: {})".format(
         ", ".join(bundle["inputs"]["subreddits"]), bundle["inputs"]["discovery"]))
     print("communities found:   {}".format(

@@ -26,8 +26,10 @@
  * `RedditItem`). A brief can also decompose into a topic plus up to three
  * requirements about who posted a thread (`SelectionInfo.topic`, `.pool`,
  * `.requirements`, `.qualifier_counts`, `.qualifier_analysed`, and
- * `qualifier_tier` on `RedditItem`). None of this bumps BUNDLE_VERSION; see
- * `isBundle`.
+ * `qualifier_tier` on `RedditItem`). A run can also name the channels it is
+ * written for (`Inputs.channels`), which narrows the formats the ideas may take;
+ * a bundle without it is channel-neutral, which every bundle written before
+ * channels existed was. None of this bumps BUNDLE_VERSION; see `isBundle`.
  */
 
 export const BUNDLE_VERSION = 5;
@@ -117,8 +119,32 @@ export interface Discovery {
   considered: string[];
 }
 
-/** A shape the ideas can be written for. None chosen means "any". */
-export type ContentType = "text" | "carousel" | "video" | "poll" | "article";
+/**
+ * A shape the ideas can be written for. None chosen means "any".
+ *
+ * `video` is the long-form script and `short_video` the vertical one: a YouTube
+ * walkthrough and a Reel are different artefacts, and a creator who asks for one
+ * does not want the other. `issue` rather than `newsletter` so a format key can
+ * never be confused with the `Channel` of the same name.
+ */
+export type ContentType =
+  | "text"
+  | "carousel"
+  | "video"
+  | "poll"
+  | "article"
+  | "short_video"
+  | "thread"
+  | "issue";
+
+/** Where the user publishes. None chosen means channel-neutral. */
+export type Channel =
+  | "linkedin"
+  | "instagram"
+  | "tiktok"
+  | "x"
+  | "youtube"
+  | "newsletter";
 
 /** How the communities for this run were chosen. */
 export type DiscoveryMode = "manual" | "model";
@@ -155,6 +181,12 @@ export interface Inputs {
    * the same as a one-item `content_types`. Never written by the engine now.
    */
   content_type?: ContentType;
+  /**
+   * The channels the ideas were written for. Optional: absent on a
+   * channel-neutral run, which is any run that chose none of them or all of
+   * them, and on every bundle written before channels existed.
+   */
+  channels?: Channel[];
   /** Optional: absent on bundles written before the engine recorded it. */
   discovery?: DiscoveryMode;
   /**
@@ -409,6 +441,8 @@ export interface ReportRequest {
   relevance_filter?: boolean;
   /** Omitted entirely when the user asked for a mix. */
   content_types?: ContentType[];
+  /** Omitted entirely when the run is channel-neutral. */
+  channels?: Channel[];
 }
 
 export type StreamLine =
@@ -445,6 +479,12 @@ export interface DraftRequest {
   evidence: string[];
   query: string;
   profile: string;
+  /**
+   * Which channel to write this one in. Omitted for a channel-neutral draft.
+   * An unknown value is dropped server-side rather than refused, so a stale
+   * client never loses a draft over it.
+   */
+  channel?: Channel;
   /**
    * Where to file the finished post. Both are sent together or not at all, and
    * only for a report that was saved: with them the server stores the draft as
@@ -485,17 +525,119 @@ export const MIN_PHRASE_CHARS = 3;
 export const MAX_PHRASE_CHARS = 60;
 export const MAX_PHRASE_WORDS = 8;
 
-/** The checkbox group, in the order it renders. None ticked means "any". */
+/**
+ * The checkbox group, in the order it renders. None ticked means "any".
+ *
+ * Mirrored from `analysis.CONTENT_TYPE_FORMATS`; the labels are shortened where
+ * the engine's own are long enough to wrap a chip ("Short-form video" for
+ * "Short-form video script"), because the wire value is what travels and the
+ * label is only ever read.
+ */
 export const CONTENT_TYPE_CHOICES: { value: ContentType; label: string }[] = [
   { value: "text", label: "Text post" },
   { value: "carousel", label: "Carousel" },
   { value: "video", label: "Video script" },
   { value: "poll", label: "Poll" },
   { value: "article", label: "Long-form article" },
+  { value: "short_video", label: "Short-form video" },
+  { value: "thread", label: "Thread" },
+  { value: "issue", label: "Newsletter issue" },
 ];
 
 export function isContentType(value: string): value is ContentType {
   return CONTENT_TYPE_CHOICES.some((choice) => choice.value === value);
+}
+
+/** The channel checkbox group, in the order it renders. */
+export const CHANNEL_CHOICES: { value: Channel; label: string }[] = [
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "instagram", label: "Instagram" },
+  { value: "tiktok", label: "TikTok" },
+  { value: "x", label: "X" },
+  { value: "youtube", label: "YouTube" },
+  { value: "newsletter", label: "Newsletter" },
+];
+
+/**
+ * Which formats each channel can actually ship. Mirrored from
+ * `analysis.CHANNEL_FORMATS`, and the reason the content-type menu shrinks when a
+ * channel is ticked: offering a poll to someone publishing on TikTok is offering
+ * something they cannot post.
+ */
+export const CHANNEL_FORMATS: Record<Channel, ContentType[]> = {
+  linkedin: ["text", "carousel", "poll", "article", "video"],
+  instagram: ["carousel", "short_video", "text", "poll"],
+  tiktok: ["short_video"],
+  x: ["text", "thread", "poll"],
+  youtube: ["video", "short_video"],
+  newsletter: ["issue", "article"],
+};
+
+export function isChannel(value: string): value is Channel {
+  return CHANNEL_CHOICES.some((choice) => choice.value === value);
+}
+
+/**
+ * The engine's own idea-format labels, mapped back to content-type keys.
+ *
+ * Mirrored from `analysis.CONTENT_TYPE_FORMATS`, and deliberately keyed on the
+ * ENGINE label rather than on `CONTENT_TYPE_CHOICES`: the menu shortens some of
+ * them for the chips ("Short-form video"), while `ContentIdea.format` always
+ * carries the engine's full one. The last entry is the label the engine no longer
+ * writes, kept because stored bundles are full of it.
+ */
+const IDEA_FORMAT_KEYS: Record<string, ContentType> = {
+  "text post": "text",
+  carousel: "carousel",
+  "video script": "video",
+  poll: "poll",
+  "long-form article": "article",
+  "short-form video script": "short_video",
+  thread: "thread",
+  "newsletter issue": "issue",
+  "carousel (pdf)": "carousel",
+};
+
+/** The content type behind an idea's format label, or undefined if unrecognised. */
+export function contentTypeForFormat(format?: string): ContentType | undefined {
+  return IDEA_FORMAT_KEYS[(format ?? "").trim().toLowerCase()];
+}
+
+/**
+ * Which of a run's channels can actually ship one idea.
+ *
+ * A run for Instagram and TikTok can produce a carousel, but only Instagram can
+ * post one. Offering to redraft that idea for TikTok would hand back a carousel
+ * nobody can publish there, which is the failure the whole channel feature exists
+ * to prevent.
+ *
+ * Returns every channel unchanged when the format is unrecognised: an older
+ * bundle with a label this build does not know should not lose its switcher.
+ */
+export function channelsForFormat(channels: Channel[], format?: string): Channel[] {
+  const key = contentTypeForFormat(format);
+  if (!key) return channels;
+  const eligible = channels.filter((channel) =>
+    CHANNEL_FORMATS[channel].includes(key),
+  );
+  return eligible.length > 0 ? eligible : channels;
+}
+
+/**
+ * The content types the given channels can ship, in menu order.
+ *
+ * The union rather than the intersection: someone posting to both TikTok and a
+ * newsletter wants vertical scripts AND issues, not the empty set the two share.
+ * No channels means no restriction, so every type comes back.
+ */
+export function formatsForChannels(channels: Channel[]): ContentType[] {
+  if (channels.length === 0) {
+    return CONTENT_TYPE_CHOICES.map((choice) => choice.value);
+  }
+  const allowed = new Set(channels.flatMap((channel) => CHANNEL_FORMATS[channel]));
+  return CONTENT_TYPE_CHOICES.filter((choice) => allowed.has(choice.value)).map(
+    (choice) => choice.value,
+  );
 }
 
 /**
@@ -528,6 +670,36 @@ export function bundleContentTypes(inputs?: Inputs): ContentType[] {
   }
   return inputs?.content_type ? [inputs.content_type] : [];
 }
+
+/**
+ * The channels a URL asked for: comma-separated, deduped, menu order.
+ *
+ * Anything unrecognised is dropped rather than refused, for the same reason
+ * `parseContentTypes` drops it: a bad parameter should not stop the rest of a
+ * shared search from loading.
+ */
+export function parseChannels(value: string | null): Channel[] {
+  const asked = new Set(
+    (value ?? "").split(",").map((part) => part.trim().toLowerCase()),
+  );
+  return CHANNEL_CHOICES.filter((choice) => asked.has(choice.value)).map(
+    (choice) => choice.value,
+  );
+}
+
+/** The channels a stored bundle's ideas were written for, or [] if neutral. */
+export function bundleChannels(inputs?: Inputs): Channel[] {
+  const stored = inputs?.channels ?? [];
+  // Filtered rather than trusted: a stored bundle is data from another
+  // deployment, and a channel this build does not know would have no label.
+  return CHANNEL_CHOICES.filter((choice) => stored.includes(choice.value)).map(
+    (choice) => choice.value,
+  );
+}
+
+export const CHANNEL_LABELS: Record<Channel, string> = Object.fromEntries(
+  CHANNEL_CHOICES.map((choice) => [choice.value, choice.label]),
+) as Record<Channel, string>;
 
 export const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   pos: "Positive",

@@ -248,7 +248,7 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "What 250 cold emails actually returned, in one chart",
     hook: "250 cold emails. One reply worth having. Here is what the same hours did instead.",
-    format: "Carousel (PDF)",
+    format: "Carousel",
     angle:
       "Put the two channels side by side across the same number of hours and let the gap do the arguing. End on the one case where cold outreach still works.",
     rationale:
@@ -303,7 +303,7 @@ const IDEA_SEEDS: Array<Omit<ContentIdea, "citations"> & { cites: number[] }> = 
   {
     title: "Show the rejected directions",
     hook: "The work you did not ship is the work that gets you hired.",
-    format: "Carousel (PDF)",
+    format: "Carousel",
     angle:
       "Three rejected directions per slide, the chosen one last, with one line on why each was wrong for the brief.",
     rationale:

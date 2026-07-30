@@ -15,6 +15,11 @@ from typing import Dict, List, Sequence
 import reddit_data
 import stats
 
+# Imported by name, not as `import analysis`: `report_markdown` binds a local called
+# `analysis` (the bundle's analysis block), which would shadow the module inside the
+# one function that needs these.
+from analysis import channel_labels as _engine_channel_labels, join_labels
+
 SENTIMENT_ORDER = ("pos", "neu", "neg")
 SENTIMENT_TITLES = {"pos": "Positive", "neu": "Neutral", "neg": "Negative"}
 _FILENAME_SAFE = re.compile(r"[^a-z0-9]+")
@@ -144,6 +149,16 @@ def _window_label(inputs: dict) -> str:
     )
 
 
+def _channel_labels(inputs: dict) -> List[str]:
+    """The display names of the channels a run was written for, or [].
+
+    Read through `analysis.channel_labels` rather than from a map of its own, so
+    the export cannot drift from the engine's own names for the same things. A
+    bundle from before channels existed carries no key and comes back empty.
+    """
+    return _engine_channel_labels((inputs or {}).get("channels") or [])
+
+
 def _retrieval_sentence(inputs: dict) -> str:
     """How the posts were found, in one line, for the methodology section."""
     inputs = inputs or {}
@@ -193,6 +208,11 @@ def report_markdown(bundle: dict, drafts=None) -> str:
             date_range.get("label", "n/a"),
         )
     )
+    header_channels = _channel_labels(inputs)
+    if header_channels:
+        # Only when the run named channels: a channel-neutral report has nothing to
+        # say here, and an "all of them" line would be noise on every other export.
+        add("**Written for:** {}".format(", ".join(header_channels)))
     add("**Generated:** {} · **Analysis:** {}".format(
         bundle.get("generated_at", ""), bundle.get("model_label", "")
     ))
@@ -377,6 +397,13 @@ def report_markdown(bundle: dict, drafts=None) -> str:
         add("- Discovery: the communities were chosen by the model from your query, then "
             "checked to exist and be public before being read.")
     add("- Retrieval: {}".format(_retrieval_sentence(inputs)))
+    channels = _channel_labels(inputs)
+    if channels:
+        add("- Channels: the ideas were written for {}, so the formats are the ones "
+            "{} ship.".format(
+                join_labels(channels),
+                "that channel can" if len(channels) == 1 else "those channels can",
+            ))
     add("- Requested window: {}".format(_window_label(inputs)))
     add("- Actual coverage: {}".format(date_range.get("label", "n/a")))
     add("- Posts fetched: {} · analysed: {}".format(

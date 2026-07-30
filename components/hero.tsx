@@ -11,7 +11,7 @@ export function Hero() {
       <h1 className="t-display text-balance text-foreground">
         {/* Kept on one line: it is the positioning, and a break through the
             middle of it is the one wrap this headline cannot afford. */}
-        <span className="whitespace-nowrap text-[var(--brand-ink)]">LinkedIn posts</span>{" "}
+        <span className="whitespace-nowrap text-[var(--brand-ink)]">Content ideas</span>{" "}
         from real Reddit conversations.
       </h1>
 

@@ -12,11 +12,15 @@ import { joinQuoted, phraseDropReason } from "@/lib/format";
 import { parsePhrases } from "@/lib/keywords";
 import { checkCommunities } from "@/lib/validate";
 import {
+  CHANNEL_CHOICES,
+  CHANNEL_LABELS,
   CONTENT_TYPE_CHOICES,
   DEFAULT_DAYS,
+  formatsForChannels,
   MAX_PROFILE_CHARS,
   MAX_QUERY_CHARS,
   TIME_WINDOWS,
+  type Channel,
   type ContentType,
 } from "@/lib/types";
 
@@ -31,6 +35,8 @@ export interface FormValues {
   relevance: boolean;
   /** Settings panel: the shapes the ideas may take. Empty sends nothing, meaning any. */
   contentTypes: ContentType[];
+  /** Settings panel: where the user publishes. Empty means channel-neutral. */
+  channels: Channel[];
 }
 
 function contentTypeLabel(value: ContentType): string {
@@ -43,6 +49,13 @@ function advancedSummary(values: FormValues): string {
   // The profile lives inside the panel now, so a filled one has to show on the
   // closed tab: a setting that changes the output must never hide silently.
   if (values.profile.trim()) parts.push("about you");
+  // Named before the communities and the window: it is the setting that changes
+  // the output most, so it is the one worth the characters.
+  if (values.channels.length === 1) {
+    parts.push(CHANNEL_LABELS[values.channels[0]]);
+  } else if (values.channels.length > 1) {
+    parts.push(`${values.channels.length} channels`);
+  }
   const communities = values.subreddits
     .split(",")
     .map((name) => name.trim())
@@ -64,6 +77,69 @@ function advancedSummary(values: FormValues): string {
     parts.push(`${values.contentTypes.length} content types`);
   }
   return parts.join(" · ");
+}
+
+/**
+ * The one grouped-control look, shared by the channel checkboxes, the content
+ * type checkboxes and the time range radios.
+ *
+ * Before this the panel had two idioms (raw native checkboxes and a segmented
+ * control) for three controls that do the same kind of job, which read as two
+ * unrelated features rather than one settings panel.
+ */
+// The border is not decoration: with no plate behind them, an unticked chip
+// without one is indistinguishable from a row of plain labels, and nothing tells
+// the reader the group is interactive at all.
+const CHIP_BASE =
+  "cursor-pointer rounded-lg border px-3 py-1.5 text-sm transition-colors select-none";
+const CHIP_ON =
+  "border-[var(--brand-line)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]";
+// `--input` rather than `--border`: these are controls, and that is the token the
+// palette reserves for a control's edge. It is a step stronger than `--border` in
+// both themes, which is exactly what an unticked chip needs to read as clickable.
+const CHIP_OFF =
+  "border-[var(--input)] text-muted-foreground hover:border-[var(--brand-line)] hover:text-foreground";
+
+/**
+ * A multi-select chip that is still a real checkbox.
+ *
+ * The input is `sr-only` rather than replaced, so the group keeps its native
+ * keyboard behaviour and a screen reader still announces it as a checkbox. That
+ * makes the focus ring on the label load-bearing: without it, a keyboard user
+ * has nothing at all to tell them where they are.
+ */
+function ToggleChip({
+  name,
+  value,
+  label,
+  checked,
+  onChange,
+}: {
+  name: string;
+  value: string;
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      className={cn(
+        CHIP_BASE,
+        checked ? CHIP_ON : CHIP_OFF,
+        "has-focus-visible:ring-2 has-focus-visible:ring-[var(--ring)] has-focus-visible:ring-offset-1",
+      )}
+    >
+      <input
+        type="checkbox"
+        name={name}
+        value={value}
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="sr-only"
+      />
+      {label}
+    </label>
+  );
 }
 
 /** The muted explainer that sits under a field label. */
@@ -130,6 +206,44 @@ export function QueryForm({
   const communityInvalid =
     communities.messages.length > 0 && (communitiesTouched || highlightCommunities);
 
+  // The formats the ticked channels can actually ship. With no channels ticked
+  // this is the whole menu, which is how the panel behaved before channels
+  // existed.
+  const allowed = new Set(formatsForChannels(values.channels));
+  const shippable = CONTENT_TYPE_CHOICES.filter((choice) => allowed.has(choice.value));
+
+  /**
+   * Ticking a channel can invalidate a format already ticked, so both are
+   * written in one update.
+   *
+   * A tick the run would not honour is worse than a tick that disappears: the
+   * engine resolves a channel/format conflict in favour of the channel, so a
+   * stranded "Poll" next to TikTok would be the form promising something the
+   * report then quietly overrides.
+   */
+  const setChannel = (channel: Channel, checked: boolean) => {
+    // Rebuilt from the menu rather than appended to, so the value always reads
+    // in the order the chips are shown.
+    const nextChannels = CHANNEL_CHOICES.filter((option) =>
+      option.value === channel ? checked : values.channels.includes(option.value),
+    ).map((option) => option.value);
+    const stillShippable = new Set(formatsForChannels(nextChannels));
+    onChange({
+      ...values,
+      channels: nextChannels,
+      contentTypes: values.contentTypes.filter((type) => stillShippable.has(type)),
+    });
+  };
+
+  const setContentType = (type: ContentType, checked: boolean) => {
+    set(
+      "contentTypes",
+      CONTENT_TYPE_CHOICES.filter((option) =>
+        option.value === type ? checked : values.contentTypes.includes(option.value),
+      ).map((option) => option.value),
+    );
+  };
+
   /**
    * Collapsing the panel is also a way of leaving the field, and a mistake that
    * hides itself is worse than one that argues. The element is reopened
@@ -160,7 +274,7 @@ export function QueryForm({
       {/* The one field that matters, given the room to look like it. */}
       <div className="flex flex-col gap-2">
         <Label htmlFor="query" className="h-section text-foreground">
-          What do you want LinkedIn ideas about?
+          What do you want content ideas about?
         </Label>
         <Textarea
           id="query"
@@ -182,11 +296,18 @@ export function QueryForm({
         </div>
       </div>
 
+      {/* Deliberately unfilled. This panel is nested inside a pure-white
+          `surface-raised` card, where the page's three-plane stack has already
+          bottomed out: the warm `--hush` plate read as a smudge on white, and a
+          white-on-white plate had no containment at all. So it separates by rule
+          and indentation instead, which is what globals.css says the elevation
+          system is for. The submit row's own `border-t` closes the band, so there
+          is no bottom rule here. */}
       <details
         ref={detailsRef}
         open={advancedOpen}
         onToggle={(event) => onToggle(event.currentTarget.open)}
-        className="group surface-hush px-4 py-3 transition-colors open:bg-card sm:px-5"
+        className="group border-t pt-4"
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 marker:hidden">
           <ChevronRight
@@ -201,12 +322,14 @@ export function QueryForm({
             </span>
           ) : (
             <span className="ml-auto hidden text-xs text-muted-foreground sm:inline">
-              About you, communities, format, time range
+              About you, channels, communities, time range
             </span>
           )}
         </summary>
 
-        <div className="mt-5 flex flex-col gap-6 border-t pt-5">
+        {/* The left rule is the only colour in the panel: it marks where the
+            group starts and ends without filling anything. */}
+        <div className="mt-4 flex flex-col gap-5 border-t border-l-2 border-l-[var(--brand-line)] pt-5 pl-4 sm:pl-5">
           {/* First in the panel because it is the one setting most runs want:
               the ideas are shaped for whoever is posting them. */}
           <div className="flex flex-col gap-2">
@@ -231,6 +354,50 @@ export function QueryForm({
               className="resize-y rounded-xl px-3.5 py-2.5"
             />
           </div>
+
+          {/* Channels sit directly above content types because one filters the
+              other: ticking TikTok has to visibly shrink the format menu, and
+              two settings that far apart would not read as connected. */}
+          <fieldset className="flex flex-col gap-2 border-0 p-0">
+            <legend className="h-section text-foreground">Channels</legend>
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {CHANNEL_CHOICES.map((choice) => (
+                <ToggleChip
+                  key={choice.value}
+                  name="channels"
+                  value={choice.value}
+                  label={choice.label}
+                  checked={values.channels.includes(choice.value)}
+                  onChange={(checked) => setChannel(choice.value, checked)}
+                />
+              ))}
+            </div>
+            <FieldHint>
+              Writes the ideas and the drafts for where you actually post. Leave them
+              all unticked for ideas that are not tied to one place.
+            </FieldHint>
+          </fieldset>
+
+          <fieldset className="flex flex-col gap-2 border-0 p-0">
+            <legend className="h-section text-foreground">Content types</legend>
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {shippable.map((choice) => (
+                <ToggleChip
+                  key={choice.value}
+                  name="content-types"
+                  value={choice.value}
+                  label={choice.label}
+                  checked={values.contentTypes.includes(choice.value)}
+                  onChange={(checked) => setContentType(choice.value, checked)}
+                />
+              ))}
+            </div>
+            <FieldHint>
+              {values.channels.length > 0
+                ? "Only the formats those channels can ship are offered. Keeps every idea inside the ones you tick, spread across them; leave them all unticked to let each idea pick its own."
+                : "Keeps every idea inside the formats you tick, spread across them. Leave them all unticked to let each idea pick its own."}
+            </FieldHint>
+          </fieldset>
 
           <div className="flex flex-col gap-2">
             <Label htmlFor="subreddits" className="h-section text-foreground">
@@ -270,53 +437,14 @@ export function QueryForm({
             ) : null}
           </div>
 
-          <fieldset className="flex flex-col gap-2 border-0 p-0">
-            <legend className="h-section text-foreground">Content types</legend>
-            {/* Checkboxes rather than a menu: picking two formats is a normal
-                thing to want, and the group has to say so at a glance. */}
-            <div className="flex flex-wrap gap-x-5 gap-y-2.5 pt-0.5">
-              {CONTENT_TYPE_CHOICES.map((choice) => (
-                <label
-                  key={choice.value}
-                  className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
-                >
-                  <input
-                    type="checkbox"
-                    name="content-types"
-                    value={choice.value}
-                    checked={values.contentTypes.includes(choice.value)}
-                    onChange={(event) =>
-                      set(
-                        "contentTypes",
-                        // Rebuilt from the menu rather than appended to, so the
-                        // value always reads in the order the boxes are shown.
-                        CONTENT_TYPE_CHOICES.filter((option) =>
-                          option.value === choice.value
-                            ? event.target.checked
-                            : values.contentTypes.includes(option.value),
-                        ).map((option) => option.value),
-                      )
-                    }
-                    className="size-4 accent-[var(--brand)]"
-                  />
-                  {choice.label}
-                </label>
-              ))}
-            </div>
-            <FieldHint>
-              Keeps every idea inside the formats you tick, spread across them.
-              Leave them all unticked to let each idea pick its own.
-            </FieldHint>
-          </fieldset>
-
           <div className="flex flex-col gap-2">
             <Label className="h-section text-foreground">Time range</Label>
-            {/* A segmented control: one track, one filled cell, no gaps to
-                misread as separate buttons. */}
+            {/* Single-select, so these stay radios rather than becoming
+                ToggleChips. The look is shared; the semantics are not. */}
             <div
               role="radiogroup"
               aria-label="Time range"
-              className="flex w-fit gap-1 rounded-xl border bg-card p-1"
+              className="flex flex-wrap gap-1 pt-0.5"
             >
               {TIME_WINDOWS.map((days) => (
                 <button
@@ -326,10 +454,9 @@ export function QueryForm({
                   aria-checked={values.days === days}
                   onClick={() => set("days", days)}
                   className={cn(
-                    "num rounded-lg px-3.5 py-1.5 text-sm transition-colors",
-                    values.days === days
-                      ? "bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] shadow-[inset_0_0_0_1px_var(--brand-line)]"
-                      : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                    "num",
+                    CHIP_BASE,
+                    values.days === days ? CHIP_ON : CHIP_OFF,
                   )}
                 >
                   {days} days

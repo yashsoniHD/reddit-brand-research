@@ -1,9 +1,13 @@
 # Reddit Content Ideas
 
 Type what you're looking for. The app finds the Reddit communities where people
-actually discuss it, reads what they say, and turns it into platform-native content
-ideas for LinkedIn, Instagram, or both, each with a scroll-stopping hook and the
-evidence behind it.
+actually discuss it, reads what they say, and turns it into content ideas, each with
+a scroll-stopping hook and the evidence behind it.
+
+Name the channels you publish on (LinkedIn, Instagram, TikTok, X, YouTube, your
+newsletter) and the ideas come back in the formats those channels can actually
+ship, written in the register each one rewards. Name none and the ideas are not
+tied to one place.
 
 Built for anyone who needs to show their work: every claim in the report links to the
 Reddit post or comment behind it, and every number is computed from the data rather

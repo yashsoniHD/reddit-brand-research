@@ -10,7 +10,7 @@ import { ImageResponse } from "next/og";
  */
 
 export const alt =
-  "Reddit Content Ideas: turn what people actually say on Reddit into LinkedIn posts you can publish";
+  "Reddit Content Ideas: turn what people actually say on Reddit into content you can publish";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -76,7 +76,7 @@ export default function OpengraphImage() {
             }}
           >
             Turn what people actually say on Reddit into&nbsp;
-            <span style={{ color: BRAND }}>LinkedIn posts</span>
+            <span style={{ color: BRAND }}>content</span>
             &nbsp;you can publish.
           </div>
           <div style={{ fontSize: 28, lineHeight: 1.45, color: SOFT }}>

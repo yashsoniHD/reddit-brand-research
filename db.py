@@ -1,7 +1,9 @@
 """Postgres persistence for saved reports and their drafts.
 
 One table per thing worth keeping: `reports` holds the bundle a run produced,
-`drafts` holds the LinkedIn post written for one idea inside it. Both live in a
+`drafts` holds the post written for one idea inside it. A draft is keyed by report
+and idea index alone, not by channel, so an idea drafted for two channels keeps
+only the most recent one. Both live in a
 Supabase project, and both have RLS enabled with no policies at all, so the
 anon key can read nothing. Everything here connects directly to Postgres as the
 `postgres` role, which bypasses RLS: the backend is the only reader and writer,

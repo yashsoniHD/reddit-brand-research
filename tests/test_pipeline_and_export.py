@@ -2,11 +2,13 @@
 
 import json
 import os
+import re
 import threading
 import time
 
 import pytest
 
+import analysis
 import pipeline
 import report_export
 
@@ -321,7 +323,7 @@ class TestValidateInputs:
         assert result["errors"] == []
         assert result["content_types"] == []
 
-    @pytest.mark.parametrize("content_type", ["reel", "thread", "TEXT POST", 7, True])
+    @pytest.mark.parametrize("content_type", ["reel", "skywriting", "TEXT POST", 7, True])
     def test_an_unknown_content_type_is_a_friendly_error(self, content_type):
         result = pipeline.validate_inputs(
             DEFAULT_QUERY, "", content_types=[content_type]
@@ -339,6 +341,54 @@ class TestValidateInputs:
         # The good value is still kept, so the form comes back with the ticks
         # the user made rather than an empty group.
         assert result["content_types"] == ["text"]
+
+    def test_no_channels_is_channel_neutral(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "")
+        assert result["errors"] == []
+        assert result["channels"] == []
+
+    def test_channels_come_back_deduped_and_sorted(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", channels=["tiktok", "instagram", "tiktok"]
+        )
+        assert result["errors"] == []
+        assert result["channels"] == ["instagram", "tiktok"]
+
+    def test_choosing_every_channel_is_the_same_as_choosing_none(self):
+        # Same precedent as the content types: publishing everywhere pins nothing,
+        # so nothing downstream has to special-case "all of them".
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", channels=list(pipeline.CHANNELS)
+        )
+        assert result["errors"] == []
+        assert result["channels"] == []
+
+    @pytest.mark.parametrize("channel", ["myspace", "linked in", 7, True])
+    def test_an_unknown_channel_is_a_friendly_error(self, channel):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", channels=[channel])
+        assert result["errors"]
+        assert result["errors"][0][0].isupper() and result["errors"][0].endswith(".")
+        assert result["channels"] == []
+
+    def test_a_channel_name_is_case_insensitive(self):
+        # Same treatment the content types get: the wire value is what matters,
+        # and a client that shouts it is not making a mistake worth an error.
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", channels=[" LinkedIn "])
+        assert result["errors"] == []
+        assert result["channels"] == ["linkedin"]
+
+    def test_the_unknown_channel_error_names_the_value_that_was_sent(self):
+        result = pipeline.validate_inputs(
+            DEFAULT_QUERY, "", channels=["linkedin", "myspace"]
+        )
+        assert len(result["errors"]) == 1
+        assert '"myspace"' in result["errors"][0]
+        assert result["channels"] == ["linkedin"]
+
+    def test_a_channel_field_of_the_wrong_shape_is_a_friendly_error(self):
+        result = pipeline.validate_inputs(DEFAULT_QUERY, "", channels=5)
+        assert result["errors"]
+        assert result["channels"] == []
 
     @pytest.mark.parametrize("raw", [7, True, {"text": True}, 1.5])
     def test_content_types_that_are_not_a_list_or_a_name_are_rejected(self, raw):
@@ -658,7 +708,7 @@ class TestRunReport:
         bundle = build_bundle(content_types=["carousel"], synthesize=spy)
         assert captured["content_types"] == ["carousel"]
         assert bundle["inputs"]["content_types"] == ["carousel"]
-        assert bundle["analysis"]["content_ideas"][0]["format"] == "Carousel (PDF)"
+        assert bundle["analysis"]["content_ideas"][0]["format"] == "Carousel"
 
     def test_several_content_types_reach_synthesis_sorted(self):
         captured = {}
@@ -686,6 +736,57 @@ class TestRunReport:
         # Validation is the input layer's job; the engine simply ignores a value
         # it does not offer rather than pinning ideas to it.
         assert "content_types" not in build_bundle(content_types=["reel"])["inputs"]
+
+    def test_channels_reach_synthesis_and_the_bundle(self):
+        captured = {}
+
+        def spy(items, topics, query, profile, subreddits, preview_chars=200,
+                content_types=None, channels=None):
+            captured["channels"] = channels
+            return fake_synthesize(items, topics, query, profile, subreddits,
+                                   preview_chars, content_types)
+
+        bundle = build_bundle(channels=["tiktok", "instagram"], synthesize=spy)
+        assert captured["channels"] == ["instagram", "tiktok"]
+        assert bundle["inputs"]["channels"] == ["instagram", "tiktok"]
+
+    def test_a_synthesize_fake_that_predates_channels_still_runs(self):
+        # `synthesize` is an injection point, so the channel argument goes through
+        # the same signature probe the deadline does. A caller with an older fake
+        # must get a channel-neutral run, not a TypeError.
+        def old_signature(items, topics, query, profile, subreddits,
+                          preview_chars=200, content_types=None):
+            return fake_synthesize(items, topics, query, profile, subreddits,
+                                   preview_chars, content_types)
+
+        bundle = build_bundle(channels=["tiktok"], synthesize=old_signature)
+        assert bundle["inputs"]["channels"] == ["tiktok"]
+
+    def test_the_bundle_records_no_channels_when_unset(self):
+        assert "channels" not in build_bundle()["inputs"]
+
+    def test_asking_for_every_channel_records_none_of_them(self):
+        bundle = build_bundle(channels=list(pipeline.CHANNELS))
+        assert "channels" not in bundle["inputs"]
+
+    def test_an_unknown_channel_never_reaches_the_bundle(self):
+        assert "channels" not in build_bundle(channels=["myspace"])["inputs"]
+
+    def test_an_impossible_format_pin_is_dropped_and_the_report_says_so(self):
+        # ch=tiktok&type=poll is a URL a user can genuinely arrive with. The
+        # channel wins, and the reader is told rather than left assuming their
+        # format choice was honoured.
+        bundle = build_bundle(channels=["tiktok"], content_types=["poll"])
+        notices = [n for n in bundle["notices"] if "formats you asked for" in n]
+        assert len(notices) == 1
+        assert "poll" in notices[0] and "TikTok" in notices[0]
+        # Both pins are still recorded: the bundle reports what was asked for.
+        assert bundle["inputs"]["channels"] == ["tiktok"]
+        assert bundle["inputs"]["content_types"] == ["poll"]
+
+    def test_a_workable_pin_produces_no_notice(self):
+        bundle = build_bundle(channels=["instagram"], content_types=["carousel"])
+        assert not [n for n in bundle["notices"] if "formats you asked for" in n]
 
     def test_report_title_comes_from_synthesis(self):
         assert build_bundle()["analysis"]["report_title"] == "Tool sprawl among freelancers"
@@ -1087,6 +1188,26 @@ class TestExports:
         markdown = report_export.report_markdown(_appendix_bundle(items))
         section = markdown[markdown.index("## Source threads"):]
         assert section.count(". **[") == report_export.MAX_SOURCE_THREADS
+
+    def test_the_export_names_the_channels_a_run_was_written_for(self):
+        markdown = report_export.report_markdown(
+            build_bundle(channels=["instagram", "tiktok"])
+        )
+        assert "**Written for:** Instagram, TikTok" in markdown
+        methodology = markdown[markdown.index("## Methodology"):]
+        assert "written for Instagram and TikTok" in methodology
+        assert "those channels can ship" in methodology
+
+    def test_one_channel_reads_in_the_singular(self):
+        markdown = report_export.report_markdown(build_bundle(channels=["newsletter"]))
+        assert "that channel can ship" in markdown
+
+    def test_a_channel_neutral_export_says_nothing_about_channels(self):
+        # Including a bundle written before channels existed, which carries no key
+        # at all rather than an empty list.
+        markdown = report_export.report_markdown(build_bundle())
+        assert "Written for:" not in markdown
+        assert "- Channels:" not in markdown
 
     def test_comments_csv_header_has_a_sentiment_column(self):
         header = report_export.comments_csv(build_bundle()).strip().split("\n")[0]
@@ -1830,3 +1951,69 @@ class TestExportDescribesRetrieval:
         bundle["inputs"].pop("retrieval", None)
         markdown = report_export.report_markdown(bundle)
         assert "last {} days".format(pipeline.DEFAULT_DAYS) in markdown
+
+
+# ── Frontend mirrors ──────────────────────────────────────────────────────────
+class TestFrontendChannelMirrors:
+    """`lib/types.ts` hand-mirrors the engine's channel and format maps.
+
+    The file says so in a comment, and a comment is not a guarantee. These read
+    the TypeScript source and check the two agree, because the failure mode is
+    silent: a channel the engine knows and the menu does not is simply never
+    offered, and a format label the frontend cannot map back to a key quietly
+    disables the draft dialog's channel filtering for that idea.
+    """
+
+    TYPES_TS = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "types.ts"
+    )
+
+    @classmethod
+    def _source(cls) -> str:
+        with open(cls.TYPES_TS, encoding="utf-8") as handle:
+            return handle.read()
+
+    @classmethod
+    def _block(cls, opener: str) -> str:
+        """The text of the object literal that follows `opener`."""
+        source = cls._source()
+        start = source.index(opener) + len(opener)
+        return source[start: source.index("};", start)]
+
+    def test_the_channel_menu_offers_every_channel_the_engine_accepts(self):
+        block = self._block("export const CHANNEL_CHOICES: { value: Channel; label: string }[] = [")
+        offered = set(re.findall(r'value:\s*"([a-z_]+)"', block))
+        assert offered == set(analysis.CHANNELS)
+
+    def test_the_channel_menu_labels_match_the_engine_labels(self):
+        block = self._block("export const CHANNEL_CHOICES: { value: Channel; label: string }[] = [")
+        pairs = dict(re.findall(r'value:\s*"([a-z_]+)",\s*label:\s*"([^"]+)"', block))
+        assert pairs == analysis.CHANNELS
+
+    def test_the_channel_format_map_matches_the_engine(self):
+        block = self._block(
+            "export const CHANNEL_FORMATS: Record<Channel, ContentType[]> = {"
+        )
+        mirrored = {}
+        for channel, formats in re.findall(r"(\w+):\s*\[([^\]]*)\]", block):
+            mirrored[channel] = tuple(re.findall(r'"([a-z_]+)"', formats))
+        assert mirrored == analysis.CHANNEL_FORMATS
+
+    def test_every_engine_format_label_maps_back_to_a_content_type(self):
+        # This is what the draft dialog uses to decide which channels can ship a
+        # given idea. A label it cannot resolve falls back to offering every
+        # channel, which is exactly the unpostable-draft case to avoid.
+        block = self._block("const IDEA_FORMAT_KEYS: Record<string, ContentType> = {")
+        mirrored = {
+            (quoted or bare): key
+            for quoted, bare, key in re.findall(
+                r'(?:"([^"]+)"|(\w+)):\s*"([a-z_]+)"', block
+            )
+        }
+        for key, label in analysis.CONTENT_TYPE_FORMATS.items():
+            assert mirrored.get(label.lower()) == key, label
+
+    def test_the_retired_carousel_label_still_resolves(self):
+        # Stored bundles and replayed links are full of "Carousel (PDF)".
+        block = self._block("const IDEA_FORMAT_KEYS: Record<string, ContentType> = {")
+        assert '"carousel (pdf)": "carousel"' in block

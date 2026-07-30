@@ -1,19 +1,26 @@
 import { Drawer } from "@/components/report/section";
 import { compact, joinQuoted, phraseDropReason, thousands } from "@/lib/format";
 import {
+  bundleChannels,
   bundleContentTypes,
+  CHANNEL_LABELS,
   type Bundle,
   type ContentType,
   type FilterInfo,
   type RequirementInfo,
 } from "@/lib/types";
 
+// Lowercased on purpose: these land mid-sentence here, where the menu's
+// title-case labels would read as proper nouns.
 const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
   text: "text post",
   carousel: "carousel",
   video: "video script",
   poll: "poll",
   article: "long-form article",
+  short_video: "short-form video script",
+  thread: "thread",
+  issue: "newsletter issue",
 };
 
 /**
@@ -121,6 +128,7 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
   const contentTypes = bundleContentTypes(bundle.inputs).map(
     (type) => CONTENT_TYPE_LABELS[type],
   );
+  const channels = bundleChannels(bundle.inputs).map((key) => CHANNEL_LABELS[key]);
 
   return (
     <Drawer summary="Methodology and limitations" hint={bundle.model_label}>
@@ -140,6 +148,13 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
             : `Requested: last ${inputs.days ?? 7} days.`}{" "}
           Actual coverage: {range?.label || "n/a"}.
         </Row>
+        {channels.length > 0 ? (
+          <Row label={channels.length === 1 ? "Channel" : "Channels"}>
+            {channels.length === 1
+              ? `Written for ${channels[0]}, so the formats are the ones that channel can ship.`
+              : `Written for ${channels.join(", ")}, so the formats are the ones those channels can ship.`}
+          </Row>
+        ) : null}
         {contentTypes.length > 0 ? (
           <Row label={contentTypes.length === 1 ? "Content type" : "Content types"}>
             {contentTypes.length === 1

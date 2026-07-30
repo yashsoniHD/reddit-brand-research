@@ -18,9 +18,13 @@ import {
   MAX_QUERY_CHARS,
   MIN_QUERY_CHARS,
   TIME_WINDOWS,
+  bundleChannels,
   bundleContentTypes,
+  formatsForChannels,
+  parseChannels,
   parseContentTypes,
   type Bundle,
+  type Channel,
   type ContentType,
 } from "@/lib/types";
 
@@ -33,6 +37,7 @@ const DEFAULT_VALUES: FormValues = {
   days: DEFAULT_DAYS,
   relevance: true,
   contentTypes: [],
+  channels: [],
 };
 
 /** Mirrors pipeline.validate_inputs so obvious mistakes never cost a round trip. */
@@ -72,6 +77,7 @@ interface UrlState {
   subreddits?: string;
   relevance?: boolean;
   contentTypes?: ContentType[];
+  channels?: Channel[];
 }
 
 function readQueryParams(): Partial<FormValues> {
@@ -91,6 +97,18 @@ function readQueryParams(): Partial<FormValues> {
   // still parses, because splitting a single value yields that single value.
   const contentTypes = parseContentTypes(params.get("type"));
   if (contentTypes.length > 0) next.contentTypes = contentTypes;
+  const channels = parseChannels(params.get("ch"));
+  if (channels.length > 0) {
+    next.channels = channels;
+    // A link can name a channel and a format that channel cannot ship. The
+    // engine resolves that in favour of the channel, so the form has to agree
+    // rather than showing a tick the run will not honour.
+    if (contentTypes.length > 0) {
+      const shippable = new Set(formatsForChannels(channels));
+      const kept = contentTypes.filter((type) => shippable.has(type));
+      next.contentTypes = kept.length > 0 ? kept : [];
+    }
+  }
   return next;
 }
 
@@ -107,6 +125,9 @@ function writeQueryParams(state: UrlState): void {
   if (state.relevance === false) params.set("rel", "0");
   if (state.contentTypes && state.contentTypes.length > 0) {
     params.set("type", state.contentTypes.join(","));
+  }
+  if (state.channels && state.channels.length > 0) {
+    params.set("ch", state.channels.join(","));
   }
   // Rooted at "/" rather than at the current path: once a saved run has
   // rewritten the URL to /r/<id>, a later unsaved run must not produce
@@ -146,6 +167,7 @@ function urlStateFor(bundle: Bundle, form?: FormValues): UrlState {
       subreddits: form.subreddits.trim() || undefined,
       relevance: form.relevance,
       contentTypes: form.contentTypes,
+      channels: form.channels,
     };
   }
   const manual = inputs.discovery === "manual";
@@ -154,6 +176,7 @@ function urlStateFor(bundle: Bundle, form?: FormValues): UrlState {
     days: inputs.days,
     subreddits: manual ? (inputs.subreddits ?? []).join(",") || undefined : undefined,
     contentTypes: bundleContentTypes(inputs),
+    channels: bundleChannels(inputs),
   };
 }
 
@@ -188,6 +211,7 @@ export function ContentIdeasApp() {
       seeded.subreddits !== undefined ||
       seeded.relevance !== undefined ||
       seeded.contentTypes !== undefined ||
+      seeded.channels !== undefined ||
       (seeded.days !== undefined && seeded.days !== DEFAULT_DAYS)
     ) {
       setAdvancedOpen(true);
@@ -293,6 +317,7 @@ export function ContentIdeasApp() {
         ...(values.contentTypes.length > 0
           ? { content_types: values.contentTypes }
           : {}),
+        ...(values.channels.length > 0 ? { channels: values.channels } : {}),
       },
       {
         signal: abort.signal,

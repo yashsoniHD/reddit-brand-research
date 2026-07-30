@@ -635,3 +635,120 @@ poll, say), and the single select made it impossible to ask for.
   that name.
 - The methodology row lists the formats the ideas were written for, reading
   `inputs.content_types` and falling back to the legacy `inputs.content_type`.
+
+## Addendum 6 (2026-07-30): channels, and the end of the LinkedIn framing
+
+Reverses Addendum 3 item 1. That change stripped the platform concept from the
+product because the app wrote for one professional feed; the framing has since
+become the constraint rather than the focus, since the engine (find communities,
+search them, cite the evidence, write ideas and drafts) serves any content
+creator.
+
+Not a `platform` enum bolted back on. A run carries an optional set of
+**channels** that narrows the formats the ideas may take and decides how a draft
+is written. A run naming no channel is channel-neutral and behaves exactly as
+before, minus the LinkedIn wording, so this is additive for every existing
+report, link and history entry.
+
+### No bundle version bump
+
+`BUNDLE_VERSION` stays 5. `Inputs.channels` is optional and the `ContentType`
+union only gained values a v5 bundle never carried, which is the precedent
+already documented at the top of `lib/types.ts`: additive optional fields do not
+bump. Frontend and backend deploy together, so no reader ever meets a key it
+cannot label.
+
+### Channels
+
+`analysis.CHANNELS` (wire key -> label) and `analysis.CHANNEL_FORMATS`:
+
+| channel | formats it can ship |
+| --- | --- |
+| `linkedin` | text, carousel, poll, article, video |
+| `instagram` | carousel, short_video, text, poll |
+| `tiktok` | short_video |
+| `x` | text, thread, poll |
+| `youtube` | video, short_video |
+| `newsletter` | issue, article |
+
+`analysis.CHANNEL_DRAFT_RULES` carries, per channel, the artefact phrase ("a
+TikTok video"), the hashtag ceiling, the poll-option cap (`None` where the
+channel has no poll object, in which case the draft prompt never offers one) and
+one line of voice instruction. `analysis.draft_rules(channel)` falls back to the
+channel-neutral rules (3 hashtags, 4 poll options, no voice line) for an unknown
+channel or none, which is what every draft written before channels existed got.
+
+### Formats
+
+`IDEA_FORMATS` grows from five to eight: `short_video` ("Short-form video
+script", distinct from the long-form `video`, because a YouTube walkthrough and a
+Reel are different artefacts), `thread` ("Thread") and `issue` ("Newsletter
+issue", keyed `issue` so a format key cannot be confused with the `newsletter`
+channel). `carousel` loses its `(PDF)` suffix, which was the LinkedIn document
+post leaking into a label; the channel now decides whether slides are a PDF or
+images. `"Carousel (PDF)"` stays in `_FORMAT_ALIASES`, because stored bundles and
+replayed links are full of it.
+
+### Precedence: the channel wins
+
+Channels and content types are independent pins that can contradict each other:
+a shared link can carry `ch=tiktok&type=poll`, and TikTok has no polls.
+`analysis.allowed_formats(channels, content_types)` returns the intersection plus
+a flag; an empty intersection falls back to the channel's formats and the flag is
+true. `pipeline.run_report` turns that flag into a notice naming both sides.
+Refusing the run would break old links and honouring the format would hand back
+something unpostable, so the channel wins and the report says so. This follows
+the doctrine `chosen_formats` already stated: unknown values are dropped rather
+than refused.
+
+### Surfaces
+
+- `validate_inputs(..., channels=...)` and `run_report(..., channels=...)`;
+  `selected_channels` mirrors `selected_content_types` (every channel is the same
+  request as none, so it comes back empty). `inputs["channels"]` is written only
+  when the run was pinned to a real subset.
+- `synthesize(..., channels=...)` reaches `_synthesis_prompt`, which names the
+  channels and builds the format rule from `allowed_formats`. The persona is "a
+  content strategist for a creator growing an audience"; the hook rule says
+  "stop a scroll on {channels}" or "stop a feed scroll". `channels` goes through
+  the `_accepts` signature probe at the call site, like `deadline`, so an
+  injected fake that predates it still runs.
+- `draft_post(..., channel=...)` and `POST /api/draft` with an optional
+  `channel`. An unknown one is dropped, not refused: the post is still writable
+  channel-neutral and a stale client should not lose a draft over it.
+- `scripts/run_report.py --channels`; a "Written for" line and a Channels row in
+  the Markdown export.
+- CLI, URL (`?ch=linkedin,instagram`) and methodology row all round-trip.
+
+### Frontend
+
+- A Channels fieldset sits directly above Content types, because one filters the
+  other: `formatsForChannels` shrinks the format menu to what the ticked channels
+  can ship, and a format tick that falls outside the new set is dropped in the
+  same update. A tick the run would not honour is worse than one that disappears.
+- The draft dialog names the channel ("Your Instagram draft") and, for a run with
+  more than one, offers a switcher. The channel is part of the dialog body's key,
+  so switching remounts into a fresh request the way reopening does. The in-page
+  draft cache is keyed by `index|channel`.
+- **Known limitation:** `db.py` keys saved drafts on `(report_id, idea_index)`
+  alone, so drafting one idea for two channels overwrites the first. Extending
+  the key is a Supabase migration and was left out of scope; last write wins.
+
+### Settings panel redesign (same change, `components/query-form.tsx`)
+
+The panel is nested inside a pure-white `surface-raised` card, where the page's
+three-plane stack has already bottomed out: warm `--hush` (#f1f1ec) read as a
+smudge on white, and the `open:bg-card` fix that replaced it was white on white
+held by a 10%-opacity hairline. So the panel is now **unfilled**, separated by a
+top rule and a left `--brand-line` rule with indentation, which is what
+`globals.css` says the elevation system is for. No new token; `.surface-hush`
+stays for the report zone.
+
+Channels, content types and the time range now share one chip idiom (`CHIP_BASE`
+/ `CHIP_ON` / `CHIP_OFF`) instead of two. The chip border uses `--input`, not
+`--border`: with no plate behind them, an unticked borderless chip is
+indistinguishable from a row of plain labels. Channels and content types stay
+real `<input type="checkbox">` elements kept `sr-only` inside their labels
+(multi-select), styled through `has-focus-visible:`; only the time range is
+single-select and keeps its `role="radio"` markup. Field order is About you ->
+Channels -> Content types -> Communities -> Time range -> Relevance filter.

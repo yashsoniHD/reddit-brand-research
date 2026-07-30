@@ -13,7 +13,12 @@ import {
 } from "@/components/ui/dialog";
 import { draftPost, saveDraft } from "@/lib/api";
 import { truncate } from "@/lib/format";
-import { MAX_DRAFT_EVIDENCE, type ContentIdea } from "@/lib/types";
+import {
+  CHANNEL_LABELS,
+  MAX_DRAFT_EVIDENCE,
+  type Channel,
+  type ContentIdea,
+} from "@/lib/types";
 
 /**
  * Click an idea, get a post you can publish.
@@ -32,6 +37,8 @@ export interface DraftContext {
   profile: string;
   /** Set only when this report is stored. Absent means nothing persists. */
   reportId?: string;
+  /** The channels this run was written for. Empty means channel-neutral. */
+  channels: Channel[];
 }
 
 type State =
@@ -62,6 +69,8 @@ function DraftBody({
   idea,
   ideaIndex,
   context,
+  channel,
+  onChannelChange,
   cached,
   onCache,
 }: {
@@ -69,6 +78,9 @@ function DraftBody({
   /** Which idea this is in the report, and therefore which row it saves to. */
   ideaIndex: number;
   context: DraftContext;
+  /** Which channel this draft is being written for. Undefined is neutral. */
+  channel: Channel | undefined;
+  onChannelChange: (next: Channel) => void;
   cached: string | undefined;
   onCache: (post: string) => void;
 }) {
@@ -139,6 +151,7 @@ function DraftBody({
         evidence: evidenceFor(idea),
         query: context.query,
         profile: context.profile,
+        ...(channel ? { channel } : {}),
         // Sent together or not at all: with them the server files the post it
         // just wrote, so nothing has to be saved from here afterwards.
         ...(context.reportId
@@ -156,7 +169,7 @@ function DraftBody({
       return;
     }
     setState({ phase: "error", message: outcome.message });
-  }, [idea, ideaIndex, context.query, context.profile, context.reportId, onCache]);
+  }, [idea, ideaIndex, channel, context.query, context.profile, context.reportId, onCache]);
 
   // Opening is the trigger. A cached post is already the initial state, so this
   // only ever fires for an idea that has not been drafted yet.
@@ -211,7 +224,9 @@ function DraftBody({
   return (
     <>
       <DialogHeader className="gap-1.5 border-b px-6 py-5 text-left">
-        <span className="h-quiet">Your LinkedIn draft</span>
+        <span className="h-quiet">
+          {channel ? `Your ${CHANNEL_LABELS[channel]} draft` : "Your draft"}
+        </span>
         <DialogTitle className="pr-8 text-[1.0625rem] leading-snug font-semibold tracking-[-0.014em]">
           {idea.title}
         </DialogTitle>
@@ -219,6 +234,33 @@ function DraftBody({
           Written from this idea and the posts behind it. Edit it to sound like you before
           publishing.
         </DialogDescription>
+
+        {/* Only for a run that named more than one channel: with one, the label
+            above already says which, and a switcher of one is a dead control. */}
+        {context.channels.length > 1 ? (
+          <div
+            role="radiogroup"
+            aria-label="Draft for channel"
+            className="mt-1.5 flex w-fit flex-wrap gap-1 rounded-xl border bg-card p-1"
+          >
+            {context.channels.map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="radio"
+                aria-checked={option === channel}
+                onClick={() => onChannelChange(option)}
+                className={
+                  option === channel
+                    ? "rounded-lg bg-[var(--brand-soft)] px-3 py-1 text-xs font-semibold text-[var(--brand-ink)] shadow-[inset_0_0_0_1px_var(--brand-line)]"
+                    : "rounded-lg px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                }
+              >
+                {CHANNEL_LABELS[option]}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </DialogHeader>
 
       <div className="max-h-[52svh] overflow-y-auto px-6 py-5">
@@ -340,6 +382,8 @@ export function DraftDialog({
   ideaIndex,
   ideaKey,
   context,
+  channel,
+  onChannelChange,
   cached,
   onCache,
   onClose,
@@ -347,9 +391,15 @@ export function DraftDialog({
   idea: ContentIdea | null;
   /** Position of the open idea in the report. Null when nothing is open. */
   ideaIndex: number | null;
-  /** Identity of the open idea, so each open is its own mount. */
+  /**
+   * Identity of the open idea AND the channel it is being drafted for, so each
+   * open is its own mount and switching channel remounts into a fresh request.
+   */
   ideaKey: string | null;
   context: DraftContext;
+  /** The channel being drafted for. Undefined on a channel-neutral run. */
+  channel: Channel | undefined;
+  onChannelChange: (next: Channel) => void;
   cached: string | undefined;
   onCache: (post: string) => void;
   onClose: () => void;
@@ -366,6 +416,8 @@ export function DraftDialog({
             idea={idea}
             ideaIndex={ideaIndex ?? 0}
             context={context}
+            channel={channel}
+            onChannelChange={onChannelChange}
             cached={cached}
             onCache={onCache}
           />

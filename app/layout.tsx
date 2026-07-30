@@ -16,9 +16,9 @@ const inter = Inter({
 
 const NAME = "Reddit Content Ideas";
 const TAGLINE =
-  "Turn what people actually say on Reddit into LinkedIn posts you can publish";
+  "Turn what people actually say on Reddit into content you can publish";
 const DESCRIPTION =
-  "Type what you are looking for. We find the Reddit communities, search them for the threads that match, and hand back LinkedIn post ideas with the hook already written and every claim linked to the thread it came from.";
+  "Type what you are looking for. We find the Reddit communities, search them for the threads that match, and hand back content ideas with the hook already written and every claim linked to the thread it came from. Written for the channels you actually post on: LinkedIn, Instagram, TikTok, X, YouTube or your newsletter.";
 
 /**
  * The absolute base every relative metadata URL resolves against, notably the
@@ -47,11 +47,12 @@ export const metadata: Metadata = {
   description: DESCRIPTION,
   applicationName: NAME,
   keywords: [
-    "LinkedIn post ideas",
+    "content ideas",
     "Reddit research",
     "content research",
     "audience research",
     "social listening",
+    "creator research",
   ],
   openGraph: {
     type: "website",

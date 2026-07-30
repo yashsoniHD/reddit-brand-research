@@ -47,6 +47,10 @@ DEFAULT_DAYS = 7
 # The output formats the ideas may take, when the user asks for a subset of them.
 # An empty selection means the model picks the format that suits each idea.
 CONTENT_TYPES = tuple(analysis.CONTENT_TYPE_FORMATS.keys())
+# Where the user publishes. An empty selection is channel-neutral, which is what
+# every run before channels existed was, so it stays the default. Naming channels
+# narrows the formats and changes how the drafts are written.
+CHANNELS = tuple(analysis.CHANNELS.keys())
 # The history label has to fit a sidebar, so the query is cut down to a glance.
 MAX_LABEL_QUERY_CHARS = 30
 # Bodies kept in the bundle's raw `posts` and `comments` lists. The full text is
@@ -81,6 +85,34 @@ _REQUIREMENTS_NOT_APPLIED = (
     "recency alone. Anything your brief asked for about who posted a thread, or "
     "what kind of thread it is, was not applied."
 )
+
+def _dropped_format_pin_notice(channels: Sequence[str], content_types: Sequence[str]) -> str:
+    """Said when the channels and the format pin could not both be honoured.
+
+    A shared link can ask for a poll on TikTok. Refusing the run would break the
+    link and honouring the format would hand back something the user cannot post,
+    so the channel wins and this sentence says so rather than letting the reader
+    assume their format choice was applied.
+    """
+    labels = analysis.channel_labels(channels)
+    return (
+        "The formats you asked for ({formats}) are not available on {channels}, so the "
+        "ideas use the formats {that} instead.".format(
+            formats=analysis.join_labels(
+                [
+                    analysis.CONTENT_TYPE_FORMATS.get(key, key).lower()
+                    for key in content_types
+                ]
+            ),
+            channels=analysis.join_labels(labels) or "those channels",
+            that=(
+                "that channel supports"
+                if len(labels) == 1
+                else "those channels support"
+            ),
+        )
+    )
+
 
 _OUT_OF_TIME = (
     "This run took longer than we can keep it open. Try a shorter time range, or "
@@ -136,6 +168,7 @@ def validate_inputs(
     relevance_filter: Optional[bool] = None,
     content_types: Optional[object] = None,
     content_type: Optional[object] = None,
+    channels: Optional[object] = None,
 ) -> dict:
     """Check every field at once and collect all problems.
 
@@ -143,11 +176,14 @@ def validate_inputs(
     things; this returns everything wrong in one pass, plus the cleaned values.
     The last fields are advanced settings and all optional: absent means the
     defaults (a 7-day window, automatic discovery, relevance filter on, mixed
-    formats).
+    formats, every channel).
 
     `content_types` is the list of formats the ideas should take. `content_type`
     is the single value the form used to send and is still accepted, because old
     links and stored history replay it; it reads as a one-item list.
+
+    `channels` is where the user publishes. It narrows the formats further and
+    decides how a draft is written; naming none is channel-neutral.
 
     `phrases` comes back parsed out of the query's own quote marks and is never
     a source of errors. A phrase that is too short, too long or badly quoted is
@@ -179,6 +215,7 @@ def validate_inputs(
     cleaned_subreddits = _clean_subreddits(subreddits, errors)
     cleaned_relevance = _clean_relevance_filter(relevance_filter, errors)
     cleaned_content_types = _clean_content_types(content_types, content_type, errors)
+    cleaned_channels = _clean_channels(channels, errors)
 
     return {
         "errors": errors,
@@ -188,6 +225,7 @@ def validate_inputs(
         "subreddits": cleaned_subreddits,
         "relevance_filter": cleaned_relevance,
         "content_types": cleaned_content_types,
+        "channels": cleaned_channels,
         # Parsed, never validated: see the docstring. `errors` is untouched here
         # on purpose, and that is the whole compatibility guarantee.
         "phrases": keywords.parse_phrases(cleaned_query).phrases,
@@ -356,6 +394,75 @@ def selected_content_types(content_types) -> List[str]:
     return chosen
 
 
+def _channel_sentence() -> str:
+    """"linkedin, instagram, ... or newsletter", written from the offered set."""
+    return "{} or {}".format(", ".join(CHANNELS[:-1]), CHANNELS[-1])
+
+
+def _channel_shape_error() -> str:
+    return (
+        "Send the channels as a list of names ({}), or leave it unset for all of "
+        "them.".format(_channel_sentence())
+    )
+
+
+def _clean_channels(channels, errors: List[str]) -> List[str]:
+    """The channels the run is for, deduped and sorted; empty means all of them.
+
+    Shaped exactly like `_clean_content_types` because it is the same kind of
+    field, and a reader who understands one should not have to learn a second
+    convention for the other.
+    """
+    if channels is None:
+        return []
+    if isinstance(channels, str):
+        entries: Sequence = [channels]
+    elif isinstance(channels, (list, tuple)):
+        entries = list(channels)
+    else:
+        errors.append(_channel_shape_error())
+        return []
+
+    values: List[str] = []
+    for entry in entries:
+        # bool is an int subclass, and neither is a channel. Coercing one would
+        # turn a client bug into a publishing decision nobody made.
+        if isinstance(entry, bool) or not isinstance(entry, str):
+            errors.append(_channel_shape_error())
+            continue
+        text = entry.strip().lower()
+        if not text:
+            continue
+        if text not in CHANNELS:
+            errors.append(
+                'We do not support a channel called "{}". Choose from {}.'.format(
+                    entry.strip(), _channel_sentence()
+                )
+            )
+            continue
+        values.append(text)
+    return selected_channels(values)
+
+
+def selected_channels(channels) -> List[str]:
+    """The channels a run is pinned to, sorted; empty when it is channel-neutral.
+
+    Ticking every channel is the same request as ticking none: the ideas may use
+    any format and the drafts have no single voice to write in. Same precedent as
+    `selected_content_types`, for the same reason.
+    """
+    chosen = sorted(
+        {
+            value.strip().lower()
+            for value in (channels or [])
+            if isinstance(value, str) and value.strip().lower() in CHANNELS
+        }
+    )
+    if len(chosen) >= len(CHANNELS):
+        return []
+    return chosen
+
+
 def _noop(_message: str) -> None:
     pass
 
@@ -503,6 +610,7 @@ def run_report(
     subreddits: Optional[Sequence[str]] = None,
     relevance_filter: bool = True,
     content_types: Optional[Sequence[str]] = None,
+    channels: Optional[Sequence[str]] = None,
     phrases: Optional[Sequence[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
     discover: Optional[Callable] = None,
@@ -519,11 +627,14 @@ def run_report(
 ) -> dict:
     """Produce a complete report bundle, or raise RunError with a friendly message.
 
-    `days`, `subreddits`, `relevance_filter` and `content_types` are the advanced
-    settings: a shorter window, a manual list of communities that skips discovery
-    entirely, a switch that turns the relevance triage off for a faster,
-    engagement-only selection, and the set of output formats the ideas may take
-    (empty, or all of them, meaning a mix). `days` bounds reading a community in
+    `days`, `subreddits`, `relevance_filter`, `content_types` and `channels` are the
+    advanced settings: a shorter window, a manual list of communities that skips
+    discovery entirely, a switch that turns the relevance triage off for a faster,
+    engagement-only selection, the set of output formats the ideas may take
+    (empty, or all of them, meaning a mix), and where the user publishes (empty
+    meaning channel-neutral). A channel narrows the formats on top of whatever
+    `content_types` asked for; where the two contradict each other the channel wins
+    and the report says the format pin was dropped. `days` bounds reading a community in
     full and is ignored by a search, which takes the most recent matches however
     far back they reach; see the retrieval-mode block for which one a given run
     gets. The eight
@@ -557,6 +668,13 @@ def run_report(
     synthesize = synthesize or analysis.synthesize
 
     chosen_types = selected_content_types(content_types)
+    chosen_channels = selected_channels(channels)
+    # Resolved once, up front, so the notice is decided before any model call: the
+    # two pins can contradict each other (a shared link can ask for a poll on
+    # TikTok), and the reader has to be told which one was honoured.
+    _permitted, dropped_format_pin = analysis.allowed_formats(
+        chosen_channels, chosen_types
+    )
 
     parsed = keywords.parse_phrases(query)
     # `None` means "whatever the query's quote marks say"; a list, including an
@@ -575,9 +693,9 @@ def run_report(
     started = time.time()
     logger.info(
         "run start: query=%r days=%s manual_subreddits=%s relevance=%s content_types=%s "
-        "phrases=%s",
+        "channels=%s phrases=%s",
         query, days, list(subreddits or []), relevance_filter, chosen_types or "a mix",
-        active or "none",
+        chosen_channels or "any", active or "none",
     )
 
     def check(stage: str) -> None:
@@ -989,11 +1107,20 @@ def run_report(
         # is the failure this exists to prevent.
         notices.append(_REQUIREMENTS_NOT_APPLIED)
 
+    if dropped_format_pin:
+        notices.append(_dropped_format_pin_notice(chosen_channels, chosen_types))
+
     check("synthesis")
     say("Writing your content ideas…")
+    # `channels` goes through the signature probe for the same reason `deadline`
+    # does: synthesize is an injection point, and a fake that predates channels
+    # should keep working rather than raise a TypeError.
+    synthesis_kwargs = {"content_types": chosen_types}
+    if _accepts(synthesize, "channels"):
+        synthesis_kwargs["channels"] = chosen_channels
     synthesis = synthesize(
         items, classification["topics"], model_query, profile, used, preview_chars,
-        content_types=chosen_types,
+        **synthesis_kwargs,
     )
 
     # ── Everything below is computed, not generated ───────────────────────────
@@ -1061,6 +1188,11 @@ def run_report(
     }
     if chosen_types:
         inputs["content_types"] = chosen_types
+    # Same precedent as `content_types`: a channel-neutral run made no choice, and
+    # recording an empty list as if it had would make every reader test the length
+    # before believing it.
+    if chosen_channels:
+        inputs["channels"] = chosen_channels
     inputs["discovery"] = discovery_mode
     # How the posts were found, which is the difference between "these are the
     # threads that matched what you asked about" and "this is what those
