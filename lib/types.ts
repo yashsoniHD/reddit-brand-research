@@ -477,7 +477,7 @@ export const TIME_WINDOWS = [7, 14, 30] as const;
  * it: they take the most recent matches however far back those reach.
  */
 export const DEFAULT_DAYS = 7;
-export const MAX_MANUAL_SUBREDDITS = 4;
+export const MAX_MANUAL_SUBREDDITS = 8;
 
 /** Quoted-phrase filter limits, mirrored from `keywords.py`. */
 export const MAX_PHRASES = 3;

@@ -237,7 +237,7 @@ class TestValidateInputs:
 
     def test_too_many_manual_subreddits_is_an_error(self):
         result = pipeline.validate_inputs(
-            DEFAULT_QUERY, "", subreddits="one,two,three,four,five"
+            DEFAULT_QUERY, "", subreddits="one,two,three,four,five,six,seven,eight,nine"
         )
         assert result["errors"]
 

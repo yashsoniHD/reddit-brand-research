@@ -240,7 +240,7 @@ export function QueryForm({
               </span>
             </Label>
             <FieldHint>
-              Up to 4 subreddits, separated by commas. When set, these are used directly
+              Up to 8 subreddits, separated by commas. When set, these are used directly
               and automatic discovery is skipped.
             </FieldHint>
             <Input

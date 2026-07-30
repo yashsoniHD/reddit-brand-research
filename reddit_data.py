@@ -99,8 +99,10 @@ MAX_COMMENT_POSTS = 25
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
 # Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
-# than automatic discovery would.
-MAX_SUBREDDITS = 4
+# than automatic discovery would. Kept as a literal (not imported from discovery)
+# because discovery imports this module, not the other way around; a test asserts
+# the two stay equal so they can't silently drift again.
+MAX_SUBREDDITS = 8
 MIN_SUBREDDIT_LENGTH = 3
 MAX_SUBREDDIT_LENGTH = 21
 LOOKUP_FETCH_LIMIT = 10

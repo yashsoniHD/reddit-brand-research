@@ -117,7 +117,10 @@ class TestReportStreamValidation:
 
     def test_bad_subreddit_input_is_invalid(self):
         lines = _lines(
-            client.post("/api/report", json={**VALID_BODY, "subreddits": "one,two,three,four,five"})
+            client.post(
+                "/api/report",
+                json={**VALID_BODY, "subreddits": "one,two,three,four,five,six,seven,eight,nine"},
+            )
         )
         assert lines[0]["type"] == "invalid"
 

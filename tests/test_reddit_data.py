@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+import discovery
 import reddit_data
 
 
@@ -46,6 +47,16 @@ class TestNormalizeSubreddit:
         assert "regex" not in message.lower()
 
 
+class TestManualCapMatchesDiscovery:
+    """A manual pick may not read more communities than automatic discovery would.
+    The two constants live in separate modules (discovery imports reddit_data, not
+    the reverse) so nothing enforces this at import time; this test is what keeps
+    them from silently drifting apart again."""
+
+    def test_manual_cap_matches_discovery_cap(self):
+        assert reddit_data.MAX_SUBREDDITS == discovery.MAX_COMMUNITIES
+
+
 class TestParseSubredditInput:
     def test_splits_and_normalizes(self):
         assert reddit_data.parse_subreddit_input(
@@ -60,11 +71,13 @@ class TestParseSubredditInput:
 
     def test_rejects_more_than_the_cap(self):
         with pytest.raises(ValueError) as excinfo:
-            reddit_data.parse_subreddit_input("one,two,three,four,five")
+            reddit_data.parse_subreddit_input("one,two,three,four,five,six,seven,eight,nine")
         assert str(reddit_data.MAX_SUBREDDITS) in str(excinfo.value)
 
     def test_allows_exactly_the_cap(self):
-        assert len(reddit_data.parse_subreddit_input("one,two,three,four")) == 4
+        assert len(
+            reddit_data.parse_subreddit_input("one,two,three,four,five,six,seven,eight")
+        ) == 8
 
     @pytest.mark.parametrize("raw", ["", "   ", None, ","])
     def test_rejects_empty_input(self, raw):
