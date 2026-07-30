@@ -83,8 +83,12 @@ export function Topics({ bundle }: { bundle: Bundle }) {
                 role="img"
                 aria-label={`${topic.label}: ${valueLabel}`}
               >
+                {/* Rounded at the data end, square at the baseline, so the bar
+                    reads as growing from the left rather than floating. The
+                    track's own rounding clips the left edge, so nothing looks
+                    cut off. */}
                 <div
-                  className="h-full rounded-full"
+                  className="h-full rounded-r-[3px]"
                   style={{ width: `${width}%`, background: "var(--viz-accent)" }}
                 />
               </div>

@@ -172,7 +172,14 @@
     --viz-track: #2a2a2e;
     --viz-grid: #2a2a2e;
     --viz-pos: #3987e5;
-    --viz-neu: #868d95;
+    /* Its own step, not the light value reused. Dark mode lightens --viz-pos to
+       #3987e5, which moves the blue TOWARDS a mid grey: sharing light mode's
+       #868d95 put the pair at OKLab dE 14.8 for normal colour vision, under the
+       15 floor, i.e. hard to tell apart even with full colour vision. #8e949c
+       is the lightest step that still sits inside the dark lightness band and
+       restores separation to 15.3. Verified with the dataviz validator; re-run
+       it if either pole moves. */
+    --viz-neu: #8e949c;
     --viz-neg: #d03b3b;
   }
 }
