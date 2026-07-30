@@ -16,11 +16,16 @@ DEFAULT_QUERY = "ai automation ideas for freelancers"
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
-def make_discover(names, reasons=None, subscribers=None, checked=None):
+def make_discover(names, reasons=None, subscribers=None, checked=None, terms=None):
     """A fake `discover` callable. `checked` may be a bool (applies to all) or a
-    dict of per-name overrides; unset names default to True (already verified)."""
+    dict of per-name overrides; unset names default to True (already verified).
+
+    `terms` is a dict of per-name search terms and defaults to none, which routes
+    a run to scrape mode. That default is deliberate: it keeps every test written
+    before search-first retrieval exercising the path it was written for."""
     reasons = reasons or {}
     subscribers = subscribers or {}
+    terms = terms or {}
 
     def fake(query, profile):
         communities = []
@@ -37,6 +42,7 @@ def make_discover(names, reasons=None, subscribers=None, checked=None):
                     "reason": reasons.get(name, "Talks about this topic"),
                     "subscribers": subscribers.get(name, 1000),
                     "checked": is_checked,
+                    "terms": list(terms.get(name, [])),
                 }
             )
         return {"communities": communities, "considered": list(names)}
@@ -197,7 +203,7 @@ class TestValidateInputs:
 
     def test_advanced_settings_default_when_absent(self):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "")
-        assert result["days"] == 30
+        assert result["days"] == pipeline.DEFAULT_DAYS
         assert result["subreddits"] == []
         assert result["relevance_filter"] is True
 
@@ -211,7 +217,7 @@ class TestValidateInputs:
     def test_rejects_a_time_range_outside_the_allowed_set(self, days):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "", days=days)
         assert result["errors"]
-        assert result["days"] == 30  # falls back so downstream code stays sane
+        assert result["days"] == pipeline.DEFAULT_DAYS  # falls back so downstream code stays sane
 
     def test_a_numeric_string_time_range_is_tolerated(self):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "", days="14")
@@ -259,7 +265,7 @@ class TestValidateInputs:
     def test_a_non_integral_time_range_is_rejected(self):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "", days=7.9)
         assert result["errors"]
-        assert result["days"] == 30
+        assert result["days"] == pipeline.DEFAULT_DAYS
 
     def test_an_integral_float_time_range_is_accepted(self):
         result = pipeline.validate_inputs(DEFAULT_QUERY, "", days=14.0)
@@ -378,13 +384,13 @@ class TestValidateInputs:
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
 class TestRunReport:
-    def test_produces_a_complete_v4_bundle(self):
+    def test_produces_a_complete_bundle(self):
         bundle = build_bundle()
-        assert bundle["bundle_version"] == 4
+        assert bundle["bundle_version"] == pipeline.BUNDLE_VERSION
         # `content_types` is written only when a run was pinned to a subset, and
         # this one asked for a mix.
         assert set(bundle["inputs"].keys()) == {
-            "query", "profile", "subreddits", "days", "discovery"
+            "query", "profile", "subreddits", "days", "discovery", "retrieval"
         }
         assert bundle["inputs"]["subreddits"] == ["testsub"]
         assert "discovery" in bundle
@@ -766,7 +772,7 @@ class TestCancelAndDeadline:
 
     def test_an_unset_cancel_event_changes_nothing(self):
         bundle = build_bundle(cancel=threading.Event())
-        assert bundle["bundle_version"] == 4
+        assert bundle["bundle_version"] == pipeline.BUNDLE_VERSION
 
     def test_a_deadline_already_past_fails_with_a_friendly_sentence(self):
         with pytest.raises(pipeline.RunError) as excinfo:
@@ -1164,9 +1170,9 @@ class TestExports:
 
 # ── The bundled sample ────────────────────────────────────────────────────────
 class TestSampleReport:
-    """Assertions here target bundle v4. Until `sample_report.json` is regenerated
-    with the new pipeline, every test in this class is skipped rather than failing
-    on a bundle shape that predates this pass."""
+    """Assertions here target the current bundle version. Until
+    `sample_report.json` is regenerated with the new pipeline, every test in this
+    class is skipped rather than failing on a bundle shape that predates it."""
 
     @pytest.fixture(scope="class")
     def sample(self):
@@ -1175,8 +1181,8 @@ class TestSampleReport:
 
     @pytest.fixture(autouse=True)
     def _skip_until_regenerated(self, sample):
-        if sample.get("bundle_version") != 4:
-            pytest.skip("sample_report.json not yet regenerated for bundle v4")
+        if sample.get("bundle_version") != pipeline.BUNDLE_VERSION:
+            pytest.skip("sample_report.json not yet regenerated for the current bundle")
 
     def test_sample_file_has_the_current_bundle_shape(self, sample):
         assert sample["bundle_version"] == pipeline.BUNDLE_VERSION
@@ -1507,3 +1513,233 @@ class TestClassifyReceivesTheDeadline:
         # more, which is exactly the compatibility case _call exists for.
         bundle = build_bundle(deadline=time.monotonic() + 3600)
         assert bundle["sample"]["items_analysed"] > 0
+
+
+# ── Retrieval mode ────────────────────────────────────────────────────────────
+def make_search(by_sub=None, count=12):
+    """A fake `search_posts`. Records (subreddit, terms) for every call."""
+    calls = []
+
+    def fake(subreddit, terms, limit=100, deadline=None, phrases=None):
+        calls.append((subreddit, list(terms)))
+        if by_sub is not None:
+            rows = by_sub.get(subreddit, [])
+            return list(rows) if not isinstance(rows, int) else fake_posts(subreddit, count=rows)
+        return fake_posts(subreddit, count=count)
+
+    fake.calls = calls
+    return fake
+
+
+def make_comments_for_posts(count=3):
+    """A fake `fetch_comments_for_posts`. Records the post ids it was asked for."""
+    calls = []
+
+    def fake(post_ids, limit_per_post=100, deadline=None, phrases=None):
+        calls.append(list(post_ids))
+        return fake_comments("searched", count=count)
+
+    fake.calls = calls
+    return fake
+
+
+class TestRetrievalMode:
+    def test_terms_from_discovery_put_a_run_in_search_mode(self):
+        search = make_search()
+        comments = make_comments_for_posts()
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta"], terms={
+                "alpha": ["ad spend"], "beta": ["attribution", "tracking"],
+            }),
+            search_posts=search, fetch_comments_for_posts=comments,
+        )
+        assert bundle["inputs"]["retrieval"] == "search"
+        # Each community searched for its own terms, which is the reason terms come
+        # from the same call that chose the community.
+        assert search.calls == [("alpha", ["ad spend"]), ("beta", ["attribution", "tracking"])]
+        assert sorted(bundle["inputs"]["terms"]) == ["ad spend", "attribution", "tracking"]
+
+    def test_naming_communities_with_a_plain_brief_reads_them_in_full(self):
+        search = make_search()
+        bundle = build_bundle(
+            subreddits=["chosen"], manual=fake_manual, search_posts=search,
+        )
+        # `discovery.manual` makes no model call, so a plain brief leaves nothing to
+        # search for and the communities are read as asked.
+        assert bundle["inputs"]["retrieval"] == "scrape"
+        assert search.calls == []
+        assert "terms" not in bundle["inputs"]
+
+    def test_naming_communities_and_quoting_a_phrase_searches_them(self):
+        # Quoting a phrase names the words to search for, and searching hand-picked
+        # communities beats filtering a bulk read of them: the scrape is capped at
+        # PHRASE_MAX_POST_PAGES within `days`, the search is capped by neither.
+        search = make_search()
+        bundle = build_bundle(
+            query='What do agencies say about "meta ads" pricing',
+            subreddits=["chosen"], manual=fake_manual,
+            search_posts=search, fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert bundle["inputs"]["retrieval"] == "search"
+        assert search.calls == [("chosen", ["meta ads"])]
+        assert bundle["inputs"]["terms"] == ["meta ads"]
+        assert bundle["inputs"]["phrases"] == ["meta ads"]
+
+    def test_a_thin_search_of_named_communities_falls_back_to_reading_them(self):
+        # The fallback still honours the choice of communities: it reads the ones
+        # that were named, rather than going back to discovery.
+        read = []
+
+        def recording_posts(subreddit, days=30, deadline=None, phrases=None):
+            read.append(subreddit)
+            return fake_posts(subreddit, count=20)
+
+        bundle = build_bundle(
+            query='Agencies on "meta ads" pricing',
+            subreddits=["chosen"], manual=fake_manual,
+            search_posts=make_search(by_sub={"chosen": []}),
+            fetch_posts=recording_posts,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert bundle["inputs"]["retrieval"] == "search+scrape"
+        assert read == ["chosen"]
+
+    def test_no_terms_anywhere_reads_the_communities(self):
+        # Nothing to search for is decided before any request, so a run cannot
+        # spend its retrieval stage discovering it had no work to do.
+        search = make_search()
+        bundle = build_bundle(discover=make_discover(["alpha"]), search_posts=search)
+        assert bundle["inputs"]["retrieval"] == "scrape"
+        assert search.calls == []
+
+    def test_quoted_phrases_beat_the_models_terms(self):
+        search = make_search()
+        build_bundle(
+            query='Ideas about "meta ads" for founders',
+            discover=make_discover(["alpha"], terms={"alpha": ["something else"]}),
+            search_posts=search, fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        # One term, all the phrase words: `query=` ANDs words and the post-filter
+        # ANDs phrases, so a phrase per term would union them.
+        assert search.calls == [("alpha", ["meta ads"])]
+
+    def test_comments_are_fetched_for_the_posts_that_were_found(self):
+        comments = make_comments_for_posts()
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["ad spend"]}),
+            search_posts=make_search(), fetch_comments_for_posts=comments,
+        )
+        assert len(comments.calls) == 1
+        asked_for = comments.calls[0]
+        found_ids = {post["id"] for post in bundle["posts"]}
+        assert asked_for and set(asked_for) <= found_ids
+        assert len(asked_for) <= pipeline.reddit_data.MAX_COMMENT_POSTS
+
+    def test_posts_with_no_replies_are_not_asked_for_comments(self):
+        comments = make_comments_for_posts()
+        silent = [
+            dict(post, comments=0)
+            for post in fake_posts("alpha", count=pipeline.PHRASE_MIN_ITEMS + 2)
+        ]
+        build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["ad spend"]}),
+            search_posts=make_search(by_sub={"alpha": silent}),
+            fetch_comments_for_posts=comments,
+        )
+        assert comments.calls == []
+
+    def test_a_thin_search_falls_back_to_reading_the_communities(self):
+        search = make_search(by_sub={"alpha": []})
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["ad spend"]}),
+            search_posts=search,
+            fetch_posts=lambda subreddit, days=30: fake_posts(subreddit, count=20),
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert search.calls == [("alpha", ["ad spend"])]
+        assert bundle["inputs"]["retrieval"] == "search+scrape"
+        assert len(bundle["posts"]) == 20
+        # The terms did not select what is in this report, so crediting them would
+        # misdescribe it.
+        assert "terms" not in bundle["inputs"]
+        assert any("read them in full" in notice for notice in bundle["notices"])
+
+    def test_a_community_that_matched_nothing_says_so_in_its_own_words(self):
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta"], terms={
+                "alpha": ["ad spend"], "beta": ["nothing here"],
+            }),
+            search_posts=make_search(by_sub={"alpha": 12, "beta": []}),
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        # Not "had no posts in the last N days": r/beta had posts, none matched.
+        assert any(
+            "Nothing in r/beta mentioned nothing here" in notice
+            for notice in bundle["notices"]
+        )
+        assert bundle["inputs"]["subreddits"] == ["alpha"]
+
+    def test_search_mode_records_no_window_claim_it_cannot_keep(self):
+        # `days` is still recorded, because the frontend replays it on re-run, but
+        # the report's methodology reads `retrieval` to decide whether to show it.
+        bundle = build_bundle(
+            days=7,
+            discover=make_discover(["alpha"], terms={"alpha": ["ad spend"]}),
+            search_posts=make_search(), fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert bundle["inputs"]["days"] == 7
+        assert bundle["inputs"]["retrieval"] == "search"
+
+
+class TestDefaultWindow:
+    def test_the_default_is_seven_days(self):
+        assert pipeline.DEFAULT_DAYS == 7
+        assert pipeline.DEFAULT_DAYS in pipeline.TIME_WINDOWS
+
+    def test_an_unset_window_validates_to_the_default(self):
+        assert pipeline.validate_inputs(DEFAULT_QUERY, "")["days"] == 7
+
+    def test_an_unset_window_reaches_the_fetchers_as_the_default(self):
+        seen = []
+
+        def recording_posts(subreddit, days=30):
+            seen.append(days)
+            return fake_posts(subreddit)
+
+        bundle = build_bundle(fetch_posts=recording_posts)
+        assert seen == [pipeline.DEFAULT_DAYS]
+        assert bundle["inputs"]["days"] == pipeline.DEFAULT_DAYS
+
+    def test_thirty_is_still_the_fetch_ceiling(self):
+        assert max(pipeline.TIME_WINDOWS) == pipeline.reddit_data.FETCH_WINDOW_DAYS == 30
+
+
+class TestExportDescribesRetrieval:
+    def _md(self, **inputs_overrides):
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["ad spend"]}),
+            search_posts=make_search(), fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        bundle["inputs"].update(inputs_overrides)
+        return report_export.report_markdown(bundle)
+
+    def test_a_search_run_claims_no_window(self):
+        # "last 7 days" would be false for a run that took the most recent matches
+        # however old they were.
+        markdown = self._md()
+        assert "not limited (search)" in markdown
+        assert "last 7 days" not in markdown
+
+    def test_a_search_run_names_the_terms_it_searched_for(self):
+        assert "Searched for: ad spend." in self._md()
+
+    def test_a_scrape_run_still_states_its_window(self):
+        markdown = self._md(retrieval="scrape", days=7, terms=None)
+        assert "last 7 days" in markdown
+        assert "read in full" in markdown
+
+    def test_a_bundle_from_before_retrieval_was_recorded_states_its_window(self):
+        bundle = build_bundle()
+        bundle["inputs"].pop("retrieval", None)
+        markdown = report_export.report_markdown(bundle)
+        assert "last {} days".format(pipeline.DEFAULT_DAYS) in markdown

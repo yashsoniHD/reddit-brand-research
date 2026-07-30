@@ -48,9 +48,18 @@ function droppedFilterCopy(dropped: string[]): string {
  * "require" reads as something the brief asked for, "exclude" as something it
  * ruled out. `text` is already a positive sentence either way, so it is never
  * re-negated here.
+ *
+ * A requirement flagged `unreliable` gets different copy. Printing "107
+ * contradicted it" for a requirement the model marked as contradicted by nearly
+ * every thread would be a false claim about real threads, so the line says what
+ * actually happened instead.
  */
 function requirementCopy(requirement: RequirementInfo): string {
   const framing = requirement.kind === "require" ? "You asked for this" : "You ruled this out";
+  if (requirement.unreliable) {
+    const rated = requirement.met + requirement.violated + requirement.unknown;
+    return `${framing}: ${requirement.text} The model marked ${thousands(requirement.violated)} of the ${thousands(rated)} threads it rated as contradicting this, which almost certainly means it could not judge this from the text rather than that the threads really break it, so it was not used for ranking.`;
+  }
   return `${framing}: ${requirement.text} ${thousands(requirement.met)} threads showed it, ${thousands(requirement.violated)} contradicted it, and ${thousands(requirement.unknown)} did not say.`;
 }
 
@@ -70,6 +79,25 @@ function qualifierAnalysedCopy(counts: {
       ? `, and ${thousands(counts.violated)} were kept despite contradicting a requirement because nothing better was available`
       : "";
   return ` Of the ${thousands(total)} items actually analysed, ${thousands(counts.confirmed)} showed clear evidence for a requirement and ${thousands(counts.unconfirmed)} never said either way${backfillNote}.`;
+}
+
+/**
+ * How the posts in this report were found. The distinction matters more than any
+ * other line here: "these are the threads that matched what you asked about" and
+ * "this is what those communities have been talking about" are different claims,
+ * and only one of them is what a given run actually did.
+ *
+ * A bundle from before retrieval was recorded says nothing rather than guessing.
+ */
+function retrievalCopy(inputs: { retrieval?: string; terms?: string[] }): string {
+  const terms = inputs.terms?.length ? ` Searched for: ${joinQuoted(inputs.terms)}.` : "";
+  if (inputs.retrieval === "search") {
+    return `Each community was searched for the words your brief is about, and only the threads that matched were read.${terms} A search is not limited to the time range: it takes the most recent matches, however far back those reach.`;
+  }
+  if (inputs.retrieval === "search+scrape") {
+    return "Searching those communities for specific words found too little to work with, so they were read in full instead. This report covers their recent activity rather than only the threads that matched a search.";
+  }
+  return "The communities you named were read in full for the time range below, and the relevance rating decided what was worth analysing.";
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -105,9 +133,12 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           against the Reddit archive to confirm it exists and is public before it is
           read, so the model proposes and the archive verifies.
         </Row>
+        {inputs.retrieval ? <Row label="Retrieval">{retrievalCopy(inputs)}</Row> : null}
         <Row label="Window">
-          Requested: last {inputs.days ?? 30} days. Actual coverage:{" "}
-          {range?.label || "n/a"}.
+          {inputs.retrieval === "search"
+            ? "Not limited: a search takes the most recent matching threads however old they are."
+            : `Requested: last ${inputs.days ?? 7} days.`}{" "}
+          Actual coverage: {range?.label || "n/a"}.
         </Row>
         {contentTypes.length > 0 ? (
           <Row label={contentTypes.length === 1 ? "Content type" : "Content types"}>
@@ -123,6 +154,9 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
         <Row label="Comments">
           {thousands(sample?.comments_fetched)} fetched,{" "}
           {thousands(sample?.comments_analysed)} analysed.
+          {inputs.retrieval === "search"
+            ? " Every reply was fetched from a thread in this report, rather than from the community at large."
+            : ""}
         </Row>
         <Row label="Engagement">
           {compact(engagement?.score)} upvotes and {compact(engagement?.comments)}{" "}

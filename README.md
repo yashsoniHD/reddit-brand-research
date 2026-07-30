@@ -13,11 +13,16 @@ than estimated by a language model.
 
 1. **Describe what you're looking for.** One text box, plus an optional line about
    who you are or your brand (tailors the ideas to your voice and audience). That's
-   the whole form: the app always reads the last 30 days.
-2. **We find and read the communities.** A model proposes candidate subreddits for
-   your query; each one is checked against the Reddit archive to confirm it exists
-   and is public before it's read. The model proposes, the archive verifies. From
-   everything fetched, the strongest candidates are rated for relevance to your
+   the whole form.
+2. **We find and search the communities.** A model proposes candidate subreddits for
+   your query, along with the words worth searching each one for; every name is
+   checked against the Reddit archive to confirm it exists and is public before it's
+   read. The model proposes, the archive verifies. Each community is then searched
+   for those words, so what gets analysed is the threads that match your brief
+   rather than everything the community posted. A search is not time-bounded: it
+   takes the most recent matches however far back they reach. Naming the communities
+   yourself switches to reading them in full over the last 7 days instead. From
+   what comes back, the strongest candidates are rated for relevance to your
    query by the model, then ranked in code by relevance, community engagement and
    recency to pick the sample that gets analysed.
 3. **Get feed-ready ideas with evidence.** 8 to 12 content ideas, each with a hook
@@ -224,10 +229,12 @@ sample_report.json A real report bundle, rendered through the normal code path
 Three ideas hold the design together:
 
 **The data source is swappable.** `reddit_data.py` is the only file that imports `requests`
-or knows an endpoint URL. It exposes normalise, parse, validate, lookup, fetch-posts and
-fetch-comments functions, and everything above it consumes plain dictionaries. Swapping the
-Arctic Shift archive for the official Reddit API, Pushshift, or a database means
-reimplementing that one module.
+or knows an endpoint URL. It exposes normalise, parse, validate, lookup, fetch-posts,
+fetch-comments, search-posts and fetch-comments-for-posts functions, and everything above
+it consumes plain dictionaries. Swapping the Arctic Shift archive for the official Reddit
+API, Pushshift, or a database means reimplementing that one module. What the archive will
+and will not do, including the constraints that shaped the search path, is recorded in
+[docs/ARCTIC_SHIFT_API.md](docs/ARCTIC_SHIFT_API.md).
 
 **The model proposes; the archive verifies.** Discovery is a single model call asking
 "where on Reddit do people discuss this", because a language model is good at that
@@ -263,7 +270,7 @@ clears the report already on screen; it surfaces an error alongside it instead.
 - **Data lag.** The archive trails live Reddit, typically by an hour or two. Every report
   states the timestamp of the newest item it saw and how far behind that was.
 - **Sample size is capped on purpose.** A run analyses at most 150 posts and 150
-  comments, chosen from everything fetched over the last 30 days. Selection is hybrid:
+  comments, chosen from everything retrieved. Selection is hybrid:
   the model rates the strongest candidates for relevance to your query (a cheap
   triage call, and the only thing the model decides), then code ranks them by
   relevance, engagement normalised within each community, and recency, with no

@@ -1,5 +1,6 @@
 /**
- * A fictional bundle v3, used only by the development demo loader.
+ * A fictional bundle, used only by the development demo loader. Pinned to the
+ * current BUNDLE_VERSION so the demo always renders what the engine now emits.
  *
  * Nothing here is real: the communities are r/example* names, the posts are
  * invented, and every URL points at a reddit.com/r/example* path that does not
@@ -8,6 +9,7 @@
  * without a backend. Production only ever renders bundles from /api/*.
  */
 
+import { BUNDLE_VERSION } from "./types";
 import type {
   Bundle,
   Citation,
@@ -395,7 +397,7 @@ function sentimentPercentages(counts: Record<SentimentKey, number>): Record<Sent
 const COUNTS = sentimentCounts();
 
 export const MOCK_BUNDLE: Bundle = {
-  bundle_version: 4,
+  bundle_version: BUNDLE_VERSION,
   generated_at: "2026-07-26 09:14 UTC",
   generated_ts: Math.floor(WINDOW_END / 1000),
   elapsed_seconds: 41.6,
@@ -409,6 +411,11 @@ export const MOCK_BUNDLE: Bundle = {
     subreddits: [...SUBS],
     days: 14,
     phrases: ["cold outreach"],
+    // A search run, so the demo exercises the retrieval copy and the window row's
+    // "not limited" branch. The quoted phrase is what a real search run would have
+    // searched for, which is why it appears in both fields.
+    retrieval: "search",
+    terms: ["cold outreach"],
   },
   discovery: {
     communities: [

@@ -1,5 +1,5 @@
 /**
- * Report bundle v4.
+ * Report bundle v5.
  *
  * Hand-derived from the Python engine so the two cannot drift silently:
  * field names and nesting come from `pipeline.run_report`, the numeric shapes
@@ -7,10 +7,15 @@
  * `reddit_data.fetch_comments`, and the idea/claim shapes from
  * `analysis.sanitize_synthesis`.
  *
- * v4 removes the user-facing time window: every run reads the engine's fixed
- * fetch window (30 days) and a relevance-aware selector decides what gets
- * analysed, so inputs carry only {query, profile}. The window the report
- * actually covered lives in stats.date_range, computed from real timestamps.
+ * v5 records how the posts were found (`Inputs.retrieval`, `Inputs.terms`).
+ * A run either searches each discovered community for what the brief is about,
+ * or reads named communities in full, and a reader cannot judge the report
+ * without knowing which. The requested window (`Inputs.days`, default 7) applies
+ * to reading; searching is not time-bounded, so the window a report actually
+ * covered still comes from stats.date_range and real timestamps.
+ *
+ * v4 removed the user-facing time window: every run read the engine's fixed
+ * fetch window and a relevance-aware selector decided what got analysed.
  *
  * The bundle is the single unit of state on this side too: it is what the
  * stream delivers, what history stores, and what every section renders.
@@ -22,10 +27,20 @@
  * requirements about who posted a thread (`SelectionInfo.topic`, `.pool`,
  * `.requirements`, `.qualifier_counts`, `.qualifier_analysed`, and
  * `qualifier_tier` on `RedditItem`). None of this bumps BUNDLE_VERSION; see
- * `isBundleV4`.
+ * `isBundle`.
  */
 
-export const BUNDLE_VERSION = 4;
+export const BUNDLE_VERSION = 5;
+
+/**
+ * Every version this frontend can still render, newest first.
+ *
+ * Stored reports and shared links outlive a version bump, and every field v5
+ * added is optional to read, so a v4 bundle renders correctly with the retrieval
+ * mode simply absent. Dropping them instead would quietly empty a user's
+ * history, which is why this is a list rather than an equality check.
+ */
+export const SUPPORTED_BUNDLE_VERSIONS = [5, 4] as const;
 
 export type SentimentKey = "pos" | "neu" | "neg";
 
@@ -114,8 +129,21 @@ export interface Inputs {
   /** Only the communities that actually contributed data. */
   subreddits: string[];
   /** The requested time range. Optional: bundles from before it returned as an
-   * advanced setting do not carry it; the engine default is 30. */
+   * advanced setting do not carry it; the engine default is 7. Applies to
+   * `retrieval: "scrape"` only, since a search is not time-bounded. */
   days?: number;
+  /**
+   * How the posts were found. `"search"` means each discovered community was
+   * searched for what the brief is about, `"scrape"` means named communities were
+   * read in full, and `"search+scrape"` means the search found too little and the
+   * communities were read instead. Optional: v4 bundles predate it.
+   */
+  retrieval?: "search" | "scrape" | "search+scrape";
+  /**
+   * The terms that were searched for. Only present on a pure `"search"` run:
+   * after a fallback these terms did not select what is in the report.
+   */
+  terms?: string[];
   /**
    * The formats the ideas were pinned to. Optional: absent on every run that
    * asked for a mix, which is any run that chose none of them or all of them.
@@ -148,6 +176,13 @@ export interface Inputs {
  * (exclude). `met`, `violated` and `unknown` are counts of triaged
  * candidates, not of the final analysed sample; `unknown` is the common case,
  * since most Reddit posts never state who the author is.
+ *
+ * `unreliable` is true when the model marked more than half the rated
+ * candidates as contradicting this one requirement. A requirement almost
+ * everything supposedly contradicts is far likelier to have been misread than
+ * to be a real property of the corpus, so it takes no part in the ranking and
+ * the copy says so instead of quoting the `violated` count as fact. Optional:
+ * absent on every bundle written before the guard existed.
  */
 export interface RequirementInfo {
   text: string;
@@ -155,6 +190,7 @@ export interface RequirementInfo {
   met: number;
   violated: number;
   unknown: number;
+  unreliable?: boolean;
 }
 
 /** How the analysed sample was chosen from the fetched pool. */
@@ -435,7 +471,12 @@ export const MIN_QUERY_CHARS = 10;
 export const MAX_QUERY_CHARS = 500;
 export const MAX_PROFILE_CHARS = 500;
 export const TIME_WINDOWS = [7, 14, 30] as const;
-export const DEFAULT_DAYS = 30;
+/**
+ * 7, because the window only governs reading named communities, and what those
+ * communities are talking about this week is the useful read. Search runs ignore
+ * it: they take the most recent matches however far back those reach.
+ */
+export const DEFAULT_DAYS = 7;
 export const MAX_MANUAL_SUBREDDITS = 4;
 
 /** Quoted-phrase filter limits, mirrored from `keywords.py`. */
@@ -509,10 +550,16 @@ function isObject(value: unknown): boolean {
  * crash the report halfway down the page, which is a far worse failure than
  * refusing it at the door.
  */
-export function isBundleV4(value: unknown): value is Bundle {
+export function isBundle(value: unknown): value is Bundle {
   if (!isObject(value)) return false;
   const candidate = value as Partial<Bundle>;
-  if (candidate.bundle_version !== BUNDLE_VERSION) return false;
+  if (
+    !SUPPORTED_BUNDLE_VERSIONS.includes(
+      candidate.bundle_version as (typeof SUPPORTED_BUNDLE_VERSIONS)[number],
+    )
+  ) {
+    return false;
+  }
   if (!isObject(candidate.inputs)) return false;
   if (!isObject(candidate.analysis)) return false;
   if (!isObject(candidate.sample)) return false;

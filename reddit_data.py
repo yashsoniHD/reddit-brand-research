@@ -19,8 +19,9 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import requests
 
@@ -37,9 +38,11 @@ SUBREDDITS_ENDPOINT = f"{_API_ROOT}/subreddits/search"
 SOURCE_NAME = "Arctic Shift archive"
 
 # ── Request tuning ────────────────────────────────────────────────────────────
-# The default and the maximum: a run reads the last 30 days unless the caller asks
-# for a shorter range in the advanced settings (pipeline.TIME_WINDOWS), and the
-# selection layer decides what is worth analysing out of whatever that returns.
+# The ceiling on how far back a read can reach, and the longest range the advanced
+# settings offer (pipeline.TIME_WINDOWS). It is no longer the default: that is
+# pipeline.DEFAULT_DAYS, which is 7. Note this bounds `fetch_posts` only.
+# `search_posts` is unbounded by design, because the most recent matches for a
+# term are the right answer however old they turn out to be.
 FETCH_WINDOW_DAYS = 30
 PAGE_SIZE = 100
 MAX_POST_PAGES = 5            # 5 x 100 = 500 posts ceiling
@@ -64,6 +67,35 @@ COMMENTS_TEXT_PARAM = "body"    # posts reject `body=` with 400 Unknown query pa
 MAX_TEXT_PARAM_CHARS = 120
 PHRASE_MAX_POST_PAGES = 3
 PHRASE_MAX_COMMENT_PAGES = 2
+
+# ── Search tuning ─────────────────────────────────────────────────────────────
+# Text search is the one thing this archive will not parallelise. Probed
+# 2026-07-30 (docs/ARCTIC_SHIFT_API.md): six concurrent `query=` requests came
+# back six 429s, and three workers still drew three. `search_posts` is therefore
+# strictly serial, and the caller's deadline rather than concurrency is what
+# bounds it.
+SEARCH_PAGE_SIZE = 100
+# Terms per community per run. Serial search measured 8-18s per request, so each
+# extra term costs a community's worth of the retrieval budget.
+MAX_SEARCH_TERMS = 2
+# Longer than REQUEST_TIMEOUT_SECONDS on purpose: an unbounded text query was
+# measured at up to 17.8s, which a 15 second timeout would abandon just before it
+# answered.
+SEARCH_TIMEOUT_SECONDS = 20
+# The wall clock one community's search may take, retries included. Without it a
+# single community can eat the whole retrieval budget: measured live, one community
+# took 49.9s as a 422 at 1.0s, a backoff, another 422, a longer backoff and finally
+# a slow success. Eight communities have to fit inside the run's retrieval budget,
+# so each gets a share and a community that cannot answer in its share is left to
+# the fallback that reads communities in full.
+SEARCH_BUDGET_SECONDS = 25
+# Below this there is no point issuing the request at all; the budget is spent.
+MIN_SEARCH_TIMEOUT_SECONDS = 4
+# Fetching comments per post IS safe to parallelise: 6 posts, 203 comments, 2.6s
+# at 3 workers, no 429. `link_id` accepts one id only (a comma-separated list is
+# rejected with 400), so there is no batching to exploit here, only concurrency.
+COMMENT_FETCH_WORKERS = 3
+MAX_COMMENT_POSTS = 25
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
 # Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
@@ -244,8 +276,96 @@ def _is_deleted(text: str) -> bool:
     return text.strip().lower() in _DELETED_BODIES
 
 
-def _text_params(phrases: Optional[List[str]], field: str) -> dict:
-    """Best-effort archive-side prefilter; correctness lives in the post-filter.
+def _post_item(raw: dict, subreddit: str, phrases: Optional[List[str]]) -> Optional[dict]:
+    """One archive post record as this layer's post shape, or None to skip it.
+
+    Extracted from `fetch_posts` so `search_posts` normalises identically rather
+    than growing a second copy that drifts. Returns None for a record with no
+    usable identity, and for one whose body was already deleted at capture time
+    and carried no title, which is the only case where nothing readable is left.
+    """
+    permalink = _clean_text(raw.get("permalink"))
+    post_id = _clean_text(raw.get("id")) or permalink
+    if not post_id:
+        return None
+
+    title = _clean_text(raw.get("title"))
+    body = _clean_text(raw.get("selftext"))
+    if _is_deleted(body) and not title:
+        return None
+
+    clean_body = "" if _is_deleted(body) else body
+    item = {
+        "kind": "post",
+        "id": post_id,
+        "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
+        "title": title,
+        "body": clean_body,
+        "score": _safe_int(raw.get("score")),
+        "comments": _safe_int(raw.get("num_comments")),
+        "url": f"https://reddit.com{permalink}" if permalink else "",
+        "created_utc": _safe_int(raw.get("created_utc")),
+        "date": _format_date(raw.get("created_utc")),
+        # Public metadata the archive already returns and nothing above
+        # this layer used until now. `author` is captured verbatim
+        # (including the literal string "[deleted]", which is real
+        # information: the account is gone) but this layer never
+        # renders it; that is a caller-side privacy decision.
+        "author": _clean_text(raw.get("author")),
+        "author_flair_text": _clean_text(raw.get("author_flair_text")),
+        "link_flair_text": _clean_text(raw.get("link_flair_text")),
+        "upvote_ratio": min(1.0, max(0.0, _safe_float(raw.get("upvote_ratio")))),
+    }
+    if phrases:
+        item["phrase_match"] = keywords.matches_all(title + "\n" + clean_body, phrases)
+    return item
+
+
+def _comment_item(raw: dict, subreddit: str, phrases: Optional[List[str]]) -> Optional[dict]:
+    """One archive comment record as this layer's comment shape, or None to skip it.
+
+    `subreddit` is only a fallback: a record fetched by `link_id` has no
+    subreddit in the request, so the value comes off the record itself.
+    """
+    comment_id = _clean_text(raw.get("id"))
+    permalink = _clean_text(raw.get("permalink"))
+    key = comment_id or permalink
+    if not key:
+        return None
+
+    body = _clean_text(raw.get("body"))
+    if _is_deleted(body):
+        return None
+
+    item = {
+        "kind": "comment",
+        # The dedupe key, not the raw id: a comment the archive gave no
+        # id for used to be stored with id "", and every such comment
+        # then shared one relevance rating and one identity downstream.
+        "id": key,
+        "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
+        "title": "",
+        "body": body,
+        "score": _safe_int(raw.get("score")),
+        "url": f"https://reddit.com{permalink}" if permalink else "",
+        "created_utc": _safe_int(raw.get("created_utc")),
+        "date": _format_date(raw.get("created_utc")),
+        "author": _clean_text(raw.get("author")),
+        "author_flair_text": _clean_text(raw.get("author_flair_text")),
+        # The thread this reply belongs to, which is what makes a comment
+        # fetched by `link_id` traceable back to the post it is evidence for.
+        "link_id": _clean_text(raw.get("link_id")),
+        # No link_flair_text and no upvote_ratio: a comment has
+        # neither on Reddit, and writing ""/0.0 for them would be
+        # fiction rather than a genuinely missing value.
+    }
+    if phrases:
+        item["phrase_match"] = keywords.matches_all(body, phrases)
+    return item
+
+
+def search_term_for_phrases(phrases: Optional[Sequence[str]]) -> str:
+    """The one archive-side query string that stands in for a set of phrases.
 
     Joins every phrase's words with spaces: the archive tokenises quote
     characters away regardless, so sending them would be pointless. If the
@@ -255,12 +375,23 @@ def _text_params(phrases: Optional[List[str]], field: str) -> dict:
     would, and `keywords.matches_all` still re-checks every accepted phrase
     against every returned item, so shrinking the prefilter can only ever
     cost extra rows to filter out, never a wrong result.
+
+    One string rather than one per phrase, because `query=` is an AND of its
+    words and the post-filter is an AND of its phrases. Searching each phrase
+    separately would union them, and half the results would satisfy only one of
+    the phrases the reader asked for.
     """
     if not phrases:
-        return {}
+        return ""
     joined = " ".join(word for phrase in phrases for word in phrase.split())
     if len(joined) > MAX_TEXT_PARAM_CHARS:
-        joined = " ".join(phrases[0].split())
+        joined = " ".join(str(phrases[0]).split())
+    return joined
+
+
+def _text_params(phrases: Optional[List[str]], field: str) -> dict:
+    """Best-effort archive-side prefilter; correctness lives in the post-filter."""
+    joined = search_term_for_phrases(phrases)
     return {field: joined} if joined else {}
 
 
@@ -410,41 +541,10 @@ def fetch_posts(
         for raw in data:
             if not isinstance(raw, dict):
                 continue
-            permalink = _clean_text(raw.get("permalink"))
-            post_id = _clean_text(raw.get("id")) or permalink
-            if not post_id or post_id in seen_ids:
+            item = _post_item(raw, subreddit, phrases)
+            if item is None or item["id"] in seen_ids:
                 continue
-
-            title = _clean_text(raw.get("title"))
-            body = _clean_text(raw.get("selftext"))
-            if _is_deleted(body) and not title:
-                continue
-
-            clean_body = "" if _is_deleted(body) else body
-            seen_ids.add(post_id)
-            item = {
-                "kind": "post",
-                "id": post_id,
-                "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
-                "title": title,
-                "body": clean_body,
-                "score": _safe_int(raw.get("score")),
-                "comments": _safe_int(raw.get("num_comments")),
-                "url": f"https://reddit.com{permalink}" if permalink else "",
-                "created_utc": _safe_int(raw.get("created_utc")),
-                "date": _format_date(raw.get("created_utc")),
-                # Public metadata the archive already returns and nothing above
-                # this layer used until now. `author` is captured verbatim
-                # (including the literal string "[deleted]", which is real
-                # information: the account is gone) but this layer never
-                # renders it; that is a caller-side privacy decision.
-                "author": _clean_text(raw.get("author")),
-                "author_flair_text": _clean_text(raw.get("author_flair_text")),
-                "link_flair_text": _clean_text(raw.get("link_flair_text")),
-                "upvote_ratio": min(1.0, max(0.0, _safe_float(raw.get("upvote_ratio")))),
-            }
-            if phrases:
-                item["phrase_match"] = keywords.matches_all(title + "\n" + clean_body, phrases)
+            seen_ids.add(item["id"])
             posts.append(item)
 
         if len(data) < PAGE_SIZE:
@@ -525,38 +625,10 @@ def fetch_comments(
         for raw in data:
             if not isinstance(raw, dict):
                 continue
-            comment_id = _clean_text(raw.get("id"))
-            permalink = _clean_text(raw.get("permalink"))
-            key = comment_id or permalink
-            if not key or key in seen_ids:
+            item = _comment_item(raw, subreddit, phrases)
+            if item is None or item["id"] in seen_ids:
                 continue
-
-            body = _clean_text(raw.get("body"))
-            if _is_deleted(body):
-                continue
-
-            seen_ids.add(key)
-            item = {
-                "kind": "comment",
-                # The dedupe key, not the raw id: a comment the archive gave no
-                # id for used to be stored with id "", and every such comment
-                # then shared one relevance rating and one identity downstream.
-                "id": key,
-                "subreddit": _clean_text(raw.get("subreddit")) or subreddit,
-                "title": "",
-                "body": body,
-                "score": _safe_int(raw.get("score")),
-                "url": f"https://reddit.com{permalink}" if permalink else "",
-                "created_utc": _safe_int(raw.get("created_utc")),
-                "date": _format_date(raw.get("created_utc")),
-                "author": _clean_text(raw.get("author")),
-                "author_flair_text": _clean_text(raw.get("author_flair_text")),
-                # No link_flair_text and no upvote_ratio: a comment has
-                # neither on Reddit, and writing ""/0.0 for them would be
-                # fiction rather than a genuinely missing value.
-            }
-            if phrases:
-                item["phrase_match"] = keywords.matches_all(body, phrases)
+            seen_ids.add(item["id"])
             comments.append(item)
 
         if len(data) < PAGE_SIZE:
@@ -568,3 +640,203 @@ def fetch_comments(
     comments.sort(key=lambda c: c.get("created_utc", 0), reverse=True)
     logger.info("fetched %s comments from r/%s (%s days)", len(comments), subreddit, days)
     return comments[:limit]
+
+
+# ── Searching ─────────────────────────────────────────────────────────────────
+def clean_search_terms(terms: Optional[Sequence[str]]) -> List[str]:
+    """Up to MAX_SEARCH_TERMS usable terms, whitespace-collapsed and deduped.
+
+    Public because discovery proposes the terms and the pipeline reports them, so
+    both need the same answer about what a usable term is. Non-strings and blanks
+    are dropped rather than coerced: a term is what goes into `query=`, and
+    stringifying whatever the model returned would send nonsense to the archive.
+    """
+    cleaned: List[str] = []
+    seen = set()
+    for term in terms or []:
+        if not isinstance(term, str):
+            continue
+        collapsed = " ".join(term.split())
+        if not collapsed or collapsed.lower() in seen:
+            continue
+        seen.add(collapsed.lower())
+        cleaned.append(collapsed)
+        if len(cleaned) >= MAX_SEARCH_TERMS:
+            break
+    return cleaned
+
+
+def search_posts(
+    subreddit: str,
+    terms: Sequence[str],
+    limit: int = SEARCH_PAGE_SIZE,
+    deadline: Optional[float] = None,
+    *,
+    phrases: Optional[List[str]] = None,
+) -> List[dict]:
+    """Posts in r/`subreddit` whose title or body matches any of `terms`.
+
+    Deliberately unbounded in time. `sort=desc` with no `after` returns the most
+    recent matches, so the window adjusts itself to how common the term is: a busy
+    term came back spanning 20 days, a rare one 19 months, and both are the right
+    answer for the term that produced them. A caller that wants a window should
+    use `fetch_posts` instead, because that is the mode a window belongs to.
+
+    One request per term, never concurrent: see the SEARCH_PAGE_SIZE block above
+    for why. Returns [] rather than raising when the archive will not answer, so a
+    caller can fall back to `fetch_posts` for this community; a run-ending failure
+    would throw away the communities that did answer.
+
+    Terms are OR-ed by issuing one request each and merging, not by sending
+    "a OR b": the posts index accepts that syntax and does not honour it (probed
+    2026-07-30, an OR of two terms that each match returns zero rows).
+
+    Bounded by SEARCH_BUDGET_SECONDS whatever `deadline` says, because the caller
+    has several communities to get through and no single one may spend the lot.
+    The first term is always attempted, since an empty answer is worse than a
+    partial one.
+    """
+    usable = clean_search_terms(terms)
+    if not usable:
+        return []
+
+    # This community's own share of the clock, retries included, never past the
+    # caller's deadline. Both the retry gate inside `_request_page` and each
+    # attempt's timeout are sized from it, which is what turns "one slow community
+    # can spend the whole retrieval budget" into a bounded cost.
+    own_deadline = time.monotonic() + SEARCH_BUDGET_SECONDS
+    if deadline is not None:
+        own_deadline = min(deadline, own_deadline)
+
+    posts: List[dict] = []
+    seen_ids = set()
+
+    for index, term in enumerate(usable):
+        remaining = own_deadline - time.monotonic()
+        if index > 0 and remaining < MIN_SEARCH_TIMEOUT_SECONDS:
+            logger.info(
+                "stopping search of r/%s after %s terms: %.1fs left",
+                subreddit, index, remaining,
+            )
+            break
+
+        params = {
+            "subreddit": subreddit,
+            "query": term,
+            "limit": limit,
+            "sort": "desc",
+        }
+        try:
+            resp = _request_page(
+                POSTS_ENDPOINT, params,
+                timeout=max(MIN_SEARCH_TIMEOUT_SECONDS,
+                            min(SEARCH_TIMEOUT_SECONDS, remaining)),
+                deadline=own_deadline,
+            )
+        except requests.RequestException as exc:
+            logger.warning("search %r failed for r/%s: %s", term, subreddit, exc)
+            continue
+
+        if resp.status_code >= 400:
+            # Not mapped through `_raise_for_client_error`: `query=` is only
+            # accepted alongside a subreddit or author, so a 400 here is far more
+            # likely to be about the term than about the community, and claiming
+            # "we could not find a community called r/x" for a healthy community
+            # is the exact false statement that mapping exists to avoid.
+            logger.warning("search %r returned %s for r/%s", term, resp.status_code, subreddit)
+            continue
+
+        try:
+            data = resp.json().get("data") or []
+        except ValueError:
+            logger.warning("search %r returned unreadable JSON for r/%s", term, subreddit)
+            continue
+
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            item = _post_item(raw, subreddit, phrases)
+            if item is None or item["id"] in seen_ids:
+                continue
+            seen_ids.add(item["id"])
+            posts.append(item)
+
+    posts.sort(key=lambda p: p.get("created_utc", 0), reverse=True)
+    logger.info(
+        "searched r/%s for %s: %s posts", subreddit, ", ".join(usable), len(posts)
+    )
+    return posts
+
+
+def fetch_comments_for_posts(
+    post_ids: Sequence[str],
+    limit_per_post: int = PAGE_SIZE,
+    deadline: Optional[float] = None,
+    *,
+    phrases: Optional[List[str]] = None,
+) -> List[dict]:
+    """Replies to the given posts, newest first, deduped, deleted ones dropped.
+
+    The precise counterpart to `fetch_comments`: rather than sweeping a
+    community's whole recent comment stream and hoping some of it belongs to the
+    posts being analysed, this asks for the replies to those exact posts. Every
+    comment it returns is evidence for a thread in the report.
+
+    Parallel at COMMENT_FETCH_WORKERS, which is safe here in a way that text
+    search is not. No `body=` filter is ever sent alongside `link_id`: that
+    combination reintroduces the timeout that scoping by post exists to avoid.
+    """
+    ids = []
+    seen_requested = set()
+    for post_id in post_ids or []:
+        key = _clean_text(post_id)
+        if not key or key in seen_requested:
+            continue
+        seen_requested.add(key)
+        ids.append(key)
+        if len(ids) >= MAX_COMMENT_POSTS:
+            break
+
+    if not ids:
+        return []
+
+    def one(post_id: str) -> List[dict]:
+        if _out_of_time(deadline):
+            return []
+        params = {"link_id": post_id, "limit": limit_per_post}
+        try:
+            resp = _request_page(COMMENTS_ENDPOINT, params, deadline=deadline)
+        except requests.RequestException as exc:
+            logger.warning("comments for %s failed: %s", post_id, exc)
+            return []
+        if resp.status_code >= 400:
+            logger.warning("comments for %s returned %s", post_id, resp.status_code)
+            return []
+        try:
+            data = resp.json().get("data") or []
+        except ValueError:
+            return []
+        found = []
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            # No fallback subreddit: a link_id request never named one, so the
+            # record's own value is the only truthful source.
+            item = _comment_item(raw, "", phrases)
+            if item is not None:
+                found.append(item)
+        return found
+
+    comments: List[dict] = []
+    seen_ids = set()
+    with ThreadPoolExecutor(max_workers=COMMENT_FETCH_WORKERS) as pool:
+        for found in pool.map(one, ids):
+            for item in found:
+                if item["id"] in seen_ids:
+                    continue
+                seen_ids.add(item["id"])
+                comments.append(item)
+
+    comments.sort(key=lambda c: c.get("created_utc", 0), reverse=True)
+    logger.info("fetched %s comments across %s posts", len(comments), len(ids))
+    return comments

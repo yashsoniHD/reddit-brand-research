@@ -27,8 +27,17 @@ logger = logging.getLogger(__name__)
 # ── Shape of the search ───────────────────────────────────────────────────────
 MIN_CANDIDATES = 8
 MAX_CANDIDATES = 12
-MAX_COMMUNITIES = 4
+# Raised from 4 with search-first retrieval. Search reads one page per term from a
+# community instead of paging it out, so breadth is the better use of the budget
+# than depth: eight communities searched costs less than four scraped and covers
+# far more of the conversation. The retrieval budget, not this number, is what
+# actually caps a run (see pipeline's fetching_time_left).
+MAX_COMMUNITIES = 8
 MAX_REASON_WORDS = 15
+# Search terms proposed per community. Asking for a couple more than
+# reddit_data.MAX_SEARCH_TERMS will use gives the sanitiser something to drop
+# without leaving a community with no term at all.
+MAX_TERMS_ASKED = 3
 # Twelve candidates with a short reason each is roughly 600 tokens of JSON. The
 # ceiling is set well above that because the failure mode is asymmetric: spare
 # allowance costs nothing (only tokens actually emitted are billed), while coming up
@@ -40,6 +49,27 @@ _NOTHING_FOUND = (
     "We could not find any Reddit communities for that. Try describing what you "
     "are looking for in different words, or use plainer terms."
 )
+
+
+def _sanitize_terms(raw) -> List[str]:
+    """The search terms one candidate proposed, or [] if it proposed nothing usable.
+
+    A bare string is read as a single term rather than iterated, which is the one
+    shape that would otherwise silently become a list of single characters. Markdown
+    is stripped for the same reason it is stripped from `reason`: the model returns
+    "**attribution**" often enough, and that matches nothing as a `query=` value.
+    Length and count policy belong to the data layer, so `clean_search_terms` has
+    the last word.
+    """
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, (list, tuple)):
+        entries = list(raw)
+    else:
+        return []
+    return reddit_data.clean_search_terms(
+        [analysis.strip_markdown(term) for term in entries if isinstance(term, str)]
+    )
 
 
 def _sanitize_candidates(raw) -> List[dict]:
@@ -74,7 +104,17 @@ def _sanitize_candidates(raw) -> List[dict]:
             reason = " ".join(words[:MAX_REASON_WORDS])
 
         seen.add(name.lower())
-        candidates.append({"name": name, "reason": reason})
+        candidates.append(
+            {
+                "name": name,
+                "reason": reason,
+                # Sanitised by the data layer, which owns what a usable `query=`
+                # term is, and stripped of markdown first for the same reason the
+                # reason field is: the model returns "**attribution**" often
+                # enough that sending it as a search term would match nothing.
+                "terms": _sanitize_terms(entry.get("terms")),
+            }
+        )
         if len(candidates) >= MAX_CANDIDATES:
             break
 
@@ -95,7 +135,7 @@ Name the subreddits where people actually discuss this, ranked most relevant fir
 Return ONLY a JSON object with exactly this key:
 
 {{
-  "candidates": [{{"name": "...", "reason": "..."}}]
+  "candidates": [{{"name": "...", "reason": "...", "terms": ["...", "..."]}}]
 }}
 
 Rules:
@@ -108,6 +148,12 @@ Rules:
 - "reason" is at most {max_words} words, written for the person asking, saying what
   they will find there. For example: "Freelancers swap pricing and client-management
   advice here."
+- "terms" is {max_terms} search terms that will be run against the text of posts in
+  THAT community, best first. Write them the way its members would actually write
+  them, not the way a marketer would. Every word in a term must appear in a post
+  for it to match, so keep each term to one or two words: "attribution" and
+  "conversion tracking" find threads, "b2b saas attribution challenges" finds
+  nothing. Prefer the words people use when describing a problem.
 - Do not include URLs, links, image syntax or markdown formatting in any string.
 - Never use an em dash or an en dash in any string you return. Use a comma or
   start a new sentence instead.
@@ -118,6 +164,7 @@ No markdown fences, no commentary. JSON only.""".format(
         min_candidates=MIN_CANDIDATES,
         max_candidates=MAX_CANDIDATES,
         max_words=MAX_REASON_WORDS,
+        max_terms=MAX_TERMS_ASKED,
     )
 
 
@@ -136,10 +183,16 @@ def discover(
 ) -> dict:
     """Pick the communities this run will read, or raise ValueError with a message.
 
-    Returns {"communities": [{"name", "reason", "subscribers", "checked"}],
+    Returns {"communities": [{"name", "reason", "subscribers", "checked", "terms"}],
              "considered": [name, ...]} where `considered` is every candidate the
     model proposed that survived name sanitisation, so the report can show the
     search that was actually run rather than only its winners.
+
+    `terms` is what search-first retrieval runs against that community's post
+    text. It comes from this same call rather than a second one because the terms
+    worth searching depend on the community: the words r/PPC uses for a problem
+    are not the words r/b2bmarketing uses for it. An empty list is a legitimate
+    answer and means the caller should read the community rather than search it.
 
     `chat` and `lookup` are injection points, exactly like the callables
     `pipeline.run_report` takes, so tests and cached wrappers can substitute
@@ -207,6 +260,7 @@ def discover(
                 "reason": candidate["reason"],
                 "subscribers": reddit_data._safe_int(found.get("subscribers")),
                 "checked": True,
+                "terms": list(candidate.get("terms") or []),
             }
         )
 
@@ -216,7 +270,13 @@ def discover(
         # fetch stage will report anything that turns out not to exist.
         logger.warning("community lookup unavailable for every candidate; trusting the model")
         communities = [
-            {"name": candidate["name"], "reason": candidate["reason"], "subscribers": 0, "checked": False}
+            {
+                "name": candidate["name"],
+                "reason": candidate["reason"],
+                "subscribers": 0,
+                "checked": False,
+                "terms": list(candidate.get("terms") or []),
+            }
             for candidate in candidates[:MAX_COMMUNITIES]
         ]
 
@@ -274,6 +334,13 @@ def manual(
                 "reason": "chosen by you",
                 "subscribers": subscribers,
                 "checked": checked,
+                # Always empty, because this function makes no model call and so has
+                # nothing to propose. That is not the same as "never search these":
+                # a brief that quotes a phrase supplies its own terms downstream, and
+                # the pipeline searches hand-picked communities for it. Present even
+                # when empty so both discovery results have one shape and the
+                # pipeline never has to ask which kind it holds.
+                "terms": [],
             }
         )
 

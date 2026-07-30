@@ -45,7 +45,9 @@ class TestSanitizeCandidates:
     def test_accepts_bare_names(self):
         raw = {"candidates": [{"name": "productivity", "reason": "Talks shop"}]}
         result = discovery._sanitize_candidates(raw)
-        assert result == [{"name": "productivity", "reason": "Talks shop"}]
+        # A candidate that proposed no search terms still gets the key, empty: the
+        # pipeline reads it unconditionally to decide search versus scrape.
+        assert result == [{"name": "productivity", "reason": "Talks shop", "terms": []}]
 
     def test_accepts_r_prefixed_names(self):
         raw = {"candidates": [{"name": "r/Productivity", "reason": "x"}]}
@@ -148,7 +150,9 @@ class TestDiscover:
         raw = {"candidates": [{"name": name, "reason": "x"} for name in names]}
         table = {name: "raise" for name in names}
         result = discovery.discover("q", chat=_chat(raw), lookup=_lookup(table))
-        assert [c["name"] for c in result["communities"]] == names[:4]
+        # Against the constant, not a literal: MAX_COMMUNITIES is a budget
+        # decision that has already moved once.
+        assert [c["name"] for c in result["communities"]] == names[: discovery.MAX_COMMUNITIES]
         assert all(c["subscribers"] == 0 for c in result["communities"])
         assert all(not c["checked"] for c in result["communities"])
 
@@ -220,7 +224,7 @@ class TestManual:
         community = result["communities"][0]
         assert community == {
             "name": "Freelance", "reason": "chosen by you",
-            "subscribers": 120000, "checked": True,
+            "subscribers": 120000, "checked": True, "terms": [],
         }
         assert result["considered"] == ["freelance"]
 

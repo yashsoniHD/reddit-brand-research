@@ -38,7 +38,9 @@ export function SummaryStrip({ bundle }: { bundle: Bundle }) {
 
   const facts = [
     { icon: Users, value: communities || "no communities" },
-    { icon: CalendarRange, value: bundle.stats?.date_range?.short_label || "last 30 days" },
+    // No window claim in the fallback: a search run has no requested window, so
+    // naming one would be inventing coverage the report cannot vouch for.
+    { icon: CalendarRange, value: bundle.stats?.date_range?.short_label || "dates n/a" },
     { icon: FileText, value: `${thousands(sample?.items_analysed)} items read` },
     ...(activePhrase ? [{ icon: Quote, value: `mentions ${activePhrase}` }] : []),
   ];

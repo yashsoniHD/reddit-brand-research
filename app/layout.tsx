@@ -18,7 +18,7 @@ const NAME = "Reddit Content Ideas";
 const TAGLINE =
   "Turn what people actually say on Reddit into LinkedIn posts you can publish";
 const DESCRIPTION =
-  "Type what you are looking for. We find the Reddit communities, read the last 30 days of posts and comments, and hand back LinkedIn post ideas with the hook already written and every claim linked to the thread it came from.";
+  "Type what you are looking for. We find the Reddit communities, search them for the threads that match, and hand back LinkedIn post ideas with the hook already written and every claim linked to the thread it came from.";
 
 /**
  * The absolute base every relative metadata URL resolves against, notably the

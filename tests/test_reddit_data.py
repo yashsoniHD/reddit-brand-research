@@ -1,5 +1,7 @@
 """Input normalisation: the layer between what people type and what we request."""
 
+import time
+
 import pytest
 
 import reddit_data
@@ -565,3 +567,199 @@ class _FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise reddit_data.requests.HTTPError(str(self.status_code))
+
+
+# ── Searching ─────────────────────────────────────────────────────────────────
+class TestCleanSearchTerms:
+    def test_collapses_whitespace_and_dedupes_case_insensitively(self):
+        assert reddit_data.clean_search_terms(
+            ["  ad   spend ", "AD SPEND", "attribution"]
+        ) == ["ad spend", "attribution"]
+
+    def test_caps_at_max_search_terms(self):
+        many = ["one", "two", "three", "four"]
+        assert len(reddit_data.clean_search_terms(many)) == reddit_data.MAX_SEARCH_TERMS
+
+    @pytest.mark.parametrize("raw", [None, [], ["", "   "], [None, 5, True, {}]])
+    def test_drops_everything_unusable(self, raw):
+        assert reddit_data.clean_search_terms(raw) == []
+
+
+class TestSearchTermForPhrases:
+    def test_joins_every_phrase_into_one_and_query(self):
+        # One string, not one per phrase: `query=` ANDs its words and the
+        # post-filter ANDs its phrases, so separate terms would union them.
+        assert reddit_data.search_term_for_phrases(
+            ["meta ads", "series b"]
+        ) == "meta ads series b"
+
+    def test_falls_back_to_the_first_phrase_when_too_long(self):
+        long_phrase = "a" * 100
+        joined = reddit_data.search_term_for_phrases([long_phrase, "b" * 100])
+        assert joined == long_phrase
+
+    def test_no_phrases_is_no_term(self):
+        assert reddit_data.search_term_for_phrases([]) == ""
+        assert reddit_data.search_term_for_phrases(None) == ""
+
+
+class TestSearchPosts:
+    def _capture(self, monkeypatch, payloads):
+        """Record every request and answer from `payloads`, one per call."""
+        calls = []
+
+        def request(url, params, timeout=None, deadline=None):
+            calls.append({"url": url, "params": dict(params), "timeout": timeout})
+            payload = payloads[min(len(calls) - 1, len(payloads) - 1)]
+            if isinstance(payload, int):
+                return _FakeResponse({"data": None, "error": "nope"}, status_code=payload)
+            return _FakeResponse(payload)
+
+        monkeypatch.setattr(reddit_data, "_request_page", request)
+        return calls
+
+    def test_sends_query_and_never_sends_a_window(self, monkeypatch):
+        calls = self._capture(monkeypatch, [{"data": [_post_row("a", 1700000000)]}])
+        posts = reddit_data.search_posts("x", ["ad spend"])
+        assert [post["id"] for post in posts] == ["a"]
+        assert calls[0]["params"]["query"] == "ad spend"
+        assert calls[0]["params"]["subreddit"] == "x"
+        assert calls[0]["params"]["sort"] == "desc"
+        # The whole point of search mode: no `after`, so the most recent matches
+        # come back however old they are.
+        assert "after" not in calls[0]["params"]
+        assert "before" not in calls[0]["params"]
+
+    def test_uses_the_longer_search_timeout(self, monkeypatch):
+        calls = self._capture(monkeypatch, [{"data": []}])
+        reddit_data.search_posts("x", ["ad spend"])
+        assert calls[0]["timeout"] == reddit_data.SEARCH_TIMEOUT_SECONDS
+        assert reddit_data.SEARCH_TIMEOUT_SECONDS > reddit_data.REQUEST_TIMEOUT_SECONDS
+
+    def test_one_request_per_term_merged_and_deduped(self, monkeypatch):
+        calls = self._capture(monkeypatch, [
+            {"data": [_post_row("a", 1700000000), _post_row("b", 1700000002)]},
+            {"data": [_post_row("b", 1700000002), _post_row("c", 1700000004)]},
+        ])
+        posts = reddit_data.search_posts("x", ["one", "two"])
+        assert [call["params"]["query"] for call in calls] == ["one", "two"]
+        # Newest first, each post once.
+        assert [post["id"] for post in posts] == ["c", "b", "a"]
+
+    def test_a_failing_term_does_not_lose_the_others(self, monkeypatch):
+        self._capture(monkeypatch, [422, {"data": [_post_row("a", 1700000000)]}])
+        assert [p["id"] for p in reddit_data.search_posts("x", ["one", "two"])] == ["a"]
+
+    def test_returns_empty_rather_than_raising_when_nothing_answers(self, monkeypatch):
+        # A caller falls back to reading the community; a raise here would throw
+        # away every community that did answer.
+        self._capture(monkeypatch, [500])
+        assert reddit_data.search_posts("x", ["one"]) == []
+
+    def test_a_client_error_is_never_reported_as_a_missing_community(self, monkeypatch):
+        # `_raise_for_client_error` maps 400 to "no such community", which would be
+        # a false claim about a healthy one when the term is what upset the archive.
+        self._capture(monkeypatch, [400])
+        assert reddit_data.search_posts("x", ["one"]) == []
+
+    def test_no_usable_terms_makes_no_request(self, monkeypatch):
+        calls = self._capture(monkeypatch, [{"data": [_post_row("a", 1)]}])
+        assert reddit_data.search_posts("x", ["", None]) == []
+        assert calls == []
+
+    def test_stamps_phrase_match_without_dropping_anything(self, monkeypatch):
+        self._capture(monkeypatch, [{"data": [
+            _post_row("a", 1700000002, title="meta ads win", selftext="body"),
+            _post_row("b", 1700000001, title="unrelated", selftext="body"),
+        ]}])
+        posts = reddit_data.search_posts("x", ["meta ads"], phrases=["meta ads"])
+        assert [(p["id"], p["phrase_match"]) for p in posts] == [("a", True), ("b", False)]
+
+    def test_stops_between_terms_once_out_of_time(self, monkeypatch):
+        calls = self._capture(monkeypatch, [{"data": [_post_row("a", 1)]}])
+        reddit_data.search_posts("x", ["one", "two"], deadline=time.monotonic() - 1)
+        # The first term is always attempted: an empty result is worse than a
+        # partial one. The second is not, because the clock is already gone.
+        assert len(calls) == 1
+
+    def test_a_community_cannot_spend_more_than_its_budget(self, monkeypatch):
+        # Measured live before this bound existed, one community took 49.9s of a
+        # ~180s retrieval budget by stacking 422 retries onto a slow success.
+        calls = self._capture(monkeypatch, [{"data": []}])
+        reddit_data.search_posts("x", ["one"])
+        assert calls[0]["timeout"] <= reddit_data.SEARCH_TIMEOUT_SECONDS
+        # The retry gate the request loop sees is this community's own deadline,
+        # not the caller's, so retries stop when the share is spent.
+        assert reddit_data.SEARCH_BUDGET_SECONDS >= reddit_data.SEARCH_TIMEOUT_SECONDS
+
+    def test_the_caller_deadline_wins_when_it_is_sooner(self, monkeypatch):
+        calls = self._capture(monkeypatch, [{"data": []}])
+        reddit_data.search_posts("x", ["one"], deadline=time.monotonic() + 6)
+        # Sized from what is left, not from the per-attempt ceiling.
+        assert calls[0]["timeout"] < reddit_data.SEARCH_TIMEOUT_SECONDS
+
+
+class TestFetchCommentsForPosts:
+    def _capture(self, monkeypatch, by_id):
+        calls = []
+
+        def request(url, params, timeout=None, deadline=None):
+            calls.append(dict(params))
+            rows = by_id.get(params["link_id"], [])
+            if isinstance(rows, int):
+                return _FakeResponse({"data": None}, status_code=rows)
+            return _FakeResponse({"data": rows})
+
+        monkeypatch.setattr(reddit_data, "_request_page", request)
+        return calls
+
+    def test_fetches_by_link_id_and_never_filters_on_body(self, monkeypatch):
+        calls = self._capture(monkeypatch, {"p1": [_comment_row("c1", 1700000000)]})
+        comments = reddit_data.fetch_comments_for_posts(["p1"])
+        assert [c["id"] for c in comments] == ["c1"]
+        assert calls[0]["link_id"] == "p1"
+        # Adding `body=` to a link_id query reintroduces the timeout that scoping
+        # by post exists to avoid.
+        assert "body" not in calls[0]
+        assert "subreddit" not in calls[0]
+
+    def test_merges_across_posts_newest_first_and_dedupes(self, monkeypatch):
+        self._capture(monkeypatch, {
+            "p1": [_comment_row("c1", 1700000000), _comment_row("shared", 1700000009)],
+            "p2": [_comment_row("shared", 1700000009), _comment_row("c2", 1700000005)],
+        })
+        comments = reddit_data.fetch_comments_for_posts(["p1", "p2"])
+        assert [c["id"] for c in comments] == ["shared", "c2", "c1"]
+
+    def test_carries_the_thread_id_so_a_reply_is_traceable(self, monkeypatch):
+        self._capture(monkeypatch, {
+            "p1": [_comment_row("c1", 1700000000, link_id="t3_p1")],
+        })
+        assert reddit_data.fetch_comments_for_posts(["p1"])[0]["link_id"] == "t3_p1"
+
+    def test_reads_the_subreddit_off_the_record(self, monkeypatch):
+        # A link_id request names no subreddit, so the record is the only source.
+        self._capture(monkeypatch, {"p1": [_comment_row("c1", 1, subreddit="realsub")]})
+        assert reddit_data.fetch_comments_for_posts(["p1"])[0]["subreddit"] == "realsub"
+
+    def test_one_failing_post_does_not_lose_the_others(self, monkeypatch):
+        self._capture(monkeypatch, {"p1": 500, "p2": [_comment_row("c2", 1700000000)]})
+        assert [c["id"] for c in reddit_data.fetch_comments_for_posts(["p1", "p2"])] == ["c2"]
+
+    def test_caps_the_number_of_posts_and_dedupes_ids(self, monkeypatch):
+        calls = self._capture(monkeypatch, {})
+        ids = ["p{}".format(n) for n in range(reddit_data.MAX_COMMENT_POSTS + 10)]
+        reddit_data.fetch_comments_for_posts(ids + ids)
+        assert len(calls) == reddit_data.MAX_COMMENT_POSTS
+
+    def test_no_ids_makes_no_request(self, monkeypatch):
+        calls = self._capture(monkeypatch, {})
+        assert reddit_data.fetch_comments_for_posts(["", None]) == []
+        assert calls == []
+
+    def test_drops_deleted_bodies(self, monkeypatch):
+        self._capture(monkeypatch, {"p1": [
+            _comment_row("c1", 1700000001, body="[removed]"),
+            _comment_row("c2", 1700000000, body="real reply"),
+        ]})
+        assert [c["id"] for c in reddit_data.fetch_comments_for_posts(["p1"])] == ["c2"]

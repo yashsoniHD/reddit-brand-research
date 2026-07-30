@@ -240,7 +240,7 @@ export function QueryForm({
               </span>
             </Label>
             <FieldHint>
-              Up to 4 subreddits, separated by commas. When set, these are read directly
+              Up to 4 subreddits, separated by commas. When set, these are used directly
               and automatic discovery is skipped.
             </FieldHint>
             <Input
@@ -337,8 +337,9 @@ export function QueryForm({
               ))}
             </div>
             <FieldHint>
-              How far back to read. 30 days is the default and usually the best read;
-              shorter ranges favour what is being said right now.
+              {values.subreddits.trim()
+                ? 'How far back to read the communities you named. 7 days favours what is being said right now. Putting "quotes" around a phrase searches them for it instead, which this range does not limit.'
+                : "Only applies if we fall back to reading communities in full. Normally we search them for the threads that match your brief, however far back the matches reach."}
             </FieldHint>
           </div>
 

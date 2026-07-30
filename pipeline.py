@@ -25,7 +25,9 @@ import stats
 
 logger = logging.getLogger(__name__)
 
-BUNDLE_VERSION = 4
+# 5 added inputs.retrieval and inputs.terms for search-first runs. Readers must
+# keep rendering version 4 bundles, which have neither.
+BUNDLE_VERSION = 5
 MIN_QUERY_CHARS = 10
 # Raised from 300 because this is the length a constraint-rich brief actually
 # runs to. The example brief this engine's keyword filter exists for is 241
@@ -33,9 +35,15 @@ MIN_QUERY_CHARS = 10
 # second quoted phrase) was being rejected for writing a better brief.
 MAX_QUERY_CHARS = 500
 MAX_PROFILE_CHARS = 500
-# Advanced-settings choices. The default is the full fetch window; shorter ranges
-# exist for people who explicitly want only what is fresh.
+# Advanced-settings choices. The longest is the fetch ceiling; the default is the
+# shortest, for the reason below.
 TIME_WINDOWS = (7, 14, reddit_data.FETCH_WINDOW_DAYS)
+# The window a run reads when nobody chose one. Deliberately the shortest offered
+# rather than `FETCH_WINDOW_DAYS`, which stays the 30-day ceiling: the window only
+# governs reading whole communities, and this week's conversation is the useful
+# read of a community. A search run ignores it entirely and takes the most recent
+# matches however far back they reach.
+DEFAULT_DAYS = 7
 # The output formats the ideas may take, when the user asks for a subset of them.
 # An empty selection means the model picks the format that suits each idea.
 CONTENT_TYPES = tuple(analysis.CONTENT_TYPE_FORMATS.keys())
@@ -134,7 +142,7 @@ def validate_inputs(
     Reporting one error at a time makes people submit four times to learn four
     things; this returns everything wrong in one pass, plus the cleaned values.
     The last fields are advanced settings and all optional: absent means the
-    defaults (full window, automatic discovery, relevance filter on, mixed
+    defaults (a 7-day window, automatic discovery, relevance filter on, mixed
     formats).
 
     `content_types` is the list of formats the ideas should take. `content_type`
@@ -196,24 +204,24 @@ def _time_window_sentence() -> str:
 
 def _clean_days(days, errors: List[str]) -> int:
     if days is None:
-        return reddit_data.FETCH_WINDOW_DAYS
+        return DEFAULT_DAYS
 
     message = "Choose a time range of {}.".format(_time_window_sentence())
     # bool is an int subclass, so True would otherwise read as the number 1.
     if isinstance(days, bool):
         errors.append(message)
-        return reddit_data.FETCH_WINDOW_DAYS
+        return DEFAULT_DAYS
 
     try:
         value = float(days)
     except (TypeError, ValueError):
         errors.append(message)
-        return reddit_data.FETCH_WINDOW_DAYS
+        return DEFAULT_DAYS
 
     # 7.9 is not "about a week", it is a client sending something we did not offer.
     if value != int(value) or int(value) not in TIME_WINDOWS:
         errors.append(message)
-        return reddit_data.FETCH_WINDOW_DAYS
+        return DEFAULT_DAYS
     return int(value)
 
 
@@ -451,7 +459,7 @@ def _resolve_citations(
 def run_report(
     query: str,
     profile: str,
-    days: int = reddit_data.FETCH_WINDOW_DAYS,
+    days: int = DEFAULT_DAYS,
     subreddits: Optional[Sequence[str]] = None,
     relevance_filter: bool = True,
     content_types: Optional[Sequence[str]] = None,
@@ -461,6 +469,8 @@ def run_report(
     manual: Optional[Callable] = None,
     fetch_posts: Optional[Callable] = None,
     fetch_comments: Optional[Callable] = None,
+    search_posts: Optional[Callable] = None,
+    fetch_comments_for_posts: Optional[Callable] = None,
     classify: Optional[Callable] = None,
     synthesize: Optional[Callable] = None,
     *,
@@ -473,7 +483,10 @@ def run_report(
     settings: a shorter window, a manual list of communities that skips discovery
     entirely, a switch that turns the relevance triage off for a faster,
     engagement-only selection, and the set of output formats the ideas may take
-    (empty, or all of them, meaning a mix). The six
+    (empty, or all of them, meaning a mix). `days` bounds reading a community in
+    full and is ignored by a search, which takes the most recent matches however
+    far back they reach; see the retrieval-mode block for which one a given run
+    gets. The eight
     callables are injection points so callers can supply cached wrappers or fakes.
     A ValueError from discovery or from the model layer already carries a
     user-ready message and is left to propagate, exactly as the analysis calls'
@@ -498,6 +511,8 @@ def run_report(
     manual = manual or discovery.manual
     fetch_posts = fetch_posts or reddit_data.fetch_posts
     fetch_comments = fetch_comments or reddit_data.fetch_comments
+    search_posts = search_posts or reddit_data.search_posts
+    fetch_comments_for_posts = fetch_comments_for_posts or reddit_data.fetch_comments_for_posts
     classify = classify or analysis.classify_sample
     synthesize = synthesize or analysis.synthesize
 
@@ -655,7 +670,149 @@ def run_report(
 
         return got_posts, got_comments, got_used, got_notices
 
-    posts, comments, used, notices = gather(active)
+    def terms_for(community: dict) -> List[str]:
+        """What to search this community for: the reader's phrases, or the model's terms.
+
+        Quoted phrases win when the brief has them, because the reader named those
+        words on purpose and a model term would be a worse guess at the same
+        intent. They collapse to a single AND query rather than one per phrase,
+        which is the same reasoning `search_term_for_phrases` documents.
+        """
+        if active:
+            term = reddit_data.search_term_for_phrases(active)
+            return [term] if term else []
+        return list(community.get("terms") or [])
+
+    def search():
+        """Search each community for what the brief is about, then read the replies.
+
+        Same (posts, comments, used, notices) contract as `gather`, so the tier
+        ladder and every stage below it cannot tell which mode ran.
+
+        Serial by necessity: concurrent text queries are refused by the archive
+        (see reddit_data's SEARCH_PAGE_SIZE block). Comments are the opposite, so
+        they are fetched once at the end for the whole run's best posts rather
+        than per community, which both parallelises and spends the request budget
+        on the threads most likely to survive selection.
+        """
+        got_posts: List[dict] = []
+        got_used: List[str] = []
+        got_notices: List[str] = []
+
+        for community in communities:
+            name = community["name"]
+            check("fetch")
+            if got_used and not fetching_time_left():
+                got_notices.append(
+                    "We ran out of time before searching r/{}, so this report is built "
+                    "from the communities above.".format(name)
+                )
+                logger.warning("skipping r/%s: inside the analysis reserve", name)
+                break
+
+            terms = terms_for(community)
+            if not terms:
+                # Nothing to search for is not a failure: it means fall back to
+                # reading the community, which is what the thin-pool rung below
+                # does for the whole run.
+                logger.info("no search terms for r/%s", name)
+                continue
+
+            say("Searching r/{} for {}…".format(name, ", ".join(terms)))
+            try:
+                found = _call(
+                    search_posts, name, terms,
+                    deadline=soft_deadline, phrases=active or None,
+                )
+            except (ValueError, RuntimeError) as exc:
+                got_notices.append("r/{} was skipped: {}".format(name, _lowercase_first(exc)))
+                continue
+
+            if not found:
+                got_notices.append(
+                    "Nothing in r/{} mentioned {}, so it was left out.".format(
+                        name, ", ".join(terms)
+                    )
+                )
+                continue
+
+            say("Searching r/{} for {}… ({} found)".format(name, ", ".join(terms), len(found)))
+            got_posts.extend(found)
+            got_used.append(name)
+
+        got_comments: List[dict] = []
+        if got_posts and fetching_time_left():
+            # Only posts that actually have replies, ranked by the same engagement
+            # and recency basis the triage uses, so the requests go to the threads
+            # most likely to end up in the report. `comments` counts are captured
+            # at post time and only partly backfilled, so this understates very
+            # fresh threads; in search mode most matches are older and carry real
+            # counts, which is why that is a caveat rather than a problem.
+            candidates = [post for post in got_posts if post.get("comments")]
+            wanted = analysis.top_items(candidates, reddit_data.MAX_COMMENT_POSTS)
+            if wanted:
+                say("Reading the replies to the {} strongest threads…".format(len(wanted)))
+                try:
+                    got_comments = _call(
+                        fetch_comments_for_posts,
+                        [post["id"] for post in wanted],
+                        deadline=soft_deadline, phrases=active or None,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    # Comments are supporting evidence, exactly as in `gather`.
+                    logger.warning("comments for the searched posts failed: %s", exc)
+                    got_notices.append(
+                        "We found the threads but could not read their replies, so this "
+                        "report is built from the posts alone."
+                    )
+
+        return got_posts, got_comments, got_used, got_notices
+
+    # ── Retrieval mode ────────────────────────────────────────────────────────
+    # Having something to search for is the whole test, and it is asked before any
+    # request is made: a run that entered search mode with no terms would spend the
+    # retrieval stage discovering it had no work to do, and would report that as
+    # "nothing matched" rather than as the fetch failure or timeout it really was.
+    #
+    # Naming communities is not itself a vote for reading them in full. It usually
+    # amounts to one, because `discovery.manual` makes no model call and so proposes
+    # no terms. But a brief that quotes a phrase has named the words to search for,
+    # and honouring that is strictly better than filtering a bulk read: a quoted
+    # scrape is capped at PHRASE_MAX_POST_PAGES within `days`, while a search of the
+    # same communities is capped by neither. So the four cases fall out of one
+    # question:
+    #
+    #   named + plain brief   -> no terms      -> read them in full
+    #   named + quoted phrase -> the phrase    -> search them for it
+    #   discovered + brief    -> model terms   -> search
+    #   discovered, no terms  -> nothing       -> read them in full
+    if not any(terms_for(community) for community in communities):
+        retrieval_mode = "scrape"
+        posts, comments, used, notices = gather(active)
+    else:
+        retrieval_mode = "search"
+        posts, comments, used, notices = search()
+        if not _phrase_pool_is_enough(len(posts), len(posts) + len(comments)) \
+                and fetching_time_left():
+            # The search was too narrow, or every term missed. Read the
+            # communities instead, which is cheap and parallel-safe, and keep
+            # whichever pool is actually bigger.
+            logger.info("search returned %s posts; reading the communities instead", len(posts))
+            say("Too little matched those searches. Reading those communities…")
+            read_posts, read_comments, read_used, read_notices = gather(active)
+            if read_used and len(read_posts) > len(posts):
+                retrieval_mode = "search+scrape"
+                posts, comments, used = read_posts, read_comments, read_used
+                # The search notices described a retrieval this report is no
+                # longer built from, so they are replaced rather than merged, the
+                # same choice the unfiltered tier below makes.
+                notices = read_notices
+                notices.insert(
+                    0,
+                    "Searching those communities for specific words found too little, so "
+                    "we read them in full instead. This report covers everything recent "
+                    "from them, not only the threads that matched a search.",
+                )
 
     # ── The tier ladder ───────────────────────────────────────────────────────
     # Only ever entered with a filter active. `filter_mode` stays empty for an
@@ -865,6 +1022,25 @@ def run_report(
     if chosen_types:
         inputs["content_types"] = chosen_types
     inputs["discovery"] = discovery_mode
+    # How the posts were found, which is the difference between "these are the
+    # threads that matched what you asked about" and "this is what those
+    # communities have been talking about". A reader cannot judge the report
+    # without knowing which one they have.
+    inputs["retrieval"] = retrieval_mode
+    if retrieval_mode == "search":
+        # Only for a pure search run: after a fallback to reading the communities,
+        # these terms did not select anything in the report, and recording them
+        # would credit them for a pool they did not produce.
+        searched = sorted(
+            {
+                term
+                for community in communities
+                if community["name"] in used
+                for term in terms_for(community)
+            }
+        )
+        if searched:
+            inputs["terms"] = searched
     # Same precedent as `content_types`: a run with no filter recorded no filter,
     # rather than recording an empty list every reader then has to test.
     if active:

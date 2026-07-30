@@ -1,5 +1,5 @@
 {
- "bundle_version": 4,
+ "bundle_version": 5,
  "generated_at": "2026-07-27 10:49 UTC",
  "generated_ts": 1785149369,
  "elapsed_seconds": 174.6,
@@ -21,7 +21,8 @@
   ],
   "days": 30,
   "content_type": null,
-  "discovery": "model"
+  "discovery": "model",
+  "retrieval": "scrape"
  },
  "discovery": {
   "communities": [

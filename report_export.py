@@ -129,6 +129,40 @@ def _citation_links(citations: Sequence[dict]) -> str:
     return "; ".join(parts)
 
 
+def _window_label(inputs: dict) -> str:
+    """The window claim this run can actually keep.
+
+    A search takes the most recent matching threads however old they are, so
+    printing "last 7 days" for one would be a false statement about coverage.
+    `stats.date_range` still reports what the report really spans, and that is
+    printed next to this in every place it appears.
+    """
+    if (inputs or {}).get("retrieval") == "search":
+        return "not limited (search)"
+    return "last {} days".format(
+        (inputs or {}).get("days", reddit_data.FETCH_WINDOW_DAYS)
+    )
+
+
+def _retrieval_sentence(inputs: dict) -> str:
+    """How the posts were found, in one line, for the methodology section."""
+    inputs = inputs or {}
+    mode = inputs.get("retrieval")
+    if mode == "search":
+        terms = inputs.get("terms") or []
+        searched = " Searched for: {}.".format(", ".join(terms)) if terms else ""
+        return (
+            "each community was searched for the words your brief is about, and only "
+            "the threads that matched were read.{}".format(searched)
+        )
+    if mode == "search+scrape":
+        return (
+            "searching those communities for specific words found too little, so they "
+            "were read in full instead."
+        )
+    return "the communities were read in full for the window below."
+
+
 def report_markdown(bundle: dict, drafts=None) -> str:
     # `drafts` is accepted and ignored for now, so that embedding saved drafts
     # in the export later is a one-line change at the call site rather than a
@@ -152,10 +186,10 @@ def report_markdown(bundle: dict, drafts=None) -> str:
     add("# Content ideas: {}".format(_escape(inputs.get("query", "Reddit research"))))
     add("")
     add(
-        "**Communities:** {} · **Window:** last {} days · "
+        "**Communities:** {} · **Window:** {} · "
         "**Actual range:** {}".format(
             subs,
-            inputs.get("days", reddit_data.FETCH_WINDOW_DAYS),
+            _window_label(inputs),
             date_range.get("label", "n/a"),
         )
     )
@@ -342,8 +376,8 @@ def report_markdown(bundle: dict, drafts=None) -> str:
     else:
         add("- Discovery: the communities were chosen by the model from your query, then "
             "checked to exist and be public before being read.")
-    add("- Requested window: last {} days".format(
-        inputs.get("days", reddit_data.FETCH_WINDOW_DAYS)))
+    add("- Retrieval: {}".format(_retrieval_sentence(inputs)))
+    add("- Requested window: {}".format(_window_label(inputs)))
     add("- Actual coverage: {}".format(date_range.get("label", "n/a")))
     add("- Posts fetched: {} · analysed: {}".format(
         sample.get("posts_fetched", 0), sample.get("posts_analysed", 0)))
@@ -529,6 +563,14 @@ def _thousands(value) -> str:
         return "0"
 
 
+def _count(requirement: dict, key: str) -> int:
+    """One triage count off a requirement, as an int, 0 for anything unusable."""
+    try:
+        return int(requirement.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _requirement_line(requirement: dict) -> str:
     """One requirement's text plus its three triage counts, phrased with
     `kind` the same way the on-screen report does: "require" reads as
@@ -536,8 +578,26 @@ def _requirement_line(requirement: dict) -> str:
     `text` is already a positive sentence either way (a must-not is
     normalised to something like "The author is not a beginner or a solo
     founder"), so it is never re-negated here. Runs through `_escape` because
-    the text originates from a model."""
+    the text originates from a model.
+
+    A requirement flagged `unreliable` gets different copy. Printing "107
+    contradicted it" for a requirement the model marked as contradicted by
+    nearly every thread would be a false claim about real threads in a document
+    the user may share, so the line says what actually happened instead."""
     framing = "You asked for this" if requirement.get("kind") == "require" else "You ruled this out"
+    if requirement.get("unreliable"):
+        rated = sum(_count(requirement, key) for key in ("met", "violated", "unknown"))
+        return (
+            "{}: {} The model marked {} of the {} threads it rated as contradicting "
+            "this, which almost certainly means it could not judge this from the text "
+            "rather than that the threads really break it, so it was not used for "
+            "ranking.".format(
+                framing,
+                _escape(requirement.get("text", "")),
+                _thousands(requirement.get("violated", 0)),
+                _thousands(rated),
+            )
+        )
     return "{}: {} {} threads showed it, {} contradicted it, and {} did not say.".format(
         framing,
         _escape(requirement.get("text", "")),

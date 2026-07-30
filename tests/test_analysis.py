@@ -972,11 +972,13 @@ class _FakeModels:
         self.calls = 0
         self.last_prompt = None
         self.last_config = None
+        self.configs = []
 
     def generate_content(self, model, contents, config):
         self.calls += 1
         self.last_prompt = contents
         self.last_config = config
+        self.configs.append(config)
         body = self.bodies[min(self.calls - 1, len(self.bodies) - 1)]
         return _FakeResponse(body)
 
@@ -1225,6 +1227,141 @@ class TestChatJsonRetriesMalformedPayloads:
         # No fake client needed: this exercises _parse_json_object directly, proving
         # the repair pass is only ever consulted after strict json.loads has failed.
         assert analysis._parse_json_object(text) == analysis.json.loads(text)
+
+
+class TestChatJsonDowngradesThinkingAfterATruncation:
+    """Gemini spends reasoning tokens out of the same max_output_tokens as the answer,
+    so an unparseable payload produced while thinking was on is not just ordinary
+    flakiness: it is a sign the reasoning ate the allowance and left nothing for the
+    JSON. `_chat_json` still retries exactly as before (that heals a flaky trailing
+    comma too), but once this happens it also turns thinking off for the remaining
+    attempts, so the retry gets the full ceiling for the answer alone."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+
+    def test_an_unparseable_attempt_with_thinking_on_turns_thinking_off_for_the_retry(self, monkeypatch):
+        client = _FakeClient(["not json at all", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert parsed == {"ok": 1}
+        assert client.models.calls == 2
+        first_config, second_config = client.models.configs
+        # Absent means thinking was left on for the first attempt, exactly as asked.
+        assert "thinking_config" not in first_config
+        assert second_config["thinking_config"]["thinking_budget"] == 0
+
+    def test_a_caller_with_thinking_off_is_unaffected_and_logs_no_downgrade(self, monkeypatch, caplog):
+        client = _FakeClient(["not json at all", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with caplog.at_level("WARNING", logger="analysis"):
+            parsed, model = analysis.chat_json("prompt", 100, "demo", thinking=False)
+
+        assert parsed == {"ok": 1}
+        # Every attempt was already thinking-off; nothing here should look different
+        # from a caller that never had a downgrade to trigger.
+        for config in client.models.configs:
+            assert config["thinking_config"]["thinking_budget"] == 0
+        assert not any("turning thinking off" in message for message in caplog.messages)
+
+    def test_all_attempts_unparseable_still_raises_the_incomplete_message(self, monkeypatch):
+        # Same user-facing failure as before the downgrade existed; only the configs
+        # sent along the way differ.
+        client = _FakeClient(["not json at all"])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert str(excinfo.value) == analysis._INCOMPLETE
+        assert client.models.calls == analysis.MAX_ATTEMPTS
+        assert "thinking_config" not in client.models.configs[0]
+        for config in client.models.configs[1:]:
+            assert config["thinking_config"]["thinking_budget"] == 0
+
+    def test_a_transient_api_exception_does_not_downgrade_thinking(self, monkeypatch):
+        class _RaisesOnceThenValid:
+            def __init__(self):
+                self.calls = 0
+                self.configs = []
+
+            def generate_content(self, model, contents, config):
+                self.calls += 1
+                self.configs.append(config)
+                if self.calls == 1:
+                    raise Exception("temporary network blip")
+                return _FakeResponse('{"ok": 1}')
+
+        client = type("C", (), {"models": _RaisesOnceThenValid()})()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert parsed == {"ok": 1}
+        assert client.models.calls == 2
+        for config in client.models.configs:
+            assert "thinking_config" not in config
+
+    def test_a_quota_error_still_retries_with_thinking_left_on(self, monkeypatch):
+        class _QuotaOnceThenValid:
+            def __init__(self):
+                self.calls = 0
+                self.configs = []
+
+            def generate_content(self, model, contents, config):
+                self.calls += 1
+                self.configs.append(config)
+                if self.calls == 1:
+                    exc = Exception("429 RESOURCE_EXHAUSTED. Quota exceeded.")
+                    exc.code = 429
+                    raise exc
+                return _FakeResponse('{"ok": 1}')
+
+        client = type("C", (), {"models": _QuotaOnceThenValid()})()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert parsed == {"ok": 1}
+        for config in client.models.configs:
+            assert "thinking_config" not in config
+
+    def test_a_content_filter_block_still_fails_immediately_with_thinking_untouched(self, monkeypatch):
+        class _BlockedModels:
+            def __init__(self):
+                self.calls = 0
+                self.configs = []
+
+            def generate_content(self, model, contents, config):
+                self.calls += 1
+                self.configs.append(config)
+                response = _FakeResponse("")
+                response.candidates = [_FakeCandidate("SAFETY")]
+                return response
+
+        client = type("C", (), {"models": _BlockedModels()})()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError) as excinfo:
+            analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert str(excinfo.value) == analysis._CONTENT_BLOCKED
+        assert client.models.calls == 1
+        assert "thinking_config" not in client.models.configs[0]
+
+    def test_the_happy_path_with_thinking_on_makes_exactly_one_call(self, monkeypatch):
+        client = _FakeClient(['{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "demo", thinking=True)
+
+        assert parsed == {"ok": 1}
+        assert client.models.calls == 1
+        assert "thinking_config" not in client.models.configs[0]
 
 
 class TestContentFilterIsNotRetried:
@@ -2313,13 +2450,37 @@ class TestQualifierContract:
         assert "Topic: running Meta ads for B2B SaaS" in prompt
 
     def test_the_prompt_pushes_hard_toward_u(self):
+        # The wording of the "u" bullets was rewritten after a live run marked 107
+        # of 110 items as CONTRADICTING "The author is from a funded startup, Series
+        # A, B or C" purely because they never mentioned the author's company. The
+        # earlier prompt preferred "u" without separating "the text says something
+        # incompatible" from "the text is silent", so the assertions below pin the
+        # distinction rather than the old sentences: silence is never "n", and the
+        # verdict is about the author rather than the subject of the thread.
         prompt = analysis._triage_prompt(
             self._items(1), EXAMPLE_BRIEF, "", 1, two_requirements()
         )
-        assert '"u" is the honest answer' in prompt
         assert '"u" is the correct answer, not a failure.' in prompt
-        assert "Never guess from a username" in prompt
+        assert "most of the characters you return should be \"u\"" in prompt
+        assert 'never mentions what a constraint is about is "u", never "n"' in prompt
+        assert 'Silence is always "u".' in prompt
+        assert "INCOMPATIBLE with the constraint" in prompt
+        assert "only on what the item says about its AUTHOR" in prompt
+        assert "or a username" in prompt
         assert "—" not in prompt and "–" not in prompt
+
+    def test_the_prompt_works_the_positive_requirement_that_broke_in_the_live_run(self):
+        # A worked example, because the model got this wrong in exactly one
+        # direction: for a requirement phrased "The author IS x" it read absence of
+        # evidence as failure. Naming the silent case and the incompatible case side
+        # by side is what the prompt was missing.
+        prompt = analysis._triage_prompt(
+            self._items(1), EXAMPLE_BRIEF, "", 1, two_requirements()
+        )
+        assert 'The author is from a funded startup, Series A, B or C' in prompt
+        assert "never mentions the author's company is \"u\"" in prompt
+        assert 'solo bootstrapper with no investors" is "n"' in prompt
+        assert 'we raised our Series B last year" is "y"' in prompt
 
     def test_a_valid_q_round_trips(self):
         ratings = analysis._sanitize_ratings(
@@ -2531,6 +2692,229 @@ class TestQualifierRanking:
             {key: analysis.Verdict(2, "") for key in relevance}, now=self.NOW,
         )
         assert [item["id"] for item in as_ints] == [item["id"] for item in as_verdicts]
+
+
+class TestDegenerateQualifierGuard:
+    """A requirement the model marks as contradicted by nearly everything.
+
+    Measured on a live run of "detailed posts about running meta ads for b2b saas,
+    not from newbies or solo founders, ideally from funded startups series a b c":
+    over 110 items, "The author is from a funded startup, series A, B, or C" came
+    back 0 met / 107 contradicted / 3 did not say, while the two negatively phrased
+    requirements in the same batch behaved correctly. Any "n" demoted, so 110 of 110
+    items landed in the backfill tier: the ranking silently did nothing, and the
+    report told the reader that 107 real threads contradicted what they asked for.
+    """
+
+    def _posts(self, count):
+        # Identical engagement and age, so the triage pool keeps source order and
+        # position i + 1 in the ratings mapping is posts[i].
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "score": 10, "comments": 0, "created_utc": 1700000000}
+            for i in range(count)
+        ]
+
+    def _select(self, monkeypatch, verdicts, count, brief=None):
+        brief = brief if brief is not None else two_requirements()
+        monkeypatch.setattr(
+            analysis, "decompose_brief", lambda query, profile="", **kwargs: brief
+        )
+        monkeypatch.setattr(
+            analysis, "rate_relevance",
+            lambda items, query, profile, **kwargs: dict(verdicts),
+        )
+        return analysis._select_sample(self._posts(count), [], EXAMPLE_BRIEF, "")
+
+    def test_the_threshold_is_more_than_half_the_items_rated(self):
+        assert analysis.DEGENERATE_VIOLATION_SHARE == 0.5
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 6, "unknown": 5}
+        ) is True
+        # Exactly half is not more than half. A pool can genuinely split down the
+        # middle, and the guard only claims the lopsided case.
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 5, "unknown": 5}
+        ) is False
+        assert analysis.requirement_unreliable(
+            {"met": 4, "violated": 6, "unknown": 0}
+        ) is True
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 0, "unknown": 20}
+        ) is False
+        assert analysis.requirement_unreliable({}) is False
+        assert analysis.requirement_unreliable(None) is False
+
+    def test_a_handful_of_items_never_trips_the_guard(self):
+        # 3 of 4 is noise, not evidence that a requirement was misread, and a pool
+        # that small has no meaningful tiering to protect either.
+        assert analysis.DEGENERATE_MIN_RATED == 8
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 3, "unknown": 1}
+        ) is False
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 7, "unknown": 0}
+        ) is False
+        assert analysis.requirement_unreliable(
+            {"met": 0, "violated": 8, "unknown": 0}
+        ) is True
+
+    def test_a_flagged_requirement_is_skipped_in_both_directions(self):
+        # It cannot demote and it cannot promote: a verdict nobody trusts must not
+        # decide the ranking either way.
+        assert analysis.qualifier_tier(analysis.Verdict(2, "nu"), [True, False]) == (
+            "unconfirmed"
+        )
+        assert analysis.qualifier_tier(analysis.Verdict(2, "yu"), [True, False]) == (
+            "unconfirmed"
+        )
+        assert analysis.qualifier_tier(analysis.Verdict(2, "yn"), [True, False]) == (
+            "violated"
+        )
+        assert analysis.qualifier_tier(analysis.Verdict(2, "nn"), [True, True]) == (
+            "unconfirmed"
+        )
+        # No flags is the default and today's behaviour, and a flag list shorter
+        # than the qualifier string leaves the characters it does not cover trusted.
+        assert analysis.qualifier_tier(analysis.Verdict(2, "nu")) == "violated"
+        assert analysis.qualifier_tier(analysis.Verdict(2, "un"), [True]) == "violated"
+
+    def test_a_requirement_almost_everything_contradicts_is_reported_but_not_applied(
+        self, monkeypatch
+    ):
+        verdicts = {position: analysis.Verdict(2, "nu") for position in range(1, 10)}
+        verdicts[10] = analysis.Verdict(2, "uu")
+        ranked_posts, _, selection = self._select(monkeypatch, verdicts, 10)
+        funded, beginner = selection["requirements"]
+        assert funded["unreliable"] is True
+        assert beginner["unreliable"] is False
+        # The counts are still reported in full. The reader is told what the model
+        # said and told that it was not used, rather than being told nothing.
+        assert (funded["met"], funded["violated"], funded["unknown"]) == (0, 9, 1)
+        assert funded["text"] == "The author works at a funded startup, Series A, B or C."
+        # Nothing reliable said anything, so nothing is demoted or promoted.
+        assert selection["qualifier_counts"] == {
+            "confirmed": 0, "unconfirmed": 10, "violated": 0
+        }
+        assert all(item["qualifier_tier"] == "unconfirmed" for item in ranked_posts)
+
+    def test_a_normal_spread_of_verdicts_is_left_exactly_as_it_is_today(
+        self, monkeypatch
+    ):
+        verdicts = {
+            1: analysis.Verdict(2, "yu"), 2: analysis.Verdict(2, "nu"),
+            3: analysis.Verdict(1, "uu"), 4: analysis.Verdict(2, "uy"),
+            5: analysis.Verdict(2, "uu"), 6: analysis.Verdict(1, "un"),
+            7: analysis.Verdict(2, "uu"), 8: analysis.Verdict(2, "yu"),
+            9: analysis.Verdict(2, "uu"), 10: analysis.Verdict(1, "uu"),
+        }
+        ranked_posts, _, selection = self._select(monkeypatch, verdicts, 10)
+        assert [
+            requirement["unreliable"] for requirement in selection["requirements"]
+        ] == [False, False]
+        # Every tier is the one the pre-guard code would have computed.
+        stamps = {item["id"]: item["qualifier_tier"] for item in ranked_posts}
+        for position, verdict in verdicts.items():
+            assert stamps["p{}".format(position - 1)] == analysis.qualifier_tier(verdict)
+        assert selection["qualifier_counts"] == {
+            "confirmed": 3, "unconfirmed": 5, "violated": 2
+        }
+
+    def test_tiering_follows_only_the_reliable_requirement(self, monkeypatch):
+        verdicts = {position: analysis.Verdict(2, "nu") for position in range(1, 9)}
+        verdicts[9] = analysis.Verdict(2, "un")   # breaks the reliable requirement
+        verdicts[10] = analysis.Verdict(2, "uy")  # meets the reliable requirement
+        ranked_posts, _, selection = self._select(monkeypatch, verdicts, 10)
+        assert [
+            requirement["unreliable"] for requirement in selection["requirements"]
+        ] == [True, False]
+        stamps = {item["id"]: item["qualifier_tier"] for item in ranked_posts}
+        assert stamps["p8"] == "violated"
+        assert stamps["p9"] == "confirmed"
+        # The eight items that break only the flagged requirement keep the tier they
+        # would have had if it had never been asked. This is the assertion the bug
+        # fails: every one of them was in backfill before.
+        assert all(
+            stamps["p{}".format(index)] == "unconfirmed" for index in range(8)
+        )
+        assert ranked_posts[0]["id"] == "p9"
+        assert ranked_posts[-1]["id"] == "p8"
+
+    def test_rank_items_does_not_demote_an_item_on_a_flagged_requirement(self):
+        def post(id, score):
+            return {
+                "kind": "post", "id": id, "subreddit": "s", "score": score, "comments": 0,
+                "title": "A title long enough to carry the whole idea on its own",
+                "body": "A body with plenty of real text in it, past the substance bar.",
+                "created_utc": 1700000000,
+            }
+
+        posts = [post("breaks-flagged", 1000), post("silent", 1)]
+        relevance = {
+            ("post", "breaks-flagged"): analysis.Verdict(2, "nu"),
+            ("post", "silent"): analysis.Verdict(2, "uu"),
+        }
+        demoted, _ = analysis.rank_items(posts, [], relevance, now=1700000000.0)
+        assert [item["id"] for item in demoted] == ["silent", "breaks-flagged"]
+        kept, _ = analysis.rank_items(
+            posts, [], relevance, now=1700000000.0, unreliable=[True, False]
+        )
+        assert [item["id"] for item in kept] == ["breaks-flagged", "silent"]
+
+    def test_the_live_run_that_put_every_item_in_backfill_cannot_recur(
+        self, monkeypatch
+    ):
+        brief = analysis.Brief(
+            'running "meta ads" for b2b saas',
+            (
+                analysis.Requirement("The author is not a newbie.", "exclude"),
+                analysis.Requirement("The author is not a solo founder.", "exclude"),
+                analysis.Requirement(
+                    "The author is from a funded startup, series A, B, or C.", "require"
+                ),
+            ),
+        )
+        # The per-requirement verdict counts the real run produced:
+        #   not a newbie:            2 met,   3 contradicted, 105 did not say
+        #   not a solo founder:      3 met,   0 contradicted, 107 did not say
+        #   from a funded startup:   0 met, 107 contradicted,   3 did not say
+        verdicts = {}
+        for position in range(1, 111):
+            newbie = "y" if position <= 2 else ("n" if position <= 5 else "u")
+            solo = "y" if position <= 3 else "u"
+            funded = "n" if position <= 107 else "u"
+            verdicts[position] = analysis.Verdict(2, newbie + solo + funded)
+        # What the old tiering did with exactly these verdicts, pinned so the
+        # regression this guards against is written down rather than described.
+        assert sum(
+            1 for verdict in verdicts.values()
+            if analysis.qualifier_tier(verdict) == "violated"
+        ) == 107
+
+        ranked_posts, _, selection = self._select(monkeypatch, verdicts, 110, brief)
+        assert [
+            requirement["unreliable"] for requirement in selection["requirements"]
+        ] == [False, False, True]
+        assert selection["requirements"][2]["violated"] == 107
+        # Three tiers again, and the 107 are no longer any of them's problem.
+        assert selection["qualifier_counts"] == {
+            "confirmed": 2, "unconfirmed": 105, "violated": 3
+        }
+        assert sum(selection["qualifier_counts"].values()) == 110
+        tiers = [item["qualifier_tier"] for item in ranked_posts]
+        assert tiers.count("violated") == 3
+        assert tiers[0] == "confirmed"
+        assert tiers[-1] == "violated"
+
+    def test_the_no_requirement_path_is_untouched(self, monkeypatch):
+        _, _, selection = self._select(
+            monkeypatch, {1: analysis.Verdict(2, ""), 2: analysis.Verdict(2, "")}, 2,
+            brief=analysis.Brief("running Meta ads for B2B SaaS", ()),
+        )
+        assert selection["method"] == "relevance+engagement"
+        assert set(selection) == {"method", "triaged", "relevance_counts"}
 
 
 class TestAdaptiveTriagePreview:
@@ -2790,9 +3174,14 @@ class TestSelectionDisclosure:
         assert [requirement["kind"] for requirement in selection["requirements"]] == [
             "require", "exclude"
         ]
+        # "unreliable" joins the four names the report already read. It is written
+        # for every requirement rather than only for a flagged one, so a persisted
+        # bundle says false explicitly instead of leaving a reader to guess whether
+        # the key is missing because the guard passed or because the run predates it.
         assert selection["requirements"][0] == {
             "text": "The author works at a funded startup, Series A, B or C.",
             "kind": "require", "met": 2, "violated": 1, "unknown": 1,
+            "unreliable": False,
         }
 
     def test_every_requirement_count_sums_to_the_triaged_total(self, monkeypatch):

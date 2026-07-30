@@ -208,6 +208,37 @@ TRIAGE_OUTPUT_TOKENS_PER_ITEM = 45
 TRIAGE_QUALIFIER_OUTPUT_TOKENS_PER_ITEM = 60
 TRIAGE_MAX_TOKENS = 12000
 
+# ── Degenerate qualifier verdicts ─────────────────────────────────────────────
+# A requirement the model marks as CONTRADICTED by more than this share of the
+# items it rated is treated as unjudgeable: its counts are still reported, and it
+# is left out of the ranking decision entirely.
+#
+# Why it exists: a live run on the brief "detailed posts about running Meta ads for
+# B2B SaaS, not from newbies or solo founders, ideally from funded startups series
+# a b c" came back with 107 of 110 items marked as contradicting "The author is
+# from a funded startup, Series A, B or C", while the two negatively phrased
+# requirements in the same batch behaved correctly. A post that never mentions the
+# author's company had been read as failing "the author IS funded". The triage
+# prompt is the primary fix; this is the guard for the next time a batch comes back
+# mislabelled, because that failure is silent: every item demoted puts every item
+# in one tier, so the ranking does nothing while the report tells the reader that
+# 107 real threads contradicted what they asked for.
+#
+# Why more than half: silence is the norm here, so a correct spread of verdicts is
+# mostly "u". An "n" on the majority of a pool means the model found positive
+# evidence of incompatibility in the majority of 600 character previews, which is
+# far likelier to be a misread requirement than a property of the corpus. It is
+# also the point where the tier stops doing anything: once most of the pool is
+# demoted, backfill IS the sample, so the demotion can no longer separate the good
+# items from the rest. Firing the guard slightly too eagerly costs a filter that
+# had already stopped discriminating; firing it too late leaves a false claim about
+# real threads in a document the user may share, which is the worse error.
+DEGENERATE_VIOLATION_SHARE = 0.5
+# Ratios over a handful of items are noise: 3 of 4 says nothing about whether a
+# requirement was misread, and a pool that small has no meaningful tiering to
+# protect anyway.
+DEGENERATE_MIN_RATED = 8
+
 # ── Brief decomposition ───────────────────────────────────────────────────────
 # A brief can carry constraints about WHO posted a thread ("only from someone at a
 # funded startup", "not newbies") alongside its topic. One cheap call splits those
@@ -704,13 +735,20 @@ def _chat_json(
     tried_fallback = False
     started = time.time()
     last_exc: Optional[Exception] = None
+    # The flag actually sent on the next attempt. Kept apart from the `thinking`
+    # parameter (never mutated) because Gemini bills reasoning tokens out of the same
+    # max_output_tokens as the answer: reasoning and answer share one allowance. When
+    # a response comes back unparseable while thinking was on, that usually means the
+    # allowance went to reasoning and left nothing for the JSON, so the retry below
+    # turns thinking off to hand the full ceiling to the answer instead.
+    effective_thinking = thinking
 
     for attempt in range(MAX_ATTEMPTS):
         try:
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=_generation_config(max_tokens, thinking=thinking),
+                config=_generation_config(max_tokens, thinking=effective_thinking),
             )
         except Exception as exc:
             last_exc = exc
@@ -752,6 +790,18 @@ def _chat_json(
             # unquoted key, and the previous version threw away an otherwise good
             # 80-second run over one of them. Retrying costs one call and almost
             # always heals it.
+            if effective_thinking:
+                # Reasoning and the answer are drawn from the same max_output_tokens,
+                # so an unparseable payload with thinking on is not just "try again":
+                # it is a sign the reasoning ate the allowance and left the JSON
+                # truncated. Turning thinking off gives the retry the full ceiling for
+                # the answer alone, on top of the ordinary heals-a-flaky-response retry.
+                logger.warning(
+                    "%s truncated while thinking; turning thinking off for the "
+                    "remaining attempts so the answer has the full token allowance",
+                    label,
+                )
+                effective_thinking = False
             preview = content[:BAD_PAYLOAD_LOG_CHARS]
             last_exc = _UnparseableResponse(
                 "finish_reason={} payload={!r}".format(finish, preview)
@@ -940,18 +990,51 @@ def _as_verdict(value: Any) -> Verdict:
     return Verdict(int(value), "")
 
 
-def qualifier_tier(verdict: Any) -> str:
+def requirement_unreliable(counts: Any) -> bool:
+    """Whether one requirement's verdicts came back too lopsided to rank on.
+
+    Reads the same {"met", "violated", "unknown"} counts the report prints, so the
+    flag and the numbers printed beside it can never disagree. See
+    DEGENERATE_VIOLATION_SHARE for why a majority of "n" is read as the model
+    failing to judge a requirement rather than as a fact about the corpus.
+
+    It cannot be decided from one item's verdict: it needs the whole batch, which
+    is why _select_sample computes it once and hands it to everything downstream.
+    """
+    counts = counts if isinstance(counts, dict) else {}
+    met = int(counts.get("met") or 0)
+    violated = int(counts.get("violated") or 0)
+    unknown = int(counts.get("unknown") or 0)
+    rated = met + violated + unknown
+    if rated < DEGENERATE_MIN_RATED:
+        return False
+    return violated > rated * DEGENERATE_VIOLATION_SHARE
+
+
+def qualifier_tier(verdict: Any, unreliable: Sequence[bool] = ()) -> str:
     """"confirmed", "unconfirmed" or "violated" for one verdict.
 
     Any "n" violates: one requirement the item plainly breaks is enough, because
     the brief stated all of them. Otherwise any "y" confirms. An item that says
     nothing either way, and an item from a brief with no requirements at all, are
     both "unconfirmed", which is the tier that costs an item nothing.
+
+    `unreliable` is one flag per requirement in the brief's own order, from
+    requirement_unreliable over the whole batch. A flagged requirement's character
+    is skipped entirely, so it can neither demote nor promote: a verdict nobody
+    trusts must not decide the ranking in either direction, and the report says
+    plainly that it was not used. It defaults to no flags, so every existing caller
+    keeps today's behaviour exactly.
     """
     qualifiers = _as_verdict(verdict).qualifiers
-    if "n" in qualifiers:
+    trusted = "".join(
+        char
+        for index, char in enumerate(qualifiers)
+        if not (index < len(unreliable) and unreliable[index])
+    )
+    if "n" in trusted:
         return "violated"
-    if "y" in qualifiers:
+    if "y" in trusted:
         return "confirmed"
     return "unconfirmed"
 
@@ -961,6 +1044,7 @@ def rank_items(
     comments: Sequence[dict],
     relevance: Optional[Dict[Tuple[str, str], Any]] = None,
     now: Optional[float] = None,
+    unreliable: Sequence[bool] = (),
 ) -> Tuple[List[dict], List[dict]]:
     """Fully order both pools, best candidates first.
 
@@ -993,6 +1077,11 @@ def rank_items(
 
     Because every requirement is stored as a positive sentence, only an explicit "n"
     demotes: absence of evidence costs an item nothing.
+
+    `unreliable` marks requirements whose verdicts came back degenerate across the
+    whole batch (see requirement_unreliable); they take no part in the tiering, so
+    an item that only breaks a flagged requirement is not demoted. The default of no
+    flags is today's behaviour.
     """
     relevance = relevance or {}
     timestamp = time.time() if now is None else now
@@ -1011,7 +1100,7 @@ def rank_items(
             else:
                 verdict = _as_verdict(rating)
                 weight = RELEVANCE_WEIGHTS.get(verdict.topic, RELEVANCE_WEIGHTS[1])
-                tier = qualifier_tier(verdict)
+                tier = qualifier_tier(verdict, unreliable)
             if weight <= 0 or (substance_check and not _has_substance(item)):
                 # Ranked by base score alone: relevance said no, so it no longer
                 # gets a say in how the leftovers are ordered. Checked before the
@@ -1325,14 +1414,26 @@ def _triage_prompt(
         "or a neighbouring problem, partly related, or too short to tell), or 0 (a "
         "different audience or subject entirely, or spam). When unsure, use 1.\n"
         '- "q" is exactly {n} character(s), one per constraint in the order listed '
-        "above.\n"
-        '- Use "y" only when the item itself says something that meets that '
-        'constraint, "n" only when it says something that plainly breaks it, and '
-        '"u" when it does not say.\n'
-        '- Most Reddit posts never say who wrote them, so "u" is the honest answer '
-        "most of the time. Use it freely. Never guess from a writing style, a "
-        "subject, a tone or a flair that does not mention it. Never guess from a "
-        'username. "u" is the correct answer, not a failure.\n'
+        'above, each one "y", "n" or "u".\n'
+        '- "u" means the item does not say. It is the correct answer for most items, '
+        'and most of the characters you return should be "u", because most Reddit '
+        "threads never say anything about who wrote them.\n"
+        '- "y" only when the item itself states or clearly implies something that '
+        "meets the constraint.\n"
+        '- "n" only when the item itself states or clearly implies something that is '
+        "INCOMPATIBLE with the constraint. An item that simply never mentions what a "
+        'constraint is about is "u", never "n". Silence is always "u". Not being able '
+        'to tell is "u". "u" is the correct answer, not a failure.\n'
+        '- Worked example, for the constraint "The author is from a funded startup, '
+        'Series A, B or C". A thread that asks a detailed question about ad costs and '
+        'never mentions the author\'s company is "u", because it says nothing either '
+        'way. A thread whose author writes "I am a solo bootstrapper with no '
+        'investors" is "n", because that is incompatible with being funded. A thread '
+        'whose author writes "we raised our Series B last year" is "y".\n'
+        "- Judge each constraint only on what the item says about its AUTHOR. Never "
+        "infer it from what the thread is about, which community it is in, the "
+        "writing style, the tone, how experienced the author sounds, or a username. "
+        'An expert-sounding thread whose author never describes themselves is "u".\n'
         '- Judge "r" on the topic only and "q" on the constraints only. An item can '
         'be squarely on topic and still be "n", and off topic and still be "y".\n'
         "- No markdown fences, no commentary. JSON only. Never use an em dash or an "
@@ -2353,6 +2454,28 @@ def _triage_pool(items: Sequence[dict], scores: Sequence[float], cap: int) -> Li
     return [index for _, index in paired[:cap]]
 
 
+def top_items(items: Sequence[dict], cap: int) -> List[dict]:
+    """The `cap` strongest items by engagement and recency, best first.
+
+    The public face of the same deterministic pre-rank the triage uses to decide
+    which items are worth a model call. Retrieval needs it for a different reason:
+    comments are now fetched per post, so something has to choose which posts are
+    worth spending a request on before any model has read anything. Sharing the
+    ranking means the posts we gather evidence for are the posts most likely to
+    survive selection.
+
+    Judging eligibility is the caller's job, not this function's: pass in the
+    items that could usefully be fetched and this returns the best of them.
+    """
+    if cap <= 0:
+        return []
+    pool = [item for item in items or [] if isinstance(item, dict)]
+    if not pool:
+        return []
+    positions = _triage_pool(pool, _base_scores(pool, time.time()), cap)
+    return [pool[index] for index in positions]
+
+
 def _empty_qualifier_counts() -> Dict[str, int]:
     return {"confirmed": 0, "unconfirmed": 0, "violated": 0}
 
@@ -2419,6 +2542,7 @@ def _select_sample(
             brief=brief, soft_deadline=soft_deadline,
         )
 
+    unreliable: List[bool] = []
     if ratings is None:
         relevance: Optional[Dict[Tuple[str, str], Verdict]] = None
         selection = {
@@ -2429,25 +2553,34 @@ def _select_sample(
     else:
         relevance = {}
         counts = {"0": 0, "1": 0, "2": 0}
-        qualifier_counts = _empty_qualifier_counts()
         # met / violated / unknown per requirement, in the brief's own order.
         per_requirement = [
             {"met": 0, "violated": 0, "unknown": 0} for _ in brief.requirements
         ]
+        # First pass counts the verdicts. The tier an item lands in cannot be decided
+        # here, because whether a requirement is reliable enough to tier on is a
+        # property of the WHOLE batch of verdicts, not of any one item's.
+        accepted: List[Tuple[int, Verdict]] = []
         for position, value in ratings.items():
             if not (1 <= position <= len(pool_keys)):
                 continue
             verdict = _as_verdict(value)
             relevance[pool_keys[position - 1]] = verdict
             counts[str(verdict.topic)] += 1
-            tier = qualifier_tier(verdict)
+            accepted.append((position, verdict))
+            for index, char in enumerate(verdict.qualifiers[: len(per_requirement)]):
+                key = {"y": "met", "n": "violated"}.get(char, "unknown")
+                per_requirement[index][key] += 1
+
+        # Then the batch-wide judgement, once, and the tiers that follow from it.
+        unreliable = [requirement_unreliable(entry) for entry in per_requirement]
+        qualifier_counts = _empty_qualifier_counts()
+        for position, verdict in accepted:
+            tier = qualifier_tier(verdict, unreliable)
             qualifier_counts[tier] += 1
             # The stamp survives ranking, which is the only reason the analysed
             # sample can be counted at all (see analysed_qualifier_counts).
             pool[position - 1]["qualifier_tier"] = tier
-            for index, char in enumerate(verdict.qualifiers[: len(per_requirement)]):
-                key = {"y": "met", "n": "violated"}.get(char, "unknown")
-                per_requirement[index][key] += 1
 
         selection = {
             "method": "relevance+engagement",
@@ -2461,12 +2594,17 @@ def _select_sample(
             selection["pool"] = len(pool)
             selection["topic"] = brief.topic
             selection["requirements"] = [
-                dict(text=requirement.text, kind=requirement.kind, **per_requirement[index])
+                dict(
+                    text=requirement.text,
+                    kind=requirement.kind,
+                    unreliable=unreliable[index],
+                    **per_requirement[index]
+                )
                 for index, requirement in enumerate(brief.requirements)
             ]
             selection["qualifier_counts"] = qualifier_counts
 
-    ranked_posts, ranked_comments = rank_items(posts, comments, relevance, now)
+    ranked_posts, ranked_comments = rank_items(posts, comments, relevance, now, unreliable)
     return ranked_posts, ranked_comments, selection
 
 
