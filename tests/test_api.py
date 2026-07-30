@@ -295,6 +295,30 @@ class TestClientCancellation:
 
 
 class TestSampleEndpoint:
+    def test_the_real_bundled_sample_is_actually_served(self):
+        """The repository's own sample_report.json, not a fixture standing in for it.
+
+        Every other test here writes its own bundle to a tmp path, so all of them
+        passed while production served {"available": false}: the API had its own
+        hand-written `BUNDLE_VERSION = 4` and the engine had moved to 5, and
+        nothing compared the file that actually ships against the guard that
+        actually runs. This is that comparison.
+        """
+        response = client.get("/api/sample")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["available"] is True, (
+            "sample_report.json is at version {} but the API serves {}".format(
+                json.loads(api_index.SAMPLE_PATH.read_text()).get("bundle_version"),
+                sorted(api_index.SUPPORTED_BUNDLE_VERSIONS),
+            )
+        )
+        assert body["bundle"]["bundle_version"] in api_index.SUPPORTED_BUNDLE_VERSIONS
+
+    def test_the_current_engine_version_is_served(self):
+        # A bump that forgets this list is the exact failure above.
+        assert pipeline.BUNDLE_VERSION in api_index.SUPPORTED_BUNDLE_VERSIONS
+
     def test_available_when_the_file_is_a_v4_bundle(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"
         sample_path.write_text(json.dumps({"bundle_version": 4, "inputs": {"query": "x"}}))

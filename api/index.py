@@ -107,7 +107,12 @@ app.add_middleware(
 )
 
 SAMPLE_PATH = _REPO_ROOT / "sample_report.json"
-BUNDLE_VERSION = 4
+# Every version this API will still hand to a frontend, mirroring
+# SUPPORTED_BUNDLE_VERSIONS in lib/types.ts. A set rather than one number, and
+# derived from the engine rather than hardcoded: this was `BUNDLE_VERSION = 4`
+# written out by hand, so bumping the engine to 5 silently made the bundled
+# sample report unavailable in production while every test still passed.
+SUPPORTED_BUNDLE_VERSIONS = frozenset({pipeline.BUNDLE_VERSION, 4})
 
 # analysis.draft_post already caps evidence at DRAFT_MAX_EVIDENCE internally, but
 # the API layer does not trust its caller either, so the same cap is applied
@@ -535,7 +540,8 @@ def _load_sample_payload() -> dict:
     except (OSError, ValueError):
         bundle = None
 
-    if not isinstance(bundle, dict) or bundle.get("bundle_version") != BUNDLE_VERSION:
+    if not isinstance(bundle, dict) \
+            or bundle.get("bundle_version") not in SUPPORTED_BUNDLE_VERSIONS:
         payload = {"available": False}
     else:
         payload = {"available": True, "bundle": bundle}
