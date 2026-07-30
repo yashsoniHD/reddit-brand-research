@@ -186,7 +186,7 @@ export function QueryForm({
         ref={detailsRef}
         open={advancedOpen}
         onToggle={(event) => onToggle(event.currentTarget.open)}
-        className="group surface-hush px-4 py-3 sm:px-5"
+        className="group surface-hush px-4 py-3 transition-colors open:bg-card sm:px-5"
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 marker:hidden">
           <ChevronRight
