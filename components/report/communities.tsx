@@ -27,7 +27,10 @@ export function Communities({ bundle }: { bundle: Bundle }) {
                 ? `${community.reason} · ${compact(community.subscribers)} members`
                 : `${community.reason} · no recent posts, so it was left out`
             }
-            className={`chip transition-colors hover:border-[var(--brand-line)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] ${
+            // Border and text move on hover, the fill does not: with eight chips
+            // in a row, a tinted fill meant a mouse crossing the row strobed
+            // through all of them.
+            className={`chip transition-colors hover:border-[var(--brand-line)] hover:text-[var(--brand-ink)] ${
               community.used
                 ? "text-foreground"
                 : "text-muted-foreground line-through decoration-1"

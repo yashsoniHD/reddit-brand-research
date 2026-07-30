@@ -60,15 +60,27 @@
     monospace;
 
   /* Three planes, not two: the page, the card that lifts off it, and a hush
-     plane for the research zone so it reads as secondary without going grey
-     and dead. Charts render on --card, the surface every colour below was
-     contrast-checked against. */
-  --background: #f7f7f5;
+     plane behind secondary content.
+
+     The ramp is deliberately NEUTRAL, a touch cool, because the one accent
+     below is a cool blue. It used to be warm (--hush was #f1f1ec), and a warm
+     beige beside a cool blue reads as dingy: the bigger the surface, the worse,
+     which is why the full-width research zone was the first place it became
+     unbearable and the settings panel the second. Do not warm these back up
+     without changing --brand to match.
+
+     Every value here is contrast-checked against every plane it can land on,
+     not just --card: the tightest pair is --muted-foreground on --secondary at
+     4.77 (AA small text needs 4.50). The first pass at this ramp put that pair
+     at 4.497, i.e. failing, which is why --muted-foreground is a step darker
+     than the surfaces would suggest. Darkening a plane or lightening a grey
+     means re-running that check against all five planes. */
+  --background: #f7f8fa;
   --foreground: #0b0b0b;
-  --foreground-soft: #46443f;
+  --foreground-soft: #474b52;
   --card: #ffffff;
   --card-foreground: #0b0b0b;
-  --hush: #f1f1ec;
+  --hush: #eef1f4;
   --popover: #ffffff;
   --popover-foreground: #0b0b0b;
 
@@ -81,15 +93,17 @@
 
   --primary: #1f5fab;
   --primary-foreground: #ffffff;
-  --secondary: #eeeeea;
+  --secondary: #e9edf1;
   --secondary-foreground: #0b0b0b;
-  --muted: #f1f1ed;
-  --muted-foreground: #6b6a66;
+  --muted: #eef1f4;
+  --muted-foreground: #63686f;
   --accent: #e9f0fb;
   --accent-foreground: #1f5fab;
   --destructive: #c0332f;
-  --border: rgba(11, 11, 11, 0.1);
-  --input: rgba(11, 11, 11, 0.16);
+  /* Border ink is a cool near-black rather than neutral black, so a hairline on
+     a cool plane does not read faintly brown at low alpha. */
+  --border: rgba(15, 23, 36, 0.1);
+  --input: rgba(15, 23, 36, 0.16);
   --ring: #2a78d6;
 
   /* Elevation. Three steps, all restrained: the point is to separate planes,
@@ -103,10 +117,10 @@
   /* Data marks. Sentiment is a diverging encoding: accent / neutral gray /
      critical red, validated for colour-vision deficiency on both surfaces. */
   --viz-accent: #2a78d6;
-  --viz-track: #e6e4dd;
-  --viz-grid: #dedcd5;
+  --viz-track: #e2e7ec;
+  --viz-grid: #dce1e7;
   --viz-pos: #2a78d6;
-  --viz-neu: #898781;
+  --viz-neu: #868d95;
   --viz-neg: #d03b3b;
 }
 
@@ -118,7 +132,9 @@
        lifted a real step above it, and the hush plane sits between the two. */
     --background: #0b0b0c;
     --foreground: #f2f2ef;
-    --foreground-soft: #c5c3bc;
+    /* Neutralised with the light ramp: the rest of the dark planes were already
+       neutral, so this was the one value reading warm against them. */
+    --foreground-soft: #c3c7ce;
     --card: #18181a;
     --card-foreground: #f2f2ef;
     --hush: #121214;
@@ -156,7 +172,7 @@
     --viz-track: #2a2a2e;
     --viz-grid: #2a2a2e;
     --viz-pos: #3987e5;
-    --viz-neu: #898781;
+    --viz-neu: #868d95;
     --viz-neg: #d03b3b;
   }
 }

@@ -55,8 +55,10 @@ function Callout({
  */
 function Stat({ value, label }: { value: string; label: string }) {
   return (
-    <div className="flex flex-col-reverse gap-0.5">
-      <dt className="text-[0.6875rem] leading-snug text-muted-foreground">{label}</dt>
+    <div className="flex flex-col-reverse gap-1">
+      {/* `h-quiet` rather than another hand-tuned small grey: the app already
+          owns one label style, and this was a fourth variant of it. */}
+      <dt className="h-quiet">{label}</dt>
       <dd className="stat m-0 text-foreground">{value}</dd>
     </div>
   );
@@ -159,10 +161,16 @@ export function ReportView({
         </p>
       </section>
 
-      {/* ── The quieter research zone ────────────────────────────────────── */}
+      {/* ── The quieter research zone ──────────────────────────────────────
+          Separated by a rule and space rather than a tinted slab. The slab was
+          the heaviest possible way to say "this part is secondary": a
+          full-width fill, and the largest single surface on the page, so
+          whatever it was tinted it dominated everything above it. Quiet is
+          carried by the type instead, which is what the ordering comment below
+          says this zone is for. */}
       <section
         aria-labelledby="research-heading"
-        className="surface-hush mt-2 flex flex-col gap-8 px-5 py-6 sm:px-7 sm:py-8"
+        className="rule mt-4 flex flex-col gap-8 border-t pt-8"
       >
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
@@ -178,7 +186,7 @@ export function ReportView({
               run together in a sentence they look like they contradict each
               other. Laid out as a funnel, left to right, they read as the
               stages they are. */}
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-y py-4 sm:grid-cols-4">
+          <dl className="rule grid grid-cols-2 gap-x-4 gap-y-5 border-y py-5 sm:grid-cols-4">
             <Stat value={thousands(sample?.posts_fetched)} label="Posts fetched" />
             <Stat value={thousands(sample?.comments_fetched)} label="Comments fetched" />
             <Stat

@@ -78,7 +78,7 @@ export function Topics({ bundle }: { bundle: Bundle }) {
               {/* One series, so no legend: the section title names the measure,
                   and every bar is directly labelled above it. */}
               <div
-                className="mt-2 h-2 w-full overflow-hidden rounded-full"
+                className="mt-2 h-1.5 w-full overflow-hidden rounded-full"
                 style={{ background: "var(--viz-track)" }}
                 role="img"
                 aria-label={`${topic.label}: ${valueLabel}`}
