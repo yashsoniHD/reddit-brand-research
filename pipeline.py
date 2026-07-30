@@ -456,6 +456,46 @@ def _resolve_citations(
     return stats.citations_for(indices, items, comments=comments)
 
 
+def _valid_item_indices(idea: dict, items: Sequence[dict]) -> List[int]:
+    # bool is an int subclass, and True would silently resolve to item 1.
+    return [
+        index
+        for index in (idea.get("item_indices") or [])
+        if isinstance(index, int) and not isinstance(index, bool) and 1 <= index <= len(items)
+    ]
+
+
+def _idea_engagement_key(idea: dict, items: Sequence[dict]) -> float:
+    """Sum of the real engagement behind an idea's cited items.
+
+    Same primitive `analysis` uses to rank the sample itself
+    (`log1p(score)` for a comment, `log1p(score + comments)` for a post), so an
+    idea anchored to a thread that actually resonated outranks one anchored to
+    a quiet one. An idea with no usable indices (bad index, out of range, or
+    none at all) scores 0.0.
+    """
+    indices = _valid_item_indices(idea, items)
+    return sum(analysis._engagement_raw(items[index - 1]) for index in indices)
+
+
+def _order_ideas_by_engagement(ideas: Sequence[dict], items: Sequence[dict]) -> List[dict]:
+    """Strongest cited evidence first. No extra model call: the ranking comes
+    entirely from data already fetched.
+
+    The sort key is a pair: engagement (negated, so higher comes first), then
+    whether the idea resolves to zero real items (so a wholly citation-less
+    idea sorts after a cited-but-quiet one even though both sum to 0.0).
+    `sorted` is stable and neither part of the key is a `reverse=True` flip, so
+    ideas that still tie on both — equal engagement, same citation status —
+    keep the order synthesis emitted them in.
+    """
+    def key(idea: dict):
+        has_citations = bool(_valid_item_indices(idea, items))
+        return (-_idea_engagement_key(idea, items), not has_citations)
+
+    return sorted(ideas, key=key)
+
+
 def run_report(
     query: str,
     profile: str,
@@ -990,7 +1030,7 @@ def run_report(
             "addresses": idea["addresses"],
             "citations": cite(idea["item_indices"]),
         }
-        for idea in synthesis["content_ideas"]
+        for idea in _order_ideas_by_engagement(synthesis["content_ideas"], items)
     ]
     pain_points = [
         {"text": claim["text"], "citations": cite(claim["item_indices"])}

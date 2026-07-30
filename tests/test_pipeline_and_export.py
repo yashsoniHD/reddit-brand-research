@@ -447,6 +447,39 @@ class TestRunReport:
         assert bundle["analysis"]["questions"][0]["citations"]
         assert bundle["analysis"]["content_ideas"][0]["citations"]
 
+    def test_content_ideas_are_ordered_by_engagement_of_their_citations(self):
+        # `run_report` sorts posts by `created_utc` descending before classifying
+        # them, so `fake_posts`' highest-`i` post (score 13, 3 comments) lands at
+        # item index 1 and its lowest-`i` post (score 10, 0 comments) lands at
+        # item index 4. Emit the ideas in the opposite order to the one the
+        # engagement sort must produce, so a passing test proves the reorder
+        # happened rather than the model having emitted it that way already.
+        def ordering_synthesize(items, topics, query, profile, subreddits, preview_chars=200,
+                                content_types=None):
+            fmt = (pipeline.analysis.chosen_formats(content_types) or ["Text post"])[0]
+
+            def idea(title, item_indices):
+                return {
+                    "title": title, "hook": "hook", "format": fmt, "angle": "a",
+                    "rationale": "r", "addresses": "x", "item_indices": item_indices,
+                }
+
+            return {
+                "report_title": "t", "executive_summary": "s",
+                "topic_descriptions": {1: "d", 2: "d"},
+                "pain_points": [], "questions": [],
+                "content_ideas": [
+                    idea("Weak", [4]),
+                    idea("No citations", []),
+                    idea("Strong", [1]),
+                ],
+                "model": "gemini-2.5-flash",
+            }
+
+        bundle = build_bundle(synthesize=ordering_synthesize)
+        titles = [idea["title"] for idea in bundle["analysis"]["content_ideas"]]
+        assert titles == ["Strong", "Weak", "No citations"]
+
     def test_progress_messages_report_discovery_and_synthesis(self):
         messages = []
         build_bundle(progress=messages.append)
@@ -900,6 +933,60 @@ def _appendix_bundle(items, item_sentiments=None):
         "items": items,
         "analysis": {"item_sentiments": item_sentiments or []},
     }
+
+
+# ── Ordering ideas by engagement ────────────────────────────────────────────────
+class TestOrderIdeasByEngagement:
+    """`pipeline._order_ideas_by_engagement` is what makes the idea anchored to
+    the loudest threads lead the report, without any extra model call."""
+
+    def test_orders_by_total_engagement_of_cited_items_descending(self):
+        items = [_post_item(5), _post_item(1), _comment_item(3)]
+        idea_mid = {"title": "mid", "item_indices": [2]}
+        idea_high = {"title": "high", "item_indices": [1]}
+        idea_low = {"title": "low", "item_indices": [3]}
+
+        ordered = pipeline._order_ideas_by_engagement([idea_mid, idea_high, idea_low], items)
+
+        assert ordered == [idea_high, idea_mid, idea_low]
+
+    def test_sums_engagement_across_all_of_an_ideas_cited_items(self):
+        items = [_comment_item(1), _comment_item(2)]
+        idea_both = {"title": "both", "item_indices": [1, 2]}
+        idea_one = {"title": "one", "item_indices": [2]}
+
+        ordered = pipeline._order_ideas_by_engagement([idea_one, idea_both], items)
+
+        assert ordered == [idea_both, idea_one]
+
+    def test_stable_on_ties_keeps_the_model_emitted_order(self):
+        items = [_post_item(1)]
+        idea_a = {"title": "a", "item_indices": [1]}
+        idea_b = {"title": "b", "item_indices": [1]}
+
+        # Same tie both ways: a stable sort never flips it, whichever order the
+        # model happened to emit the two ideas in.
+        assert pipeline._order_ideas_by_engagement([idea_a, idea_b], items) == [idea_a, idea_b]
+        assert pipeline._order_ideas_by_engagement([idea_b, idea_a], items) == [idea_b, idea_a]
+
+    def test_citationless_ideas_sort_last_among_zero_ties(self):
+        items = [_comment_item(0)]  # score 0 -> log1p(0) == 0.0, a genuine tie
+        cited_zero = {"title": "cited but quiet", "item_indices": [1]}
+        citationless = {"title": "no citations", "item_indices": []}
+        # bool is an int subclass and out-of-range indices are dropped, so this
+        # idea has no *valid* citation despite a non-empty item_indices.
+        bad_indices = {"title": "only bad indices", "item_indices": [0, 99, True]}
+
+        # Emitted with the citation-less ideas first, so a passing test proves
+        # the sort actively demotes them rather than merely preserving input order.
+        ordered = pipeline._order_ideas_by_engagement([citationless, bad_indices, cited_zero], items)
+
+        assert ordered[0] == cited_zero
+        assert ordered[1:] == [citationless, bad_indices]
+
+    def test_empty_ideas_list_is_returned_unchanged(self):
+        assert pipeline._order_ideas_by_engagement([], []) == []
+        assert pipeline._order_ideas_by_engagement([], [_post_item(1)]) == []
 
 
 class TestExports:
