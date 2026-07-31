@@ -14,6 +14,12 @@ const inter = Inter({
   variable: "--font-inter",
 });
 
+/* One family for the whole product. A second, editorial serif was trialled on
+   the two display tiers and rejected. If it is ever revisited, note that it has
+   to come through next/font as Inter does: an @import or <link> to
+   fonts.googleapis.com is a third-party request the CSP does not allow, so the
+   font would simply never arrive in production. */
+
 const NAME = "Reddit Content Ideas";
 const TAGLINE =
   "Turn what people actually say on Reddit into content you can publish";
@@ -73,9 +79,17 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  // Both themes are real designs, so the browser chrome should follow suit.
+  /**
+   * Both themes are real designs, so the browser chrome should follow suit.
+   *
+   * These MUST track `--background` in globals.css. They cannot read the CSS
+   * variable (this is a serialised meta tag, evaluated before any stylesheet),
+   * so they are the one place the palette is duplicated by hand. The light value
+   * was left on the old warm #f7f7f5 when the ramp went cool, which showed up as
+   * a seam between the mobile address bar and the top of the page.
+   */
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f7f7f5" },
+    { media: "(prefers-color-scheme: light)", color: "#f7f8fa" },
     { media: "(prefers-color-scheme: dark)", color: "#0b0b0c" },
   ],
 };
@@ -84,7 +98,10 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${inter.variable} h-full antialiased`}>
+    <html
+      lang="en"
+      className={`${inter.variable} h-full antialiased`}
+    >
       <body className="flex min-h-full flex-col">{children}</body>
     </html>
   );

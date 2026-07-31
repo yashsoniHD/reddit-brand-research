@@ -12,6 +12,11 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  /* Headings are set in the body face on purpose. A second family was trialled
+     (an editorial serif on the two display tiers) and rejected: this is a data
+     product, and the serif read as a magazine borrowing authority rather than a
+     tool demonstrating it. The alias stays so `font-heading` remains a real hook
+     if that decision is ever revisited. */
   --font-heading: var(--font-sans);
   --color-ring: var(--ring);
   --color-input: var(--input);
@@ -114,12 +119,36 @@
   --lift-3: 0 1px 2px rgba(11, 11, 11, 0.04), 0 6px 16px rgba(11, 11, 11, 0.06),
     0 24px 48px -16px rgba(11, 11, 11, 0.12);
 
-  /* Data marks. Sentiment is a diverging encoding: accent / neutral gray /
-     critical red, validated for colour-vision deficiency on both surfaces. */
+  /* Data marks. Sentiment is a diverging encoding: teal-green / neutral gray /
+     critical red, validated for colour-vision deficiency on both surfaces.
+
+     Running the dataviz validator over the sentiment trio reports one FAIL
+     that is expected and must not be "fixed": the chroma floor, on --viz-neu.
+     That check exists for categorical palettes, where every slot has to carry
+     a hue of its own. A diverging scale is the opposite case, its midpoint is
+     required to be neutral, so a grey with no chroma is the correct answer
+     there and adding chroma to satisfy the check would break the encoding. */
   --viz-accent: #2a78d6;
-  --viz-track: #e2e7ec;
+  /* The unfilled remainder of a percentage bar, so it has to be visible or the
+     bar loses its denominator. #e2e7ec measured 1.17:1 against --background,
+     which is nothing: every Topics row read as a floating mark with no scale
+     behind it. #d3dae3 is the darkest step that still reads as a track rather
+     than a second data mark: 1.33:1 vs --background, 1.41:1 vs --card, and
+     --viz-accent still clears the 3:1 mark floor sitting on it at 3.13:1. */
+  --viz-track: #d3dae3;
   --viz-grid: #dce1e7;
-  --viz-pos: #2a78d6;
+  /* The positive pole was byte-identical to --viz-accent, so blue meant
+     "volume" in Topics and "positive" in Sentiment two blocks apart. A green
+     pole is the fix, but the usable window is narrow: it has to clear OKLab
+     dE 15 from --viz-neu for normal colour vision AND 8 under all three CVD
+     simulations, which rules out the light mint the eye reaches for first
+     (#1baf7a lands at dE 14.4 normal, 5.7 deutan, i.e. a grey to a deutan
+     reader). This deep teal-green measures dE 15.8 / 9.8 protan / 11.3 deutan
+     / 12.7 tritan against --viz-neu, and 28.5 / 8.7 / 8.8 / 33.0 against
+     --viz-neg, at 4.61:1 on --background, 4.90:1 on --card and 3.48:1 on
+     --viz-track. Verified with the dataviz validator; re-run it if any pole
+     or plane moves. */
+  --viz-pos: #008159;
   --viz-neu: #868d95;
   --viz-neg: #d03b3b;
 }
@@ -171,14 +200,22 @@
     --viz-accent: #3987e5;
     --viz-track: #2a2a2e;
     --viz-grid: #2a2a2e;
-    --viz-pos: #3987e5;
-    /* Its own step, not the light value reused. Dark mode lightens --viz-pos to
-       #3987e5, which moves the blue TOWARDS a mid grey: sharing light mode's
-       #868d95 put the pair at OKLab dE 14.8 for normal colour vision, under the
-       15 floor, i.e. hard to tell apart even with full colour vision. #8e949c
-       is the lightest step that still sits inside the dark lightness band and
-       restores separation to 15.3. Verified with the dataviz validator; re-run
-       it if either pole moves. */
+    /* Its own step, not the light green reused, because the grey it has to
+       separate from is not the light grey either: #8e949c sits a good deal
+       higher in lightness than #868d95, so the green has to hold its distance
+       against a lighter neutral. #008767 measures OKLab dE 15.7 for normal
+       colour vision and 9.3 protan / 11.4 deutan / 13.2 tritan against
+       --viz-neu, and 28.4 / 11.0 / 8.8 / 33.1 against --viz-neg. The bright
+       mint the eye reaches for in dark mode is not available: #2fc38c sits at
+       OKLCH L 0.73, outside the validator's dark band entirely. Contrast is
+       4.37:1 on --background, 3.94:1 on --card and 3.17:1 on --viz-track. */
+    --viz-pos: #008767;
+    /* Its own step, not the light value reused. The dark planes are darker
+       than the light ones are light, so the neutral pole has to climb to stay
+       legible on them: at 6.43:1 on --background it is nearly twice the light
+       pole's 3.16:1 headroom. #8e949c is the lightest step that still sits
+       inside the dark lightness band. Verified with the dataviz validator;
+       re-run it if either pole or any plane moves. */
     --viz-neu: #8e949c;
     --viz-neg: #d03b3b;
   }
@@ -240,10 +277,21 @@
   }
 
   /* ── Type scale ───────────────────────────────────────────────────────
-     Seven sizes for the whole app, so no section can invent its own
-     hierarchy. t-display is the hero; t-title heads the product; h-zone
-     titles the research zone; h-section titles a block inside it; h-quiet
-     is a label. */
+     Nine sizes for the whole app, so no section can invent its own
+     hierarchy. t-display is the hero; t-title heads the product; t-lead is
+     the standfirst; t-body is the report's default paragraph; t-small is
+     supporting prose; h-zone titles the research zone; h-section titles a
+     block inside it; h-quiet is a label.
+
+     It was seven until an audit found the components shipping eleven. The two
+     extra sizes were not accidents: text-[0.9375rem] appeared 8 times and
+     text-[0.8125rem] 13 times, always for the same two jobs, so they were
+     real tiers that had simply never been named. Naming them is what stops a
+     fourteenth raw value from being added next to them.
+
+     Every tier is set in the body face. The weights and the negative tracking
+     below are cut for Inter specifically: its counters are open, so a display
+     size can afford to close up further than a serif could. */
   .t-display {
     font-size: clamp(1.9375rem, 1.45rem + 1.9vw, 2.875rem);
     line-height: 1.08;
@@ -260,6 +308,19 @@
     font-size: 1.0625rem;
     line-height: 1.6;
     letter-spacing: -0.005em;
+  }
+  /* Promoted from 8 hand-written text-[0.9375rem] instances: the paragraph
+     the report actually defaults to, one step under t-lead. */
+  .t-body {
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+  /* Promoted from 13 hand-written text-[0.8125rem] instances: callouts, hints
+     and table cells. Tighter leading than t-body because these run short and
+     1.6 makes a two-line callout look like two paragraphs. */
+  .t-small {
+    font-size: 0.8125rem;
+    line-height: 1.55;
   }
   .h-zone {
     font-size: 1.0625rem;
@@ -304,6 +365,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    /* The ::after below needs a containing block, and it is what gets the
+       pill to a legal target size. */
+    position: relative;
     min-width: 1.25rem;
     height: 1.25rem;
     padding-inline: 0.3rem;
@@ -322,10 +386,34 @@
       border-color 140ms ease,
       color 140ms ease;
   }
+  /* The mark is 20px, and in the standalone Sources rows it is not inline in
+     a sentence, so WCAG 2.2 SC 2.5.8's 24px minimum applies with no inline
+     exemption to hide behind. A 6px invisible skirt takes the target to 32px
+     without moving a single visible pixel, which matters because the pill has
+     to stay superscript-sized to read as a footnote. */
+  .pill::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+  }
+  /* 11px/600 is small text, so hover needs 4.5:1, and the obvious rule
+     (white on --brand) misses in BOTH themes: 4.42:1 light, 3.64:1 dark.
+     They need opposite fixes, hence two rules rather than one. Light goes a
+     step darker to --brand-ink, which takes white to 6.40:1. */
   .pill:hover {
-    background: var(--brand);
-    border-color: var(--brand);
+    background: var(--brand-ink);
+    border-color: var(--brand-ink);
     color: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    /* Dark cannot use the same move: --brand-ink is a LIGHT blue here, so
+       darkening is not on the table and white is already the failing side.
+       Inverting instead, page-black on --brand, measures 5.41:1. */
+    .pill:hover {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: var(--background);
+    }
   }
 
   /* ── Chips ────────────────────────────────────────────────────────────
@@ -338,12 +426,49 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--card);
-    padding: 0.1875rem 0.625rem;
+    /* 3px of vertical padding put the chip at about 24.8px, riding the 24px
+       target floor with nothing to spare, so a single leading tweak anywhere
+       would drop it under. 4px buys the buffer at a cost of 2px of height. */
+    padding: 0.25rem 0.625rem;
     font-size: 0.75rem;
     font-weight: 500;
     line-height: 1.4;
   }
   .chip-brand {
+    border-color: var(--brand-line);
+    background: var(--brand-soft);
+    color: var(--brand-ink);
+  }
+  /* The interactive cousin of .chip, for multi-selects in the settings panel.
+     The split is deliberate rather than a fourth rounded thing: .chip is a
+     12px read-only tag in a dense report, and a tick target has two needs it
+     cannot meet. It has to clear the 44px touch floor, and it has to be legible
+     at arm's length while filling a form, so it takes the 14px step up. The
+     shared vocabulary is the pill radius and the border, which is what makes
+     a ticked format here and the same format printed as a .chip in the report
+     read as the same object. Anything non-interactive stays on .chip. */
+  .chip-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-height: 2.75rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    padding: 0.5rem 0.875rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.4;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease;
+  }
+  /* Selection is carried by fill and border together, never by colour alone:
+     the tick glyph the call sites render is the non-colour channel. */
+  .chip-control[aria-pressed="true"],
+  .chip-control[data-selected="true"] {
     border-color: var(--brand-line);
     background: var(--brand-soft);
     color: var(--brand-ink);
@@ -365,5 +490,29 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* A report is a document, and documents get printed. Every mark in this
+   product is a CSS background rather than an <img> or an SVG fill, and
+   browsers drop backgrounds by default when printing to save ink, so without
+   this a printed report loses the sentiment bar entirely and every topic bar
+   becomes an empty track. The percentages survive because they are direct
+   labels, which is the reason this is a fix and not a rescue.
+
+   Scoped to the marks rather than set globally: printing the page furniture
+   in full colour is what the browser default is right for. */
+@media print {
+  [data-viz],
+  [data-viz] * {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  /* A citation that resolves to nothing is worse than no citation, so the
+     footnote number keeps its tint and the reader can match it to the source
+     list. */
+  .pill {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
   }
 }
