@@ -562,7 +562,14 @@ def _load_sample_payload() -> dict:
 @app.get("/api/sample")
 async def get_sample():
     payload = _load_sample_payload()
-    return JSONResponse(payload, headers={"Cache-Control": "public, max-age=3600"})
+    # Only the hit is cacheable. A miss is usually transient from the caller's
+    # side (a sample not deployed yet, a version the file has since caught up
+    # with), and an hour-long public cache on it means the frontend's "try again
+    # in a moment" is a promise the browser will not honour: the retry is served
+    # from cache and fails identically until the entry expires. That is now a
+    # user-facing path rather than a dev-only one, so the miss is no-store.
+    cache = "public, max-age=3600" if payload.get("available") else "no-store"
+    return JSONResponse(payload, headers={"Cache-Control": cache})
 
 
 @app.get("/api/sample/available")
