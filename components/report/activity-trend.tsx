@@ -22,7 +22,18 @@ function shortDate(iso: string): string {
 
 export function ActivityTrend({ bundle }: { bundle: Bundle }) {
   const trend = bundle.stats?.trend ?? [];
-  if (trend.length === 0) return null;
+  // Returning null took the whole section with it, so a report with undated
+  // posts simply had no Activity heading and no reason given. Topics and
+  // Sentiment both explain their own absence; this now does too.
+  if (trend.length === 0) {
+    return (
+      <Section title="Activity">
+        <p className="text-xs text-muted-foreground">
+          No dated posts were available to chart activity for this sample.
+        </p>
+      </Section>
+    );
+  }
 
   const data: ColumnDatum[] = trend.map(([date, count]) => ({
     label: date,

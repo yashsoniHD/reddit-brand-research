@@ -33,15 +33,17 @@ export function Topics({ bundle }: { bundle: Bundle }) {
   const ordered = [...topics].sort(
     (a, b) => measure(b.share, b.count) - measure(a.share, a.count),
   );
-  // Counts have no natural ceiling, so those bars stay relative to the biggest
-  // one. Shares do: the bar for 17% is 17% of the track, because a bar scaled to
-  // the largest topic silently turns "17% of the conversation" into "the leader",
-  // which is a different and much bolder claim than the data supports.
-  const countMax = Math.max(...ordered.map((topic) => topic.count), 1);
+  // The track means "the whole sample" in both modes, so both denominators are
+  // the sample. Shares are already that. Counts are scaled against
+  // items_analysed rather than against the largest topic, because scaling to
+  // the leader makes the top bar full width by construction: a filled track
+  // next to "12 items" reads as "this is everything", which is the overclaim
+  // this scale exists to avoid.
+  const analysed = Math.max(1, Number(bundle.sample?.items_analysed) || 0);
   const widthFor = (share: number, count: number) =>
     lowData
-      ? Math.max(1.5, (count / countMax) * 100)
-      : Math.min(100, Math.max(1.5, share));
+      ? Math.min(100, (count / analysed) * 100)
+      : Math.min(100, Math.max(0, share));
 
   const totalShare = ordered.reduce((sum, topic) => sum + (Number(topic.share) || 0), 0);
   const partialCoverage = !lowData && totalShare < FULL_COVERAGE;
@@ -55,7 +57,7 @@ export function Topics({ bundle }: { bundle: Bundle }) {
           : "Share of the analysed conversation, from per item classifications."
       }
     >
-      <ul className="flex list-none flex-col gap-0 p-0">
+      <ul data-viz className="flex list-none flex-col gap-0 p-0">
         {ordered.map((topic) => {
           const width = widthFor(topic.share, topic.count);
           const valueLabel = lowData
@@ -70,31 +72,39 @@ export function Topics({ bundle }: { bundle: Bundle }) {
                 </span>
                 {/* The measure is the point of the row, so it is sized like a
                     number rather than like a caption. */}
-                <span className="num shrink-0 text-[0.9375rem] font-semibold text-foreground">
+                <span className="num t-body shrink-0 font-semibold text-foreground">
                   {valueLabel}
                 </span>
               </div>
 
               {/* One series, so no legend: the section title names the measure,
-                  and every bar is directly labelled above it. */}
+                  and every bar is directly labelled above it, which is also why
+                  the bar carries no accessible text of its own. */}
               <div
-                className="mt-2 h-1.5 w-full overflow-hidden rounded-full"
+                aria-hidden="true"
+                className="mt-2 h-1.5 w-full overflow-hidden rounded-r-full"
                 style={{ background: "var(--viz-track)" }}
-                role="img"
-                aria-label={`${topic.label}: ${valueLabel}`}
               >
                 {/* Rounded at the data end, square at the baseline, so the bar
                     reads as growing from the left rather than floating. The
-                    track's own rounding clips the left edge, so nothing looks
-                    cut off. */}
+                    track is rounded on its right edge only: rounded-full rounded
+                    the left edge too, and overflow-hidden then clipped the
+                    fill's square origin straight back into a semicircle. */}
                 <div
                   className="h-full rounded-r-[3px]"
-                  style={{ width: `${width}%`, background: "var(--viz-accent)" }}
+                  style={{
+                    width: `${width}%`,
+                    // A percentage floor overstated a 0.3% topic by five times.
+                    // The floor is in pixels instead, so a sliver reads as
+                    // too small to draw rather than as a measurable length.
+                    minWidth: width > 0 ? 2 : 0,
+                    background: "var(--viz-accent)",
+                  }}
                 />
               </div>
 
               {topic.finding ? (
-                <p className="mt-2.5 max-w-[78ch] text-[0.8125rem] leading-relaxed text-muted-foreground">
+                <p className="t-small mt-2.5 max-w-[78ch] text-muted-foreground">
                   {topic.finding}{" "}
                   <EvidencePills citations={topic.citations ?? []} label="Source" />
                 </p>
