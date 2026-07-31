@@ -10,13 +10,13 @@ import { ImageResponse } from "next/og";
  */
 
 export const alt =
-  "Reddit Content Ideas: turn what people actually say on Reddit into content you can publish";
+  "Reddit Content Ideas: content ideas from real Reddit conversations";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
 const BRAND = "#2a78d6";
 const INK = "#0b0b0b";
-const SOFT = "#46443f";
+const SOFT = "#474b52";
 
 export default function OpengraphImage() {
   return new ImageResponse(
@@ -28,7 +28,7 @@ export default function OpengraphImage() {
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
-          background: "#f7f7f5",
+          background: "#f7f8fa",
           padding: "72px 80px",
           fontFamily: "sans-serif",
         }}
@@ -64,24 +64,32 @@ export default function OpengraphImage() {
             maxWidth: 980,
           }}
         >
+          {/*
+            Weight and tracking mirror .t-display in globals.css (600,
+            -0.032em, which is -2.18px at 68px). The site sets that tier in
+            Inter and this card uses the renderer's built-in sans-serif,
+            which is close enough in colour that matching the weight and
+            tracking is what keeps the card from reading heavier than the
+            page it advertises. No font is loaded here on purpose: it would
+            add a network fetch to a route that must build with zero
+            external dependencies.
+          */}
           <div
             style={{
               fontSize: 68,
               lineHeight: 1.1,
-              fontWeight: 700,
-              letterSpacing: -2,
+              fontWeight: 600,
+              letterSpacing: -2.18,
               color: INK,
               display: "flex",
               flexWrap: "wrap",
             }}
           >
-            Turn what people actually say on Reddit into&nbsp;
-            <span style={{ color: BRAND }}>content</span>
-            &nbsp;you can publish.
+            <span style={{ color: BRAND }}>Content ideas</span>
+            &nbsp;from real Reddit conversations.
           </div>
           <div style={{ fontSize: 28, lineHeight: 1.45, color: SOFT }}>
-            Communities verified against the archive. Numbers counted, not estimated.
-            Every claim linked to its thread.
+            Every idea links to the thread it came from.
           </div>
         </div>
 
