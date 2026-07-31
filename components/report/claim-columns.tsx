@@ -11,7 +11,7 @@ import type { Claim } from "@/lib/types";
  */
 function ClaimList({ title, claims }: { title: string; claims: Claim[] }) {
   return (
-    <Section title={title}>
+    <Section title={title} flush>
       {claims.length === 0 ? (
         <p className="text-xs text-muted-foreground">None identified in this sample.</p>
       ) : (
@@ -21,7 +21,7 @@ function ClaimList({ title, claims }: { title: string; claims: Claim[] }) {
               key={`${index}-${claim.text}`}
               // A brand tick on the left edge marks each claim as a cited
               // finding rather than as an opinion the report is offering.
-              className="relative border-b py-3 pl-4 text-[0.9375rem] leading-relaxed text-foreground last:border-b-0 before:absolute before:top-[1.3em] before:left-0 before:size-1.5 before:rounded-full before:bg-[var(--brand)] before:content-['']"
+              className="t-body relative border-b py-3 pl-4 text-foreground last:border-b-0 before:absolute before:top-[1.3em] before:left-0 before:size-1.5 before:rounded-full before:bg-[var(--brand)] before:content-['']"
             >
               {claim.text} <EvidencePills citations={claim.citations} label="Source" />
             </li>
@@ -40,7 +40,9 @@ export function ClaimColumns({
   questions: Claim[];
 }) {
   return (
-    <div className="grid gap-8 md:grid-cols-2 md:gap-10">
+    // The pair carries the research zone's hairline, not the two columns: side
+    // by side, a per-section rule would draw above one column and not the other.
+    <div className="rule grid gap-8 border-t pt-6 md:grid-cols-2 md:gap-10">
       <ClaimList title="Pain points" claims={painPoints} />
       <ClaimList title="Questions being asked" claims={questions} />
     </div>

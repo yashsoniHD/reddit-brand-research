@@ -46,7 +46,11 @@ function IdeaCard({
         className="flex flex-1 cursor-pointer flex-col gap-3 p-5 text-left"
       >
         <span className="flex items-center justify-between gap-3">
-          <span className="num text-[0.6875rem] font-semibold tracking-[0.075em] text-[var(--brand-ink)]">
+          {/* `h-quiet`, which is exactly what these classes were spelling out by
+              hand. Its `uppercase` is inert on digits, and its letterspacing is
+              the point of the label, so `num` comes off rather than fight it:
+              the index is a fixed-width padded label, not a measured quantity. */}
+          <span className="h-quiet text-[var(--brand-ink)]">
             {String(index + 1).padStart(2, "0")}
           </span>
           {idea.format ? (
@@ -58,15 +62,20 @@ function IdeaCard({
 
         {/* The hook, quoted, in the largest type on the card. */}
         <span className="relative block pt-1">
+          {/* Set in the body face, like every other glyph in the product. This
+              used to say `font-serif`, an undeclared face that fell back to
+              Times, and it was the only non-Inter glyph in the app sitting on
+              the hero element of the primary card. Inter's left double quote is
+              a pair of upright wedges rather than Times' comma shapes, so it
+              carries less optical weight and earns the size back (2.25rem), with
+              the offsets cut for its squarer left sidebearing. */}
           <span
             aria-hidden="true"
-            className="absolute -top-2 -left-1 font-serif text-4xl leading-none text-[var(--brand)]/25 select-none"
+            className="absolute -top-1.5 -left-1 text-4xl leading-none text-[var(--brand)]/25 select-none"
           >
             &ldquo;
           </span>
-          <span className="block pl-5 text-[1.0625rem] leading-[1.35] font-semibold tracking-[-0.014em] text-balance text-foreground">
-            {headline}
-          </span>
+          <span className="h-zone block pl-5 text-balance text-foreground">{headline}</span>
         </span>
 
         {idea.hook ? (
@@ -76,14 +85,15 @@ function IdeaCard({
         ) : null}
 
         {idea.angle ? (
-          <span className="block text-[0.8125rem] leading-relaxed text-muted-foreground">
-            {idea.angle}
-          </span>
+          <span className="t-small block text-muted-foreground">{idea.angle}</span>
         ) : null}
 
-        <span className="mt-auto flex items-center gap-1.5 pt-3 text-[0.8125rem] font-semibold text-[var(--brand-ink)]">
+        {/* Both icons at 2.25: they sit at the same size on the same line, and
+            shipped at 2.5 and 2.25, which read as two different weights of the
+            same idea. */}
+        <span className="t-small mt-auto flex items-center gap-1.5 pt-3 font-semibold text-[var(--brand-ink)]">
           {drafted ? (
-            <Check aria-hidden="true" strokeWidth={2.5} className="size-3.5" />
+            <Check aria-hidden="true" strokeWidth={2.25} className="size-3.5" />
           ) : null}
           {drafted ? "View draft" : "Draft this post"}
           <ArrowRight
@@ -96,13 +106,22 @@ function IdeaCard({
 
       {/* Outside the button: a link inside a button is not a valid target. The
           rail is part of the card rather than floating below it, because the
-          citations are the card's proof, not a caption about it. */}
-      {citations.length > 0 ? (
-        <span className="flex items-center gap-2 border-t bg-[var(--hush)] px-5 py-2.5">
-          <span className="h-quiet">Sources</span>
-          <EvidencePills citations={citations} label="Source" />
-        </span>
-      ) : null}
+          citations are the card's proof, not a caption about it.
+
+          Always rendered, even with nothing to show. Skipping it let a card
+          without citations end flush while every neighbour ended with a 40px
+          band, which ragged the grid edge at exactly the point where the
+          product's core promise is missing. Saying so is the better answer. */}
+      <span className="flex min-h-10 items-center gap-2 border-t bg-[var(--hush)] px-5 py-2.5">
+        {citations.length > 0 ? (
+          <>
+            <span className="h-quiet">Sources</span>
+            <EvidencePills citations={citations} label="Source" />
+          </>
+        ) : (
+          <span className="h-quiet">No direct sources</span>
+        )}
+      </span>
     </article>
   );
 }

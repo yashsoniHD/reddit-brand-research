@@ -26,7 +26,7 @@ export function ExportButtons({ bundle }: { bundle: Bundle }) {
 
   // Only a report the server stored has somewhere to point at. A run from
   // before saved reports existed, or one whose save failed, simply keeps the
-  // three export buttons it always had.
+  // four export buttons it always had.
   const shareId = bundle.report_id;
 
   useEffect(
@@ -66,8 +66,16 @@ export function ExportButtons({ bundle }: { bundle: Bundle }) {
   };
 
   return (
-    <div className="flex flex-col items-start gap-2 sm:items-end">
+    // No `sm:items-end`: the cluster aligns to the top of the masthead with it,
+    // which is what `items-start` on the row above now asks for.
+    <div className="flex flex-col items-start gap-2">
       <div className="flex flex-wrap gap-2">
+        {/* Five equally-weighted outline buttons outweighed the report title,
+            and four of them are archival exports nobody reaches for first. Copy
+            link keeps the border; the exports drop to ghost, so the cluster has
+            one thing in it that looks like a button. A real menu would be the
+            better answer, but the app has no menu primitive yet and adding one
+            is not this pass. */}
         {shareId ? (
           <Button
             type="button"
@@ -77,9 +85,9 @@ export function ExportButtons({ bundle }: { bundle: Bundle }) {
             className="h-8 gap-1.5 rounded-lg bg-card px-2.5"
           >
             {copied ? (
-              <Check aria-hidden="true" strokeWidth={2.5} className="size-3.5" />
+              <Check aria-hidden="true" strokeWidth={2} className="size-4" />
             ) : (
-              <Link2 aria-hidden="true" strokeWidth={2} className="size-3.5" />
+              <Link2 aria-hidden="true" strokeWidth={2} className="size-4" />
             )}
             {copied ? "Link copied" : "Copy link"}
           </Button>
@@ -88,13 +96,13 @@ export function ExportButtons({ bundle }: { bundle: Bundle }) {
           <Button
             key={item.kind}
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
             disabled={busy !== null}
             onClick={() => void run(item.kind)}
-            className="h-8 gap-1.5 rounded-lg bg-card px-2.5"
+            className="h-8 gap-1.5 rounded-lg px-2.5"
           >
-            <Download aria-hidden="true" strokeWidth={2} className="size-3.5" />
+            <Download aria-hidden="true" strokeWidth={2} className="size-4" />
             {busy === item.kind ? "Preparing…" : item.label}
           </Button>
         ))}

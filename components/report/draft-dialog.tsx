@@ -3,7 +3,9 @@
 import { Check, Copy, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { Callout } from "@/components/callout";
 import { EvidencePills } from "@/components/report/evidence-pills";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -227,9 +229,9 @@ function DraftBody({
         <span className="h-quiet">
           {channel ? `Your ${CHANNEL_LABELS[channel]} draft` : "Your draft"}
         </span>
-        <DialogTitle className="pr-8 text-[1.0625rem] leading-snug font-semibold tracking-[-0.014em]">
-          {idea.title}
-        </DialogTitle>
+        {/* `h-zone`, the class this was a near-miss reproduction of: same size,
+            weight and tracking, 1.375 leading against the scale's 1.35. */}
+        <DialogTitle className="h-zone pr-8">{idea.title}</DialogTitle>
         <DialogDescription className="text-xs leading-relaxed">
           Written from this idea and the posts behind it. Edit it to sound like you before
           publishing.
@@ -238,21 +240,30 @@ function DraftBody({
         {/* Only for a run that named more than one channel: with one, the label
             above already says which, and a switcher of one is a dead control. */}
         {context.channels.length > 1 ? (
+          // `--hush`, not `bg-card`: this track sits on the dialog, which is
+          // `--popover`, and `--card` and `--popover` are the same colour in
+          // both themes, so the plate was painting nothing.
+          //
+          // A plain group of `aria-pressed` toggles rather than a radiogroup.
+          // These were `role="radio"` buttons that each kept a native tab stop
+          // and had no arrow-key handler, which claims the ARIA radiogroup
+          // pattern without implementing it; a screen reader user was told to
+          // press arrows and nothing happened. Toggles keep the tab stops they
+          // actually have and describe what the control really does.
           <div
-            role="radiogroup"
+            role="group"
             aria-label="Draft for channel"
-            className="mt-1.5 flex w-fit flex-wrap gap-1 rounded-xl border bg-card p-1"
+            className="mt-1.5 flex w-fit flex-wrap gap-1 rounded-xl border bg-[var(--hush)] p-1"
           >
             {context.channels.map((option) => (
               <button
                 key={option}
                 type="button"
-                role="radio"
-                aria-checked={option === channel}
+                aria-pressed={option === channel}
                 onClick={() => onChannelChange(option)}
                 className={
                   option === channel
-                    ? "rounded-lg bg-[var(--brand-soft)] px-3 py-1 text-xs font-semibold text-[var(--brand-ink)] shadow-[inset_0_0_0_1px_var(--brand-line)]"
+                    ? "rounded-lg bg-[var(--brand-soft)] px-3 py-1 text-xs font-semibold text-[var(--brand-ink)] ring-1 ring-[var(--brand-line)] ring-inset"
                     : "rounded-lg px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                 }
               >
@@ -285,12 +296,12 @@ function DraftBody({
             ))}
           </div>
         ) : state.phase === "error" ? (
-          <div
-            role="alert"
-            className="rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3"
-          >
-            <p className="text-sm leading-relaxed text-foreground">{state.message}</p>
-          </div>
+          // The shared banner, with `role="alert"`: this one appears in direct
+          // response to something the reader just did, which is the case that
+          // earns the interruption.
+          <Callout tone="error" role="alert">
+            {state.message}
+          </Callout>
         ) : (
           // Editable in place, styled as the post rather than as a form field:
           // nobody publishes a first draft untouched, and making them copy it
@@ -318,7 +329,15 @@ function DraftBody({
                 persist(event.target.value);
               }}
               spellCheck
-              className="block w-full resize-none border-0 bg-transparent p-0 text-[0.9375rem] leading-[1.65] whitespace-pre-wrap text-foreground outline-none focus-visible:outline-none"
+              // 16px, not 15px: this is the only editable field in the product,
+              // and iOS zooms the whole page on focus for anything under 16.
+              //
+              // The focus outline is back. It was `outline-none
+              // focus-visible:outline-none`, which killed the native ring and
+              // the app's global one, leaving a keyboard user with no idea the
+              // caret had landed here. Offset 4 draws it inside the plate's own
+              // 20px padding, so nothing clips.
+              className="block w-full resize-none rounded-sm border-0 bg-transparent p-0 text-base leading-[1.65] whitespace-pre-wrap text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
             />
           </div>
         )}
@@ -331,28 +350,31 @@ function DraftBody({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t bg-[var(--hush)] px-6 py-4">
-        <button
+        {/* The real Button. These were hand-rolled at h-9 with `hover:bg-primary/85`
+            where every other primary button in the app hovers to /80. */}
+        <Button
           type="button"
+          size="sm"
           onClick={() => void copy()}
           disabled={state.phase !== "ready"}
-          className="flex h-9 items-center gap-1.5 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/85 disabled:opacity-45 disabled:hover:bg-primary"
         >
           {copied ? (
-            <Check aria-hidden="true" strokeWidth={2.5} className="size-3.5" />
+            <Check aria-hidden="true" strokeWidth={2} className="size-4" />
           ) : (
-            <Copy aria-hidden="true" strokeWidth={2} className="size-3.5" />
+            <Copy aria-hidden="true" strokeWidth={2} className="size-4" />
           )}
           {copied ? "Copied" : "Copy post"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={regenerate}
           disabled={state.phase === "loading"}
-          className="flex h-9 items-center gap-1.5 rounded-lg border bg-card px-3.5 text-sm font-medium transition-colors hover:bg-secondary disabled:opacity-45"
         >
-          <RotateCw aria-hidden="true" strokeWidth={2} className="size-3.5" />
+          <RotateCw aria-hidden="true" strokeWidth={2} className="size-4" />
           {state.phase === "error" ? "Try again" : "Regenerate"}
-        </button>
+        </Button>
 
         {/* The report promises the sources behind the idea, so the dialog has
             to carry them: the card that opened it is now behind an overlay. */}

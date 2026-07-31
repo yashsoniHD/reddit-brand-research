@@ -36,13 +36,35 @@ export function SummaryStrip({ bundle }: { bundle: Bundle }) {
       ? joinQuoted(filter.phrases)
       : "";
 
-  const facts = [
-    { icon: Users, value: communities || "no communities" },
+  const window = bundle.stats?.date_range?.short_label;
+  const itemsRead = thousands(sample?.items_analysed);
+
+  /**
+   * `num` is tabular figures and tight tracking, so it belongs on the digits
+   * and nowhere else. It used to sit on the whole `<li>`, which applied number
+   * spacing to prose like "no communities" and to community names.
+   */
+  const facts: Array<{ icon: typeof Users; key: string; value: React.ReactNode }> = [
+    { icon: Users, key: "communities", value: communities || "no communities" },
     // No window claim in the fallback: a search run has no requested window, so
     // naming one would be inventing coverage the report cannot vouch for.
-    { icon: CalendarRange, value: bundle.stats?.date_range?.short_label || "dates n/a" },
-    { icon: FileText, value: `${thousands(sample?.items_analysed)} items read` },
-    ...(activePhrase ? [{ icon: Quote, value: `mentions ${activePhrase}` }] : []),
+    {
+      icon: CalendarRange,
+      key: "window",
+      value: window ? <span className="num">{window}</span> : "dates n/a",
+    },
+    {
+      icon: FileText,
+      key: "items",
+      value: (
+        <>
+          <span className="num">{itemsRead}</span> items read
+        </>
+      ),
+    },
+    ...(activePhrase
+      ? [{ icon: Quote, key: "phrase", value: `mentions ${activePhrase}` }]
+      : []),
   ];
 
   return (
@@ -51,33 +73,33 @@ export function SummaryStrip({ bundle }: { bundle: Bundle }) {
 
       <h2 className="t-title text-balance text-foreground">{title}</h2>
 
+      {/* `t-body` rather than a hand-typed 15px: the scale owns this size, and
+          it carries its own leading, so the old `leading-snug` goes with it. */}
       {query ? (
-        <p className="max-w-2xl text-[0.9375rem] leading-snug text-foreground-soft">
-          {query}
-        </p>
+        <p className="t-body max-w-[68ch] text-foreground-soft">{query}</p>
       ) : null}
 
       <ul className="mt-0.5 flex list-none flex-wrap items-center gap-x-4 gap-y-1.5 p-0">
         {facts.map((fact) => (
           <li
-            key={fact.value}
-            className="num flex items-center gap-1.5 text-xs text-muted-foreground"
+            key={fact.key}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground"
           >
             <fact.icon
               aria-hidden="true"
-              strokeWidth={2}
+              strokeWidth={2.25}
               className="size-3.5 shrink-0 text-[var(--brand)]"
             />
             {fact.value}
           </li>
         ))}
-        <li className="num hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
+        <li className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
           <Clock
             aria-hidden="true"
-            strokeWidth={2}
+            strokeWidth={2.25}
             className="size-3.5 shrink-0 text-[var(--brand)]"
           />
-          {bundle.generated_at}
+          <span className="num">{bundle.generated_at}</span>
         </li>
       </ul>
     </div>

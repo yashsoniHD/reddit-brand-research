@@ -1,5 +1,4 @@
-import { FlaskConical, Info, TriangleAlert } from "lucide-react";
-
+import { Callout } from "@/components/callout";
 import { ActivityTrend } from "@/components/report/activity-trend";
 import { ClaimColumns } from "@/components/report/claim-columns";
 import { Communities } from "@/components/report/communities";
@@ -16,36 +15,6 @@ import type { Bundle } from "@/lib/types";
 
 /** Below this many strongly on-topic items the ideas are working from scraps. */
 const THIN_EVIDENCE_THRESHOLD = 10;
-
-function Callout({
-  tone,
-  children,
-}: {
-  tone: "info" | "warning";
-  children: React.ReactNode;
-}) {
-  const info = tone === "info";
-  const Icon = info ? Info : TriangleAlert;
-  return (
-    <p
-      className={`flex items-start gap-2.5 rounded-xl border px-4 py-3 text-[0.8125rem] leading-relaxed ${
-        info
-          ? "border-[var(--brand-line)] bg-[var(--brand-soft)] text-foreground"
-          : "border-destructive/30 bg-destructive/8 text-foreground"
-      }`}
-    >
-      {/* An icon as well as a tint, so the tone survives greyscale. */}
-      <Icon
-        aria-hidden="true"
-        strokeWidth={2}
-        className={`mt-px size-4 shrink-0 ${
-          info ? "text-[var(--brand-ink)]" : "text-destructive"
-        }`}
-      />
-      <span className="min-w-0">{children}</span>
-    </p>
-  );
-}
 
 /**
  * One of the four counts the research zone opens with.
@@ -95,28 +64,23 @@ export function ReportView({
     typeof strongCount === "number" && rated > 0 && strongCount < THIN_EVIDENCE_THRESHOLD;
 
   return (
-    <article className="flex flex-col gap-8">
+    // Zones are a level apart from the sections inside them, so the article
+    // gap has to be wider than the research zone's own `gap-8`. At the same
+    // value the two levels read as peers.
+    <article className="flex flex-col gap-12">
       <header className="flex flex-col gap-5">
         {bundle.is_sample ? (
-          <p className="flex items-start gap-2.5 rounded-xl border border-[var(--brand-line)] bg-[var(--brand-soft)] px-4 py-3 text-[0.8125rem] leading-relaxed">
-            <FlaskConical
-              aria-hidden="true"
-              strokeWidth={2}
-              className="mt-px size-4 shrink-0 text-[var(--brand-ink)]"
-            />
-            <span>
-              <span className="font-semibold text-foreground">Sample report.</span>{" "}
-              Generated from real Reddit data through the normal pipeline. Run your own
-              search above to see your version.
-            </span>
-          </p>
+          <Callout tone="sample">
+            <span className="font-semibold text-foreground">Sample report.</span> Generated
+            from real Reddit data through the normal pipeline. Run your own brief above to
+            see your version.
+          </Callout>
         ) : null}
 
-        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b pb-6">
-          <SummaryStrip bundle={bundle} />
-          <ExportButtons bundle={bundle} />
-        </div>
-
+        {/* Notices sit above the masthead rule, not below it: a warning stranded
+            after the divider reads as a caption on the next zone rather than as
+            a qualification of this report. The rule stays the last thing in the
+            header, which is the only job it has. */}
         {notices.map((notice, index) => (
           <Callout key={`${index}-${notice}`} tone="warning">
             {notice}
@@ -125,23 +89,42 @@ export function ReportView({
 
         {sample?.low_data ? (
           <Callout tone="warning">
-            Only {sample.items_analysed} items were found for this search, so the results
+            Only {sample.items_analysed} items were found for this brief, so the results
             are directional rather than conclusive.
           </Callout>
         ) : null}
+
+        {/* `items-start`, not `items-end`: bottom-aligning tied the export
+            cluster to the masthead's quietest 12px line, which is the one thing
+            on the page it has nothing to do with. */}
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4 border-b pb-6">
+          <SummaryStrip bundle={bundle} />
+          <ExportButtons bundle={bundle} />
+        </div>
       </header>
 
       {/* ── The product ──────────────────────────────────────────────────── */}
-      <section aria-labelledby="ideas-heading" className="flex flex-col gap-5">
+      <section aria-labelledby="ideas-heading" className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">
-          <h2 id="ideas-heading" className="t-title text-foreground">
+          {/* `h-zone`, not `t-title`: the document title in the masthead is the
+              only `t-title` on the first screen. Two of them six rems apart gave
+              the eye two entry points and it picked neither. This now pairs with
+              "What the research says", which is the same level. */}
+          <h2 id="ideas-heading" className="h-zone text-foreground">
             Content ideas
           </h2>
           {summary ? (
-            <p className="max-w-3xl text-[0.9375rem] leading-relaxed text-foreground-soft">
-              {summary}
-            </p>
+            // Capped near 70ch: the summary is the longest prose on the page and
+            // ran past 100 characters a line, which is past the point a reader
+            // reliably finds the next line.
+            <p className="t-lead max-w-[70ch] text-foreground-soft">{summary}</p>
           ) : null}
+          {/* The product's primary affordance, said where the reader meets the
+              grid. It used to sit under the cards, below the fold on any report
+              with more than three ideas. */}
+          <p className="t-small text-muted-foreground">
+            Click any idea to get a full post written from it and the sources behind it.
+          </p>
         </div>
 
         {/* Informational, not a failure: the ideas are still worth reading, but
@@ -149,16 +132,12 @@ export function ReportView({
         {thinEvidence ? (
           <Callout tone="info">
             Only {strongCount} of {thousands(rated)} rated items were strongly on-topic.
-            These ideas lean on adjacent conversations. A narrower query or hand-picked
+            These ideas lean on adjacent conversations. A narrower brief or hand-picked
             communities may sharpen them.
           </Callout>
         ) : null}
 
         <ContentIdeas bundle={bundle} initialDrafts={initialDrafts} />
-
-        <p className="text-xs text-muted-foreground">
-          Click any idea to get a full post written from it and the sources behind it.
-        </p>
       </section>
 
       {/* ── The quieter research zone ──────────────────────────────────────
@@ -167,18 +146,27 @@ export function ReportView({
           full-width fill, and the largest single surface on the page, so
           whatever it was tinted it dominated everything above it. Quiet is
           carried by the type instead, which is what the ordering comment below
-          says this zone is for. */}
+          says this zone is for.
+
+          `gap-8` here against the article's `gap-12`: the five subsections are
+          one level below the zones, and they used to share the zone value, which
+          flattened the two into peers. No `mt` on top of it, because the
+          article gap is already the space above this rule. */}
       <section
         aria-labelledby="research-heading"
-        className="rule mt-4 flex flex-col gap-8 border-t pt-8"
+        className="rule flex flex-col gap-8 border-t pt-8"
       >
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <h2 id="research-heading" className="h-zone text-foreground">
               What the research says
             </h2>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Every idea above traces back to these findings.
+            {/* The citation mechanic is explained here because this is where a
+                reader first meets a pill, and an unexplained numbered chip is
+                just a chip. */}
+            <p className="t-small max-w-[70ch] text-muted-foreground">
+              Every idea above traces back to these findings. The numbered pills next to a
+              claim link straight to the Reddit thread it came from.
             </p>
           </div>
 

@@ -111,9 +111,10 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div className="grid gap-1 py-3 sm:grid-cols-[9rem_1fr] sm:gap-6">
       <dt className="h-quiet sm:pt-0.5">{label}</dt>
-      <dd className="m-0 text-[0.8125rem] leading-relaxed text-foreground-soft">
-        {children}
-      </dd>
+      {/* Capped near 70ch: on a wide screen the two-column row let a definition
+          run past 140 characters a line, which is roughly double the width a
+          reader can track back from reliably. */}
+      <dd className="t-small m-0 max-w-[70ch] text-foreground-soft">{children}</dd>
     </div>
   );
 }
@@ -137,7 +138,7 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           {(inputs.subreddits ?? []).map((name) => `r/${name}`).join(", ") || "None"}
         </Row>
         <Row label="Discovery">
-          A model proposes candidate subreddits for your search. Each one is checked
+          A model proposes candidate communities for your brief. Each one is checked
           against the Reddit archive to confirm it exists and is public before it is
           read, so the model proposes and the archive verifies.
         </Row>
@@ -188,9 +189,9 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
         ) : null}
         <Row label="Selection">
           {sample?.selection?.method === "relevance+engagement"
-            ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`
+            ? `Every candidate was rated for relevance to your brief by the model (${thousands(sample.selection.triaged)} items rated), then ranked in code by relevance, community engagement and recency.`
             : sample?.selection?.method === "relevance+qualifiers"
-              ? `Every candidate was rated for relevance to your search by the model (${thousands(sample.selection.triaged)} items rated) and checked against the requirements below, then ranked in code by relevance, those requirements, community engagement and recency.`
+              ? `Every candidate was rated for relevance to your brief by the model (${thousands(sample.selection.triaged)} items rated) and checked against the requirements below, then ranked in code by relevance, those requirements, community engagement and recency.`
               : sample?.selection?.method === "relevance-off"
                 ? sample?.selection?.requirements?.length
                   ? "The relevance filter was turned off for this run, so items were ranked in code by community engagement and recency only. Your brief's requirements about who posted, below, were not applied."
@@ -244,7 +245,7 @@ export function Methodology({ bundle }: { bundle: Bundle }) {
           When more was fetched than the sample can hold, the top-ranked posts and
           comments are the ones analysed.
           {sample?.capacity_limited
-            ? " This run was capped by the current analysis capacity tier."
+            ? " This run hit the current cap on how much a single report can analyse."
             : ""}
         </Row>
         <Row label="Exclusions">
