@@ -85,12 +85,21 @@ export function RunProgress({ messages }: { messages: string[] }) {
       aria-busy="true"
     >
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b px-5 py-3.5 sm:px-6">
-        <span className="flex items-center gap-2.5 text-sm font-semibold text-foreground">
-          <span aria-hidden="true" className="relative flex size-2.5">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-[var(--brand)] opacity-60" />
-            <span className="relative inline-flex size-2.5 rounded-full bg-[var(--brand)]" />
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="h-section flex items-center gap-2.5 text-foreground">
+            <span aria-hidden="true" className="relative flex size-2.5">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-[var(--brand)] opacity-60" />
+              <span className="relative inline-flex size-2.5 rounded-full bg-[var(--brand)]" />
+            </span>
+            Researching your topic
           </span>
-          Researching your topic
+          {/* The run is a streamed fetch owned by this page, aborted when the
+              component unmounts, so closing the tab or navigating away really
+              does throw the whole thing out. Up to three minutes is too much to
+              lose to a rule nobody was told. */}
+          <span className="text-xs leading-relaxed text-muted-foreground">
+            Keep this tab open. Leaving it cancels the run.
+          </span>
         </span>
         <span className="num text-xs text-muted-foreground">
           Step {current + 1} of {STAGES.length}
@@ -129,7 +138,7 @@ export function RunProgress({ messages }: { messages: string[] }) {
                           : "border-border bg-card"
                     }`}
                   >
-                    {done ? <Check strokeWidth={3} className="size-2.5" /> : null}
+                    {done ? <Check strokeWidth={2.25} className="size-2.5" /> : null}
                     {active ? (
                       <span className="size-1.5 rounded-full bg-[var(--brand)]" />
                     ) : null}
@@ -176,7 +185,7 @@ export function RunProgress({ messages }: { messages: string[] }) {
             </span>
             <span className="flex flex-wrap items-center gap-1.5">
               {communities.map((name) => (
-                <span key={name} className="chip bg-card text-foreground">
+                <span key={name} className="chip">
                   {name}
                 </span>
               ))}

@@ -9,6 +9,8 @@ import { bundleKey, reportUrl, runLabel } from "@/lib/format";
 import type { Bundle } from "@/lib/types";
 
 const COPIED_MS = 2200;
+/** How long "Click again to clear" stays armed before it forgets it was asked. */
+const ARMED_MS = 3000;
 
 /**
  * Copy the link to one stored report.
@@ -50,14 +52,59 @@ function CopyLinkButton({ reportId, label }: { reportId: string; label: string }
       className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-muted-foreground transition-colors hover:border-border hover:bg-[var(--hush)] hover:text-foreground"
     >
       {copied ? (
-        <Check aria-hidden="true" strokeWidth={2.5} className="size-3.5" />
+        <Check aria-hidden="true" strokeWidth={2.25} className="size-3.5" />
       ) : (
-        <Link2 aria-hidden="true" strokeWidth={2} className="size-3.5" />
+        <Link2 aria-hidden="true" strokeWidth={2.25} className="size-3.5" />
       )}
       <span className="sr-only">
         {copied ? "Link copied" : `Copy link to ${label}`}
       </span>
     </button>
+  );
+}
+
+/**
+ * Clear the whole list, but not on one click.
+ *
+ * Up to eight reports go at once and nothing brings them back, so the button
+ * arms first and acts second. A confirm dialog would be the heavier answer;
+ * this is the idiom the drawer already uses for its copy buttons, where the
+ * label itself carries the state and reverts on a timer.
+ */
+function ClearHistoryButton({ onClear }: { onClear: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const click = () => {
+    if (timer.current) window.clearTimeout(timer.current);
+    if (!armed) {
+      setArmed(true);
+      // Disarming matters as much as arming: a button left armed from a minute
+      // ago would wipe the list on what the user thinks is the first click.
+      timer.current = window.setTimeout(() => setArmed(false), ARMED_MS);
+      return;
+    }
+    setArmed(false);
+    onClear();
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      onClick={click}
+      className={armed ? "self-start text-destructive" : "self-start"}
+    >
+      {armed ? "Click again to clear" : "Clear history"}
+    </Button>
   );
 }
 
@@ -103,7 +150,10 @@ export function HistoryDrawer({
           className="fixed inset-y-0 right-0 z-50 flex h-full w-full max-w-sm flex-col gap-5 overflow-y-auto border-l bg-card p-6 shadow-[var(--lift-3)] outline-none data-open:animate-in data-open:slide-in-from-right data-closed:animate-out data-closed:slide-out-to-right"
         >
           <div className="flex items-center justify-between gap-4 border-b pb-4">
-            <DialogPrimitive.Title className="h-quiet">
+            {/* The panel's title, so it is sized as one. `h-quiet` is the 11px
+                uppercase label the report uses over a group of chips, and it
+                left the drawer with no head at all. */}
+            <DialogPrimitive.Title className="h-zone text-foreground">
               Recent reports
             </DialogPrimitive.Title>
             <DialogPrimitive.Close className="-mr-2 flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
@@ -125,13 +175,21 @@ export function HistoryDrawer({
                   const label = runLabel(bundle);
                   return (
                     <li key={key} className="flex items-center gap-1">
+                      {/* `aria-current` rather than `disabled`: the entry that
+                          is already open is still the answer to "which report am
+                          I looking at", and disabling it took the row out of the
+                          tab order entirely, so a keyboard user scanning the list
+                          never met the one that is showing. Selecting it again is
+                          a no-op, which is the honest behaviour anyway. */}
                       <button
                         type="button"
-                        disabled={active}
-                        onClick={() => onSelect(bundle)}
+                        aria-current={active ? "true" : undefined}
+                        onClick={() => {
+                          if (!active) onSelect(bundle);
+                        }}
                         className={`min-w-0 flex-1 rounded-xl border px-3.5 py-3 text-left text-sm transition-colors ${
                           active
-                            ? "border-[var(--brand-line)] bg-[var(--brand-soft)] text-foreground"
+                            ? "cursor-default border-[var(--brand-line)] bg-[var(--brand-soft)] text-foreground"
                             : "hover:border-[var(--brand-line)] hover:bg-[var(--hush)]"
                         }`}
                       >
@@ -150,15 +208,7 @@ export function HistoryDrawer({
                   );
                 })}
               </ul>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={onClear}
-                className="self-start"
-              >
-                Clear history
-              </Button>
+              <ClearHistoryButton onClear={onClear} />
             </>
           )}
 

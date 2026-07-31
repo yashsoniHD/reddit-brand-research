@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AppShell } from "@/components/app-shell";
 import { ErrorBanner } from "@/components/error-banner";
 import { Hero } from "@/components/hero";
 import { HistoryDrawer } from "@/components/history-drawer";
 import { QueryForm, type FormValues } from "@/components/query-form";
 import { ReportView } from "@/components/report/report-view";
 import { RunProgress } from "@/components/run-progress";
-import { runReport } from "@/lib/api";
+import { fetchSample, fetchSampleAvailable, runReport } from "@/lib/api";
 import { bundleKey, reportPath } from "@/lib/format";
 import { addToHistory, loadHistory, saveHistory } from "@/lib/storage";
 import { checkCommunities, mentionsCommunities } from "@/lib/validate";
@@ -28,8 +29,6 @@ import {
   type ContentType,
 } from "@/lib/types";
 
-const IS_DEV = process.env.NODE_ENV === "development";
-
 const DEFAULT_VALUES: FormValues = {
   query: "",
   profile: "",
@@ -40,26 +39,40 @@ const DEFAULT_VALUES: FormValues = {
   channels: [],
 };
 
+/**
+ * What is wrong with the form.
+ *
+ * `messages` is the banner, in order. `query` is the same sentence again, kept
+ * apart so the field it is about can show it and point `aria-describedby` at
+ * it: a page-level banner is the only place these used to appear, which left a
+ * screen reader on the query textarea with no idea it had been rejected. The
+ * communities field already had this and the query field did not.
+ */
+interface Problems {
+  messages: string[];
+  query?: string;
+}
+
 /** Mirrors pipeline.validate_inputs so obvious mistakes never cost a round trip. */
-function validate(values: FormValues): string[] {
-  const errors: string[] = [];
+function validate(values: FormValues): Problems {
+  const messages: string[] = [];
+  let queryError: string | undefined;
   const query = values.query.trim();
   if (!query) {
-    errors.push("Tell us what you want content ideas about.");
+    queryError = "Tell us what you want content ideas about.";
   } else if (query.length < MIN_QUERY_CHARS) {
-    errors.push(
-      `Add a little more detail about what you want content ideas about (at least ${MIN_QUERY_CHARS} characters).`,
-    );
+    queryError = `Add a little more detail about what you want content ideas about (at least ${MIN_QUERY_CHARS} characters).`;
   } else if (query.length > MAX_QUERY_CHARS) {
-    errors.push(`Shorten that to ${MAX_QUERY_CHARS} characters or fewer.`);
+    queryError = `Shorten that to ${MAX_QUERY_CHARS} characters or fewer.`;
   }
+  if (queryError) messages.push(queryError);
   if (values.profile.trim().length > MAX_PROFILE_CHARS) {
-    errors.push(
+    messages.push(
       `Shorten the description of you or your brand to ${MAX_PROFILE_CHARS} characters or fewer.`,
     );
   }
-  errors.push(...checkCommunities(values.subreddits).messages);
-  return errors;
+  messages.push(...checkCommunities(values.subreddits).messages);
+  return { messages, query: queryError };
 }
 
 /**
@@ -190,6 +203,11 @@ export function ContentIdeasApp() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [highlightCommunities, setHighlightCommunities] = useState(false);
+  const [queryError, setQueryError] = useState<string | undefined>(undefined);
+  // Whether this deployment has a sample to show at all, and whether one is on
+  // its way. Both start false: nothing is offered until the check says yes.
+  const [sampleAvailable, setSampleAvailable] = useState(false);
+  const [sampleLoading, setSampleLoading] = useState(false);
 
   const controller = useRef<AbortController | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
@@ -222,10 +240,29 @@ export function ContentIdeasApp() {
 
   useEffect(() => () => controller.current?.abort(), []);
 
+  /**
+   * Ask once, on mount, whether this deployment has a sample report.
+   *
+   * The cheap yes/no endpoint rather than the sample itself: the bundle is
+   * megabytes, and a first-time visitor should not pay for one they may never
+   * open. Every setState here happens after the request resolves.
+   */
+  useEffect(() => {
+    const abort = new AbortController();
+    void fetchSampleAvailable(abort.signal).then((available) => {
+      if (!abort.signal.aborted) setSampleAvailable(available);
+    });
+    return () => abort.abort();
+  }, []);
+
   const scrollTo = useCallback((element: HTMLElement | null) => {
     if (!element) return;
+    // An explicit behavior:"smooth" wins over the stylesheet, and the CSS
+    // prefers-reduced-motion block only governs scrolling the CSS itself
+    // drives, so the preference has to be read here or it is simply ignored.
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     window.requestAnimationFrame(() =>
-      element.scrollIntoView({ behavior: "smooth", block: "start" }),
+      element.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" }),
     );
   }, []);
 
@@ -247,6 +284,7 @@ export function ContentIdeasApp() {
   const clearMessages = useCallback(() => {
     setErrors([]);
     setHighlightCommunities(false);
+    setQueryError(undefined);
   }, []);
 
   /**
@@ -255,16 +293,27 @@ export function ContentIdeasApp() {
    * A banner that renders above the fold the user is not looking at is a banner
    * nobody reads, and when the complaint is about a field inside a collapsed
    * panel, the panel has to open or the message points at nothing.
+   *
+   * `field` carries the query message down to the field as well. Only the
+   * client-side `validate` can tag one: the engine's own `invalid` errors
+   * arrive as sentences with no field attached, and guessing which one they
+   * mean would mark the wrong control.
    */
   const fail = useCallback(
-    (messages: string[]) => {
+    (messages: string[], field?: { query?: string }) => {
       setErrors(messages);
+      setQueryError(field?.query);
       const aboutCommunities = messages.some(mentionsCommunities);
       if (aboutCommunities) {
         setAdvancedOpen(true);
         setHighlightCommunities(true);
       }
       scrollTo(errorRef.current);
+      // Scrolling alone leaves a keyboard user's focus on the submit button
+      // while the page moves out from under it, so focus follows the scroll.
+      // preventScroll, because the smooth scroll above is already doing that
+      // job and the two would fight over the final position.
+      errorRef.current?.focus({ preventScroll: true });
     },
     [scrollTo],
   );
@@ -295,8 +344,8 @@ export function ContentIdeasApp() {
   const onSubmit = useCallback(async () => {
     clearMessages();
     const problems = validate(values);
-    if (problems.length > 0) {
-      fail(problems);
+    if (problems.messages.length > 0) {
+      fail(problems.messages, { query: problems.query });
       return;
     }
 
@@ -378,29 +427,41 @@ export function ContentIdeasApp() {
     });
   }, [clearMessages]);
 
-  const onLoadDemo = useCallback(async () => {
+  /**
+   * The only way to see a finished report without writing a brief and waiting.
+   *
+   * It replaces a demo button that was gated behind NODE_ENV, so in production
+   * the first-run experience was a form, a three-minute wait, and no way to
+   * find out beforehand what any of it produces.
+   *
+   * Not remembered in history and not written to the URL: it is not the
+   * reader's search, and a `?q=` pointing at somebody else's brief would seed
+   * the form with it on the next reload.
+   */
+  const onLoadSample = useCallback(async () => {
     clearMessages();
-    try {
-      const { MOCK_BUNDLE } = await import("@/lib/mock-bundle");
-      show(MOCK_BUNDLE, false);
-    } catch {
-      // A failed chunk load is a dev-only annoyance, but an unhandled rejection
-      // is invisible, and an invisible dead button is worse than a sentence.
-      fail(["The demo report could not be loaded."]);
+    setSampleLoading(true);
+    const bundle = await fetchSample();
+    setSampleLoading(false);
+    if (!bundle) {
+      fail([
+        "The sample report could not be loaded just now. Try again in a moment, or write a brief above to run your own.",
+      ]);
+      return;
     }
-  }, [clearMessages, fail, show]);
+    show(bundle, false);
+    scrollTo(reportRef.current);
+  }, [clearMessages, fail, scrollTo, show]);
 
   const activeKey = report ? bundleKey(report) : null;
 
   return (
     <>
-      <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3 sm:px-8">
-          <span className="flex items-center gap-2.5 text-sm font-semibold tracking-[-0.012em] text-foreground">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/logo.svg" alt="" width={22} height={22} className="size-[22px]" />
-            Reddit Content Ideas
-          </span>
+      <AppShell
+        // The landing page keeps its extra air, now as a named choice rather
+        // than as whatever the last copy of this header happened to carry.
+        pad="roomy"
+        action={
           <button
             type="button"
             onClick={() => {
@@ -416,62 +477,69 @@ export function ContentIdeasApp() {
               </span>
             ) : null}
           </button>
-        </div>
-      </header>
+        }
+      >
+        {/* AppShell's <main> is a plain block, so the gap between the search
+            zone and the report belongs to this page. */}
+        <div className="flex flex-col gap-16">
+          <div className="flex flex-col gap-10">
+            <Hero />
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-16 px-5 py-12 sm:px-8 sm:py-20">
-        <div className="flex flex-col gap-10">
-          <Hero />
+            {/* The search zone stays a narrow column even on a wide screen: a
+                three-row textarea stretched to 1100px is a worse target than a
+                centred one, and the report below gets the full width instead. */}
+            <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+              {/* Focusable so a failed submit can move focus here, not just
+                  scroll here. Never in the tab order: -1 only. */}
+              <div ref={errorRef} tabIndex={-1} className="scroll-mt-20">
+                <ErrorBanner messages={errors} onDismiss={clearMessages} />
+              </div>
+              <QueryForm
+                values={values}
+                onChange={onChange}
+                onSubmit={() => void onSubmit()}
+                onCancel={onCancel}
+                running={running}
+                advancedOpen={advancedOpen}
+                onAdvancedOpenChange={setAdvancedOpen}
+                highlightCommunities={highlightCommunities}
+                queryError={queryError}
+              />
+              <div ref={progressRef} className="scroll-mt-20">
+                {running ? <RunProgress messages={progress} /> : null}
+              </div>
 
-          {/* The search zone stays a narrow column even on a wide screen: a
-              three-row textarea stretched to 1100px is a worse target than a
-              centred one, and the report below gets the full width instead. */}
-          <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
-            <div ref={errorRef} className="scroll-mt-20">
-              <ErrorBanner messages={errors} onDismiss={clearMessages} />
+              {/* The secondary path, and only while there is nothing better on
+                  screen: writing a brief is still the ask, but a visitor who
+                  has never seen the output should not have to spend three
+                  minutes to find out what it is. Absent entirely when this
+                  deployment has no sample, so the offer is never a dead end. */}
+              {!report && sampleAvailable ? (
+                <p className="t-small flex flex-wrap items-baseline justify-center gap-x-2 gap-y-1 text-muted-foreground">
+                  <span>Not ready to write one yet?</span>
+                  <button
+                    type="button"
+                    onClick={() => void onLoadSample()}
+                    disabled={running || sampleLoading}
+                    aria-busy={sampleLoading}
+                    className="font-semibold text-[var(--brand-ink)] underline underline-offset-4 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    {sampleLoading
+                      ? "Loading the sample report…"
+                      : "See a sample report"}
+                  </button>
+                </p>
+              ) : null}
             </div>
-            <QueryForm
-              values={values}
-              onChange={onChange}
-              onSubmit={() => void onSubmit()}
-              onCancel={onCancel}
-              running={running}
-              advancedOpen={advancedOpen}
-              onAdvancedOpenChange={setAdvancedOpen}
-              highlightCommunities={highlightCommunities}
-            />
-            <div ref={progressRef} className="scroll-mt-20">
-              {running ? <RunProgress messages={progress} /> : null}
-            </div>
+          </div>
 
-            {!report && IS_DEV ? (
-              <button
-                type="button"
-                onClick={() => void onLoadDemo()}
-                disabled={running}
-                className="self-center text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
-              >
-                Load demo report (development only)
-              </button>
-            ) : null}
+          {/* Nothing stands in for the report before there is one: the landing
+              below the form is quiet space, not a placeholder describing itself. */}
+          <div ref={reportRef} className="scroll-mt-20">
+            {report ? <ReportView bundle={report} /> : null}
           </div>
         </div>
-
-        {/* Nothing stands in for the report before there is one: the landing
-            below the form is quiet space, not a placeholder describing itself. */}
-        <div ref={reportRef} className="scroll-mt-20">
-          {report ? <ReportView bundle={report} /> : null}
-        </div>
-      </main>
-
-      <footer className="mt-auto border-t">
-        <div className="mx-auto flex max-w-6xl flex-col gap-1 px-5 py-8 text-xs leading-relaxed text-muted-foreground sm:px-8">
-          <span className="font-medium text-foreground-soft">Reddit Content Ideas</span>
-          <span>
-            Public Reddit data via the Arctic Shift archive. Not affiliated with Reddit.
-          </span>
-        </div>
-      </footer>
+      </AppShell>
 
       <HistoryDrawer
         open={historyOpen}

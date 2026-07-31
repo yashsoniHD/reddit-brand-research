@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, Search } from "lucide-react";
+import { ChevronRight, Loader2, Search } from "lucide-react";
 import { useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -87,18 +87,15 @@ function advancedSummary(values: FormValues): string {
  * control) for three controls that do the same kind of job, which read as two
  * unrelated features rather than one settings panel.
  */
-// The border is not decoration: with no plate behind them, an unticked chip
-// without one is indistinguishable from a row of plain labels, and nothing tells
-// the reader the group is interactive at all.
-const CHIP_BASE =
-  "cursor-pointer rounded-lg border px-3 py-1.5 text-sm transition-colors select-none";
-const CHIP_ON =
-  "border-[var(--brand-line)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]";
-// `--input` rather than `--border`: these are controls, and that is the token the
-// palette reserves for a control's edge. It is a step stronger than `--border` in
-// both themes, which is exactly what an unticked chip needs to read as clickable.
-const CHIP_OFF =
-  "border-[var(--input)] text-muted-foreground hover:border-[var(--brand-line)] hover:text-foreground";
+// `.chip-control` owns the look now, including the 44px minimum target. These
+// three rows are the densest interactive surface in the app and the one most
+// often hit with a thumb, and at the ~32px this file used to draw they were
+// under every touch-target floor going. The class also paints its own selected
+// state off `data-selected`, so the local ON/OFF class lists are gone with it.
+const CHIP = "chip-control";
+// A chip cannot be re-ticked mid-run, and it has to look that way: a control
+// that silently ignores a tap is worse than one that says it is unavailable.
+const CHIP_DISABLED = "pointer-events-none opacity-45";
 
 /**
  * A multi-select chip that is still a real checkbox.
@@ -113,19 +110,24 @@ function ToggleChip({
   value,
   label,
   checked,
+  disabled,
   onChange,
 }: {
   name: string;
   value: string;
   label: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
     <label
+      // `.chip-control` reads its selected state from here rather than from a
+      // class this file picks, so every chip in the app tints the same way.
+      data-selected={checked}
       className={cn(
-        CHIP_BASE,
-        checked ? CHIP_ON : CHIP_OFF,
+        CHIP,
+        disabled && CHIP_DISABLED,
         "has-focus-visible:ring-2 has-focus-visible:ring-[var(--ring)] has-focus-visible:ring-offset-1",
       )}
     >
@@ -134,6 +136,7 @@ function ToggleChip({
         name={name}
         value={value}
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
         className="sr-only"
       />
@@ -142,10 +145,18 @@ function ToggleChip({
   );
 }
 
-/** The muted explainer that sits under a field label. */
+/**
+ * The muted explainer that sits under a field label.
+ *
+ * Capped in ch rather than left to the form's width: these hints run to two and
+ * three sentences, and at 13px across the full 4xl column a line reaches roughly
+ * 120 characters, which is twice the measure a reader can track back from.
+ */
 function FieldHint({ children }: { children: React.ReactNode }) {
   return (
-    <p className="text-[0.8125rem] leading-relaxed text-muted-foreground">{children}</p>
+    <p className="max-w-[68ch] text-[0.8125rem] leading-relaxed text-muted-foreground">
+      {children}
+    </p>
   );
 }
 
@@ -182,6 +193,7 @@ export function QueryForm({
   advancedOpen,
   onAdvancedOpenChange,
   highlightCommunities = false,
+  queryError,
 }: {
   values: FormValues;
   onChange: (next: FormValues) => void;
@@ -193,10 +205,17 @@ export function QueryForm({
   onAdvancedOpenChange: (open: boolean) => void;
   /** Set after a submit that failed on the communities field. */
   highlightCommunities?: boolean;
+  /**
+   * The one validation message that belongs to the query field, from the
+   * parent's `validate`. The banner still carries it; this puts it where the
+   * mistake is, and gives the field something to point `aria-describedby` at.
+   */
+  queryError?: string;
 }) {
   const [communitiesTouched, setCommunitiesTouched] = useState(false);
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const communityErrorId = useId();
+  const queryErrorId = useId();
 
   const set = <K extends keyof FormValues>(key: K, value: FormValues[K]) =>
     onChange({ ...values, [key]: value });
@@ -283,9 +302,23 @@ export function QueryForm({
           maxLength={MAX_QUERY_CHARS}
           value={values.query}
           onChange={(event) => set("query", event.target.value)}
+          // Editing the brief mid-run cannot reach the run: it is already in
+          // flight with the values it was submitted with, and a field that
+          // accepts a "fix" it will never apply is a lie about what happens next.
+          disabled={running}
+          aria-invalid={queryError ? true : undefined}
+          aria-describedby={queryError ? queryErrorId : undefined}
           placeholder="e.g. Productivity struggles freelance designers have juggling multiple clients and deadlines"
           className="resize-y rounded-xl px-3.5 py-3 text-base leading-relaxed md:text-base"
         />
+        {queryError ? (
+          <p
+            id={queryErrorId}
+            className="text-[0.8125rem] leading-relaxed text-destructive"
+          >
+            {queryError}
+          </p>
+        ) : null}
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-[0.8125rem] leading-relaxed text-muted-foreground">
             {phraseFeedback(values.query)}
@@ -315,9 +348,14 @@ export function QueryForm({
             strokeWidth={2.25}
             className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90"
           />
-          <span className="text-sm font-medium text-foreground">Settings</span>
+          <span className="h-section text-foreground">Settings</span>
           {summary ? (
-            <span className="ml-auto truncate text-xs text-[var(--brand-ink)]">
+            // `min-w-0` is what makes `truncate` work at all here. A flex item's
+            // automatic minimum size is its max-content width, and `truncate`
+            // sets white-space:nowrap, so without this the span refuses to
+            // shrink below the full unwrapped summary (~630px of text in ~295px
+            // of room at 375px) and pushes a horizontal scrollbar onto the page.
+            <span className="ml-auto min-w-0 truncate text-xs text-[var(--brand-ink)]">
               {summary}
             </span>
           ) : (
@@ -350,6 +388,7 @@ export function QueryForm({
               maxLength={MAX_PROFILE_CHARS}
               value={values.profile}
               onChange={(event) => set("profile", event.target.value)}
+              disabled={running}
               placeholder="I run a Notion template shop for freelance designers."
               className="resize-y rounded-xl px-3.5 py-2.5"
             />
@@ -360,7 +399,7 @@ export function QueryForm({
               two settings that far apart would not read as connected. */}
           <fieldset className="flex flex-col gap-2 border-0 p-0">
             <legend className="h-section text-foreground">Channels</legend>
-            <div className="flex flex-wrap gap-1 pt-0.5">
+            <div className="flex flex-wrap gap-2 pt-0.5">
               {CHANNEL_CHOICES.map((choice) => (
                 <ToggleChip
                   key={choice.value}
@@ -368,6 +407,7 @@ export function QueryForm({
                   value={choice.value}
                   label={choice.label}
                   checked={values.channels.includes(choice.value)}
+                  disabled={running}
                   onChange={(checked) => setChannel(choice.value, checked)}
                 />
               ))}
@@ -380,7 +420,7 @@ export function QueryForm({
 
           <fieldset className="flex flex-col gap-2 border-0 p-0">
             <legend className="h-section text-foreground">Content types</legend>
-            <div className="flex flex-wrap gap-1 pt-0.5">
+            <div className="flex flex-wrap gap-2 pt-0.5">
               {shippable.map((choice) => (
                 <ToggleChip
                   key={choice.value}
@@ -388,6 +428,7 @@ export function QueryForm({
                   value={choice.value}
                   label={choice.label}
                   checked={values.contentTypes.includes(choice.value)}
+                  disabled={running}
                   onChange={(checked) => setContentType(choice.value, checked)}
                 />
               ))}
@@ -416,6 +457,7 @@ export function QueryForm({
               value={values.subreddits}
               onChange={(event) => set("subreddits", event.target.value)}
               onBlur={() => setCommunitiesTouched(true)}
+              disabled={running}
               aria-invalid={communityInvalid || undefined}
               aria-describedby={communityInvalid ? communityErrorId : undefined}
               placeholder="e.g. freelance, web_design"
@@ -444,7 +486,7 @@ export function QueryForm({
             <div
               role="radiogroup"
               aria-label="Time range"
-              className="flex flex-wrap gap-1 pt-0.5"
+              className="flex flex-wrap gap-2 pt-0.5"
             >
               {TIME_WINDOWS.map((days) => (
                 <button
@@ -452,11 +494,15 @@ export function QueryForm({
                   type="button"
                   role="radio"
                   aria-checked={values.days === days}
+                  // `.chip-control` tints from this, not from `aria-checked`:
+                  // one attribute for the look across checkbox and radio chips.
+                  data-selected={values.days === days}
+                  disabled={running}
                   onClick={() => set("days", days)}
                   className={cn(
                     "num",
-                    CHIP_BASE,
-                    values.days === days ? CHIP_ON : CHIP_OFF,
+                    CHIP,
+                    "disabled:pointer-events-none disabled:opacity-45",
                   )}
                 >
                   {days} days
@@ -471,10 +517,20 @@ export function QueryForm({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="flex cursor-pointer items-center gap-2.5 text-sm font-semibold text-foreground">
+            {/* Disabled with the rest of the form mid-run: it is the same
+                promise the chips make, and a switch that flips without changing
+                the run in flight is the worst of the lot, because it names a
+                stage the log is about to walk past. */}
+            <label
+              className={cn(
+                "flex cursor-pointer items-center gap-2.5 text-sm font-semibold text-foreground",
+                running && CHIP_DISABLED,
+              )}
+            >
               <input
                 type="checkbox"
                 checked={values.relevance}
+                disabled={running}
                 onChange={(event) => set("relevance", event.target.checked)}
                 className="size-4 accent-[var(--brand)]"
               />
@@ -495,10 +551,21 @@ export function QueryForm({
           type="submit"
           size="lg"
           disabled={running}
+          // The trigger of a one-to-three-minute job has to carry the activity
+          // itself: a disabled button with a blank icon slot reads as broken,
+          // not as busy, to a sighted user and says nothing at all to a screen
+          // reader.
+          aria-busy={running}
           className="h-11 gap-2 rounded-xl px-5 text-[0.9375rem] sm:w-auto"
         >
-          {running ? null : (
-            <Search aria-hidden="true" strokeWidth={2.25} className="size-4" />
+          {running ? (
+            <Loader2
+              aria-hidden="true"
+              strokeWidth={2}
+              className="size-4 animate-spin"
+            />
+          ) : (
+            <Search aria-hidden="true" strokeWidth={2} className="size-4" />
           )}
           {running ? "Working…" : "Find content ideas"}
         </Button>
@@ -512,11 +579,14 @@ export function QueryForm({
           >
             Cancel
           </Button>
-        ) : (
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Usually takes 1 to 3 minutes.
-          </p>
-        )}
+        ) : null}
+        {/* Stays put while the run goes. The estimate used to be swapped out for
+            the Cancel button at exactly the moment it became useful: before the
+            run it is a promise, during it it is the only thing telling the
+            reader that two minutes of nothing is normal. */}
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Usually takes 1 to 3 minutes.
+        </p>
       </div>
     </form>
   );
