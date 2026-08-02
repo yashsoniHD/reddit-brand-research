@@ -653,6 +653,59 @@ class TestTheRunsMigrationScript:
         script = self._script()
         assert script.CRON_SCHEDULE == "* * * * *"
 
+    # -- dispatch on insert -------------------------------------------------
+    # The cron job is the floor, not the latency budget: on its own a queued run
+    # waits up to a minute for the next tick. These cover the AFTER INSERT
+    # trigger that wakes a worker immediately, and the flag that removes it
+    # again if pg_net ever misbehaves on insert.
+
+    def test_dispatch_trigger_fires_after_insert_on_queued_rows_only(self):
+        script = self._script()
+        normalized = _normalize(script.CREATE_DISPATCH_TRIGGER_SQL)
+        assert "after insert on public.runs" in normalized
+        assert "for each row" in normalized
+        # Without the WHEN clause a backfill or a fixture row inserted in any
+        # other status would fire an HTTP call nobody asked for.
+        assert "when (new.status = 'queued')" in normalized
+
+    def test_dispatch_function_calls_the_same_drain_helper_the_cron_job_uses(self):
+        # One code path for "wake a worker", so the secret handling is not
+        # duplicated into a second SECURITY DEFINER function.
+        script = self._script()
+        assert "public.trigger_drain_runs" in script.CREATE_DISPATCH_FUNCTION_SQL
+
+    def test_create_dispatch_trigger_quotes_the_url_and_revokes_public_execute(self):
+        script = self._script()
+        cursor = self.RecordingCursor(fetchone_results=[("'https://example.com/worker'",)])
+        script.create_dispatch_trigger(cursor, "https://example.com/worker")
+        statements = [_normalize(sql) for sql, _ in cursor.executed]
+        assert any("quote_literal" in sql for sql in statements)
+        assert any("'https://example.com/worker'" in sql for sql in statements)
+        assert any(
+            "revoke all on function public.dispatch_queued_run() from public" in sql
+            for sql in statements
+        )
+
+    def test_create_dispatch_trigger_drops_the_old_trigger_first(self):
+        # Idempotent reruns: pointing the dispatch at a new deployment must move
+        # it, not leave a second trigger calling the old URL.
+        script = self._script()
+        cursor = self.RecordingCursor(fetchone_results=[("'https://example.com/worker'",)])
+        script.create_dispatch_trigger(cursor, "https://example.com/worker")
+        statements = [_normalize(sql) for sql, _ in cursor.executed]
+        drop_index = next(i for i, s in enumerate(statements) if "drop trigger if exists" in s)
+        create_index = next(
+            i for i, s in enumerate(statements) if s.startswith("create trigger")
+        )
+        assert drop_index < create_index
+
+    def test_drop_dispatch_trigger_leaves_the_cron_job_alone(self):
+        script = self._script()
+        cursor = self.RecordingCursor()
+        script.drop_dispatch_trigger(cursor)
+        statements = [_normalize(sql) for sql, _ in cursor.executed]
+        assert statements == ["drop trigger if exists runs_dispatch_after_insert on public.runs"]
+
     def test_unschedule_cron_reports_whether_a_job_was_removed(self):
         script = self._script()
         cursor = self.RecordingCursor(fetchone_results=[(1,)])

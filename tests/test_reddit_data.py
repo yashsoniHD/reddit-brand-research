@@ -846,7 +846,99 @@ class TestSearchTermForPhrases:
         assert reddit_data.search_term_for_phrases(None) == ""
 
 
+class TestTheSearchPacer:
+    """The gate that keeps two text searches from starting together.
+
+    Driven by a fake clock, so these assert what the pacing does rather than
+    waiting out real seconds. The rest of the suite runs with a zero-spacing
+    pacer (see tests/conftest.py), which is why the behaviour is pinned here.
+    """
+
+    class Clock:
+        """A clock that only moves when something sleeps on it."""
+
+        def __init__(self):
+            self.now = 1000.0
+            self.slept = []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.slept.append(seconds)
+            self.now += seconds
+
+    def test_the_first_caller_is_never_held(self):
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, clock=clock.monotonic, sleep=clock.sleep)
+        pacer.wait()
+        assert clock.slept == []
+
+    def test_the_next_caller_waits_out_the_spacing(self):
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, clock=clock.monotonic, sleep=clock.sleep)
+        pacer.wait()
+        pacer.wait()
+        assert clock.slept == [1.5]
+
+    def test_a_caller_that_arrives_late_is_not_held_at_all(self):
+        # The spacing is a floor on how close two starts may be, not a delay
+        # charged to every request: a request that arrives after the gap has
+        # already elapsed goes straight through.
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, clock=clock.monotonic, sleep=clock.sleep)
+        pacer.wait()
+        clock.now += 10
+        pacer.wait()
+        assert clock.slept == []
+
+    def test_three_callers_are_spaced_one_gap_apart_each(self):
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, clock=clock.monotonic, sleep=clock.sleep)
+        started = clock.now
+        for _ in range(3):
+            pacer.wait()
+        assert clock.now - started == pytest.approx(3.0)
+
+    def test_zero_spacing_holds_nobody(self):
+        # What the suite runs with, and what a deployment that wanted the pacing
+        # off would set: it must not turn into a busy loop.
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(0, clock=clock.monotonic, sleep=clock.sleep)
+        for _ in range(5):
+            pacer.wait()
+        assert clock.slept == []
+
+    def test_the_module_pacer_uses_the_probed_spacing(self, unpaced_search):
+        # `unpaced_search` hands back the real pacer it displaced for the suite,
+        # so this asserts on what production runs with, not on the stand-in.
+        assert reddit_data.SEARCH_MIN_SPACING_SECONDS >= 1.0
+        assert unpaced_search._spacing == reddit_data.SEARCH_MIN_SPACING_SECONDS
+
+
 class TestSearchPosts:
+    def test_every_search_request_takes_a_start_slot_first(self, monkeypatch):
+        """The pacing is what allows the caller to run several of these at once.
+
+        Asserted at the call site rather than only on the pacer, because a
+        request that skipped the gate would still pass every other test in this
+        class and would only show up as 429s against the live archive.
+        """
+        taken = []
+
+        class SpyPacer:
+            def wait(self):
+                taken.append(True)
+
+        monkeypatch.setattr(reddit_data, "_search_pacer", SpyPacer())
+        monkeypatch.setattr(
+            reddit_data,
+            "_request_page",
+            lambda url, params, timeout=None, deadline=None: _FakeResponse({"data": []}),
+        )
+        reddit_data.search_posts("x", ["one", "two"])
+        assert len(taken) == 2
+
     def _capture(self, monkeypatch, payloads):
         """Record every request and answer from `payloads`, one per call."""
         calls = []
@@ -965,6 +1057,58 @@ class TestFetchCommentsForPosts:
         # by post exists to avoid.
         assert "body" not in calls[0]
         assert "subreddit" not in calls[0]
+
+    def test_every_comment_request_takes_a_start_slot_first(self, monkeypatch):
+        # These land immediately after a wave of searches and share that budget:
+        # unpaced, 5 of 25 posts lost their replies to exhausted 429 retries.
+        taken = []
+
+        class SpyPacer:
+            def wait(self):
+                taken.append(True)
+
+        monkeypatch.setattr(reddit_data, "_comment_pacer", SpyPacer())
+        self._capture(monkeypatch, {"p1": [], "p2": [], "p3": []})
+        reddit_data.fetch_comments_for_posts(["p1", "p2", "p3"])
+        assert len(taken) == 3
+
+    def test_comments_are_paced_more_gently_than_searches(self):
+        # One shared gate at the search spacing would stretch 25 comment
+        # requests to nearly 40 seconds for a limit that tolerates them far
+        # closer together.
+        assert 0 < reddit_data.COMMENT_MIN_SPACING_SECONDS
+        assert reddit_data.COMMENT_MIN_SPACING_SECONDS < reddit_data.SEARCH_MIN_SPACING_SECONDS
+
+    def test_a_request_that_waited_past_the_deadline_is_not_issued(self, monkeypatch):
+        # The pacer can hold a request for many seconds when 25 of them queue, so
+        # the deadline is re-checked on the far side of the wait: spending a
+        # request the run can no longer use is exactly what the budget cannot
+        # afford.
+        calls = self._capture(monkeypatch, {"p1": [_comment_row("c1", 1700000000)]})
+
+        class ExpiringPacer:
+            """Stands in for a real wait that outlives the deadline."""
+
+            def __init__(self):
+                self.waited = False
+
+            def wait(self):
+                self.waited = True
+
+        pacer = ExpiringPacer()
+        monkeypatch.setattr(reddit_data, "_comment_pacer", pacer)
+        # A clock that is inside the deadline on the first reading and past it on
+        # the second: failing the first check already would prove nothing about
+        # whether the second one exists.
+        now = time.monotonic()
+        deadline = now + 100
+        readings = iter([now, deadline + 1])
+        monkeypatch.setattr(
+            reddit_data.time, "monotonic", lambda: next(readings, deadline + 1)
+        )
+        assert reddit_data.fetch_comments_for_posts(["p1"], deadline=deadline) == []
+        assert pacer.waited is True
+        assert calls == []
 
     def test_merges_across_posts_newest_first_and_dedupes(self, monkeypatch):
         self._capture(monkeypatch, {

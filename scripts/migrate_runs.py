@@ -20,13 +20,20 @@ the same feature and there is no third file worth the indirection:
     # Also enable pg_cron/pg_net and (re)point the drain-runs cron job at a
     # worker. Gated behind its own flag because it needs two things the table
     # migration does not: a worker URL and a bearer secret, both deploy-time
-    # facts rather than schema facts.
+    # facts rather than schema facts. This also installs the AFTER INSERT
+    # trigger that wakes a worker the moment a run is queued, so a run no
+    # longer waits up to a minute for the next cron tick; pass
+    # --no-dispatch-on-insert to schedule the cron job without it.
     python scripts/migrate_runs.py --schedule-cron \\
         --worker-url https://reddit-content-ideas.vercel.app/api/run-worker \\
         --cron-secret "$CRON_SECRET"
 
     # Or lift the schedule without touching the table:
     python scripts/migrate_runs.py --unschedule-cron
+
+    # Or drop just the immediate dispatch, keeping the minute cron as the only
+    # trigger. The escape hatch if pg_net ever misbehaves on insert.
+    python scripts/migrate_runs.py --drop-dispatch-on-insert
 
 Why a runs table at all: a research run today executes inside the client's
 streaming HTTP request and dies the moment the tab closes. This table is the
@@ -284,6 +291,70 @@ $$;
 # the same way db.py does) can call it.
 REVOKE_DRAIN_FUNCTION_SQL = "revoke all on function public.trigger_drain_runs(text) from public"
 
+# --------------------------------------------------------------------------
+# Dispatch on insert: what makes a run start now instead of on the next minute
+# --------------------------------------------------------------------------
+#
+# The cron job above is the queue's floor, not its latency budget. On its own it
+# means a run waits for the next minute boundary before a worker is even woken:
+# zero to sixty seconds of doing nothing, averaging thirty, on top of a pipeline
+# that already takes minutes. That wait was measured as the single largest
+# avoidable delay in the product.
+#
+# So the insert itself wakes a worker. An AFTER INSERT trigger on public.runs
+# calls the same trigger_drain_runs the cron job calls, which means one code path
+# for "wake a worker" and no second copy of the secret handling. pg_net does not
+# make the HTTP call inline: it enqueues the request in its own table and its
+# background worker sends it after this transaction commits, so a queued run is
+# never visible to a worker before the row it is about to claim exists.
+#
+# The cron job stays exactly as it is. Every failure mode here (pg_net down, the
+# request dropped, a worker that dies before claiming) degrades to precisely the
+# old behaviour: the next minute tick picks the run up. Two workers arriving at
+# once is already safe, because claim_next_run takes its row with FOR UPDATE SKIP
+# LOCKED, so the loser claims a different run or none at all.
+#
+# The trigger fires per row and only for a row that is actually waiting to be
+# run. `when (new.status = 'queued')` keeps a row inserted in any other state
+# (a backfill, a test fixture, a future import) from firing an HTTP call nobody
+# asked for.
+DISPATCH_FUNCTION_NAME = "dispatch_queued_run"
+DISPATCH_TRIGGER_NAME = "runs_dispatch_after_insert"
+
+# The worker URL is embedded as a literal for the same reason the cron command
+# embeds it: this is SQL Postgres stores and executes later, not a query this
+# script runs now, so there is no bind parameter to use. `quote_literal` does
+# the escaping, in Postgres, before the body is assembled.
+CREATE_DISPATCH_FUNCTION_SQL = """
+create or replace function public.{function}()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.trigger_drain_runs({url});
+  return null;
+end;
+$$;
+"""
+
+REVOKE_DISPATCH_FUNCTION_SQL = (
+    "revoke all on function public.{}() from public".format(DISPATCH_FUNCTION_NAME)
+)
+
+DROP_DISPATCH_TRIGGER_SQL = "drop trigger if exists {} on public.runs".format(
+    DISPATCH_TRIGGER_NAME
+)
+
+CREATE_DISPATCH_TRIGGER_SQL = """
+create trigger {trigger}
+after insert on public.runs
+for each row
+when (new.status = 'queued')
+execute function public.{function}()
+""".format(trigger=DISPATCH_TRIGGER_NAME, function=DISPATCH_FUNCTION_NAME)
+
 
 def enable_cron_extensions(cursor) -> None:
     cursor.execute(CREATE_PG_CRON_SQL)
@@ -309,6 +380,34 @@ def upsert_vault_secret(cursor, secret: str) -> None:
 def create_drain_function(cursor) -> None:
     cursor.execute(CREATE_DRAIN_FUNCTION_SQL)
     cursor.execute(REVOKE_DRAIN_FUNCTION_SQL)
+
+
+def create_dispatch_trigger(cursor, worker_url: str) -> None:
+    """(Re)create the AFTER INSERT trigger that wakes a worker immediately.
+
+    Idempotent: the function is replaced in place and the trigger is dropped
+    before it is created, so rerunning with a new URL moves the dispatch rather
+    than leaving a second trigger pointing at the old deployment.
+    """
+    cursor.execute("select quote_literal(%s)", (worker_url,))
+    quoted_url = cursor.fetchone()[0]
+    cursor.execute(
+        CREATE_DISPATCH_FUNCTION_SQL.format(
+            function=DISPATCH_FUNCTION_NAME, url=quoted_url
+        )
+    )
+    cursor.execute(REVOKE_DISPATCH_FUNCTION_SQL)
+    cursor.execute(DROP_DISPATCH_TRIGGER_SQL)
+    cursor.execute(CREATE_DISPATCH_TRIGGER_SQL)
+
+
+def drop_dispatch_trigger(cursor) -> None:
+    """Remove the insert dispatch, leaving the cron job as the only trigger.
+
+    The escape hatch if immediate dispatch ever misbehaves in production: runs
+    keep working, they just go back to waiting for the next minute tick.
+    """
+    cursor.execute(DROP_DISPATCH_TRIGGER_SQL)
 
 
 def _unschedule_if_exists(cursor, job_name: str) -> bool:
@@ -360,6 +459,20 @@ def main() -> int:
         help="remove the drain-runs cron job without touching the table",
     )
     parser.add_argument(
+        "--no-dispatch-on-insert",
+        dest="dispatch_on_insert",
+        action="store_false",
+        help=(
+            "do not create the AFTER INSERT trigger that starts a queued run "
+            "immediately; runs then wait for the next cron tick (up to 60s)"
+        ),
+    )
+    parser.add_argument(
+        "--drop-dispatch-on-insert",
+        action="store_true",
+        help="remove the insert dispatch trigger and leave the cron job as the only trigger",
+    )
+    parser.add_argument(
         "--worker-url",
         default=os.environ.get("WORKER_URL"),
         help="worker endpoint the cron job posts to (default: $WORKER_URL)",
@@ -395,6 +508,14 @@ def main() -> int:
     try:
         with psycopg.connect(db._dsn(), connect_timeout=db.CONNECT_TIMEOUT_SECONDS) as conn:
             with conn.cursor() as cur:
+                if args.drop_dispatch_on_insert:
+                    drop_dispatch_trigger(cur)
+                    print(
+                        "Removed the {} trigger; queued runs now wait for the "
+                        "next cron tick.".format(DISPATCH_TRIGGER_NAME)
+                    )
+                    return 0
+
                 if args.unschedule_cron:
                     removed = unschedule_cron(cur)
                     if removed:
@@ -438,6 +559,14 @@ def main() -> int:
                             CRON_JOB_NAME, CRON_SCHEDULE, args.worker_url
                         )
                     )
+                    if args.dispatch_on_insert:
+                        create_dispatch_trigger(cur, args.worker_url)
+                        print(
+                            "Trigger '{}' now wakes a worker the moment a run is "
+                            "queued; the cron job above stays as the safety net.".format(
+                                DISPATCH_TRIGGER_NAME
+                            )
+                        )
     except db.StorageUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 1

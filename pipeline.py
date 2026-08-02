@@ -97,14 +97,25 @@ DEADLINE_RESERVE_SECONDS = 110
 TRIAGE_ALLOWANCE_SECONDS = 50
 # How many communities a scrape reads at once. Pages within one community stay
 # sequential, because the cursor for the next page comes out of the current one, so
-# this is concurrency across communities and nothing else. Safe here in a way it is
-# not in `search`: a plain paged read of a subreddit draws no rate limiting from the
-# archive (docs/ARCTIC_SHIFT_API.md), while concurrent text queries are refused
-# outright, which is why the search path stays serial. Modest rather than
-# "all of them": discovery.MAX_COMMUNITIES is 8, and reading 4 at a time takes the
+# this is concurrency across communities and nothing else. A plain paged read of a
+# subreddit draws no rate limiting from the archive at all (docs/ARCTIC_SHIFT_API.md),
+# unlike text search, which needs the pacing reddit_data applies to it. Modest rather
+# than "all of them": discovery.MAX_COMMUNITIES is 8, and reading 4 at a time takes the
 # longest stage in a run from 8 fetches end to end down to 2 waves without turning
 # one report into an 8-way burst against a volunteer-run archive.
 GATHER_MAX_WORKERS = 4
+# The whole run's text-search allowance, in requests. Measured 2026-08-02 (the probe
+# table in reddit_data's search block): a paced wave of eight cleared with no 429s,
+# while sixteen in one window drew a wall of them from the ninth on. Eight is also
+# exactly one term for every community discovery can propose, which is what makes
+# the breadth-first order below spend the budget the way a reader would want it
+# spent: every community heard from once before any community is heard from twice.
+SEARCH_REQUEST_BUDGET = 8
+# When to stop searching even though budget is left. The triage never rates more than
+# analysis.TRIAGE_MAX_POSTS posts, so a pool past that ceiling is material the run
+# has already paid for and cannot use: a measured run fetched 1079 items to analyse
+# 300. Searching on past this point buys nothing but wall clock.
+SEARCH_ENOUGH_POSTS = analysis.TRIAGE_MAX_POSTS
 # What a phrase-filtered pool has to reach before the report is built from the
 # matches alone. Deliberately the threshold the product already owns rather than
 # a new number: LOW_DATA_THRESHOLD is where the report starts telling the reader
@@ -972,6 +983,11 @@ def run_report(
 
         return got_posts, got_comments, got_used, got_notices
 
+    # community name -> the search terms this run actually issued for it, filled
+    # in by `search` and read when the bundle records what the report was built
+    # from. Empty for a scrape, which searched for nothing.
+    issued_terms: dict = {}
+
     def terms_for(community: dict) -> List[str]:
         """What to search this community for: the reader's phrases, or the model's terms.
 
@@ -991,56 +1007,142 @@ def run_report(
         Same (posts, comments, used, notices) contract as `gather`, so the tier
         ladder and every stage below it cannot tell which mode ran.
 
-        Serial by necessity: concurrent text queries are refused by the archive
-        (see reddit_data's SEARCH_PAGE_SIZE block). Comments are the opposite, so
-        they are fetched once at the end for the whole run's best posts rather
-        than per community, which both parallelises and spends the request budget
-        on the threads most likely to survive selection.
+        Breadth-first, in paced waves. This was strictly serial, on the reading
+        that the archive refuses concurrent text queries outright; re-probing
+        showed what it actually refuses is requests that START together and more
+        than about nine in one window, so reddit_data paces the starts and this
+        keeps the run inside SEARCH_REQUEST_BUDGET. Eight communities took 135.3s
+        serially and about 32s this way.
+
+        Wave one asks every community for its first term, wave two comes back for
+        second terms, and a wave only happens if the pool is still thin: a report
+        built from one term in each of eight communities is a better report than
+        one built from two terms in four of them, and past SEARCH_ENOUGH_POSTS
+        neither is worth more wall clock. Comments stay where they were, fetched
+        once at the end for the whole run's best posts, which spends that request
+        budget on the threads most likely to survive selection.
         """
         got_posts: List[dict] = []
         got_used: List[str] = []
         got_notices: List[str] = []
+        # community name -> the terms actually asked for, in the order they were
+        # issued. A community's terms are now spread across waves, so the
+        # "nothing mentioned" notice can only be written once every wave is done,
+        # and it still has to name the words the reader's report was searched for.
+        # Shared with `run_report` (rather than local) because the bundle records
+        # the terms the report was actually built from, and only this stage knows
+        # which of the proposed ones the budget reached.
+        searched = issued_terms
+        seen_post_ids = set()
+        spent = 0
 
-        for community in communities:
-            name = community["name"]
-            check("fetch")
-            if got_used and not fetching_time_left():
-                got_notices.append(
-                    "We ran out of time before searching r/{}, so this report is built "
-                    "from the communities above.".format(name)
-                )
-                logger.warning("skipping r/%s: inside the analysis reserve", name)
-                break
+        # [(community name, terms), ...] per wave, in `communities` order. One
+        # request per entry: a community's terms are spread across waves rather
+        # than sent together, which is what makes the budget breadth-first.
+        waves: List[List[tuple]] = []
+        for depth in range(reddit_data.MAX_SEARCH_TERMS):
+            wave = [
+                (community["name"], [terms_for(community)[depth]])
+                for community in communities
+                if len(terms_for(community)) > depth
+            ]
+            if wave:
+                waves.append(wave)
 
-            terms = terms_for(community)
-            if not terms:
-                # Nothing to search for is not a failure: it means fall back to
-                # reading the community, which is what the thin-pool rung below
-                # does for the whole run.
-                logger.info("no search terms for r/%s", name)
-                continue
+        if not waves:
+            # Nothing to search for is not a failure: it means fall back to
+            # reading the communities, which is what the thin-pool rung below
+            # does for the whole run.
+            logger.info("no search terms for any community")
+            return got_posts, [], got_used, got_notices
 
-            say("Searching r/{} for {}…".format(name, ", ".join(terms)))
+        # Several communities answer at once now, so the progress callable is
+        # serialised here for the same reason `gather` serialises it: the API's
+        # own `say` is a safe queue put, a caller that appends to a list is not.
+        say_lock = threading.Lock()
+
+        def announce(message: str) -> None:
+            with say_lock:
+                say(message)
+
+        def search_one(name: str, terms: List[str]):
+            """One (community, term) request: (name, terms, posts, error)."""
+            announce("Searching r/{} for {}…".format(name, ", ".join(terms)))
             try:
                 found = _call(
                     search_posts, name, terms,
                     deadline=fetch_deadline, phrases=active or None,
                 )
             except (ValueError, RuntimeError) as exc:
-                got_notices.append("r/{} was skipped: {}".format(name, _lowercase_first(exc)))
-                continue
-
-            if not found:
-                got_notices.append(
-                    "Nothing in r/{} mentioned {}, so it was left out.".format(
-                        name, ", ".join(terms)
+                return name, terms, [], exc
+            if found:
+                announce(
+                    "Searching r/{} for {}… ({} found)".format(
+                        name, ", ".join(terms), len(found)
                     )
                 )
-                continue
+            return name, terms, list(found), None
 
-            say("Searching r/{} for {}… ({} found)".format(name, ", ".join(terms), len(found)))
-            got_posts.extend(found)
-            got_used.append(name)
+        for wave in waves:
+            check("fetch")
+            if got_used and not fetching_time_left():
+                got_notices.append(
+                    "We ran out of time before searching every community, so this "
+                    "report is built from the ones above."
+                )
+                logger.warning("stopping the search: inside the analysis reserve")
+                break
+            if got_used and len(got_posts) >= SEARCH_ENOUGH_POSTS:
+                # Enough material for anything the triage can rate. Not a notice:
+                # nothing was skipped that the report would have used.
+                logger.info(
+                    "stopping the search at %s posts: past the %s the triage can use",
+                    len(got_posts), SEARCH_ENOUGH_POSTS,
+                )
+                break
+
+            allowance = SEARCH_REQUEST_BUDGET - spent
+            if allowance <= 0:
+                logger.info("search request budget of %s spent", SEARCH_REQUEST_BUDGET)
+                break
+            issued = wave[:allowance]
+            spent += len(issued)
+
+            workers = max(1, min(reddit_data.SEARCH_WORKERS, len(issued)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(lambda item: search_one(*item), issued))
+
+            # Assembled in `communities` order whatever order the answers landed
+            # in, so the pool, `used` and the notices read the same as they did
+            # when this ran one community at a time.
+            for name, terms, found, error in results:
+                searched.setdefault(name, []).extend(terms)
+                if error is not None:
+                    got_notices.append(
+                        "r/{} was skipped: {}".format(name, _lowercase_first(error))
+                    )
+                    continue
+                fresh = [
+                    post for post in found
+                    if post.get("id") and post["id"] not in seen_post_ids
+                ]
+                # Deduped across waves, not just within one request: the same
+                # thread can match two of a community's terms, and `search_posts`
+                # can only dedupe the request it was making.
+                for post in fresh:
+                    seen_post_ids.add(post["id"])
+                if fresh:
+                    got_posts.extend(fresh)
+                    if name not in got_used:
+                        got_used.append(name)
+
+        for name, asked in searched.items():
+            if name not in got_used:
+                got_notices.append(
+                    "Nothing in r/{} mentioned {}, so it was left out.".format(
+                        name, ", ".join(asked)
+                    )
+                )
 
         got_comments: List[dict] = []
         if got_posts and fetching_time_left():
@@ -1361,12 +1463,20 @@ def run_report(
         # Only for a pure search run: after a fallback to reading the communities,
         # these terms did not select anything in the report, and recording them
         # would credit them for a pool they did not produce.
+        #
+        # Read from what the search stage actually issued, not from what discovery
+        # proposed. The two used to be the same list, because every proposed term
+        # was searched for; now the stage spends a request budget breadth-first
+        # and stops once the pool is big enough, so a community's second term is
+        # often never asked for. Recording the proposal would have the report
+        # claim it searched words it never sent, which is the same overstatement
+        # the fallback case above exists to avoid.
         searched = sorted(
             {
                 term
-                for community in communities
-                if community["name"] in used
-                for term in terms_for(community)
+                for name, terms in issued_terms.items()
+                if name in used
+                for term in terms
             }
         )
         if searched:

@@ -22,13 +22,27 @@ const THIN_EVIDENCE_THRESHOLD = 10;
  * Source order is term then definition, as a description list requires;
  * `flex-col-reverse` puts the number on top where the eye wants it.
  */
-function Stat({ value, label }: { value: string; label: string }) {
+function Stat({
+  value,
+  label,
+  of,
+}: {
+  value: string;
+  label: string;
+  of?: string;
+}) {
   return (
     <div className="flex flex-col-reverse gap-1">
       {/* `h-quiet` rather than another hand-tuned small grey: the app already
           owns one label style, and this was a fourth variant of it. */}
       <dt className="h-quiet">{label}</dt>
-      <dd className="stat m-0 text-foreground">{value}</dd>
+      <dd className="stat m-0 text-foreground">
+        {value}
+        {/* The denominator rides at label weight rather than stat weight, so the
+            tile still reads as one number at a glance and only answers "out of
+            what?" when the reader looks. */}
+        {of ? <span className="h-quiet"> of {of}</span> : null}
+      </dd>
     </div>
   );
 }
@@ -60,6 +74,11 @@ export function ReportView({
   const selection = sample?.selection;
   const strongCount = selection?.relevance_counts?.["2"];
   const rated = selection?.triaged ?? 0;
+  // What `rated` is a fraction of: posts and comments together, because the
+  // triage rates one merged pool. Read off the sample rather than the arrays
+  // below it, so it matches the two tiles it sits beside even when the bundle
+  // carries a trimmed copy of the raw material.
+  const fetched = (sample?.posts_fetched ?? 0) + (sample?.comments_fetched ?? 0);
   const thinEvidence =
     typeof strongCount === "number" && rated > 0 && strongCount < THIN_EVIDENCE_THRESHOLD;
 
@@ -173,12 +192,21 @@ export function ReportView({
           {/* The four numbers in this report describe four different pools, and
               run together in a sentence they look like they contradict each
               other. Laid out as a funnel, left to right, they read as the
-              stages they are. */}
+              stages they are.
+
+              The third tile changes unit, which is what used to break the
+              funnel: the first two count posts and comments separately, while
+              the triage rates them together and caps each kind on its own
+              (400 posts + 400 comments). A run that saturates both caps
+              therefore shows 800 rated next to 700 posts fetched, which reads
+              as impossible until the denominator is on screen. So it carries
+              one: "800 of 1,307". */}
           <dl className="rule grid grid-cols-2 gap-x-4 gap-y-5 border-y py-5 sm:grid-cols-4">
             <Stat value={thousands(sample?.posts_fetched)} label="Posts fetched" />
             <Stat value={thousands(sample?.comments_fetched)} label="Comments fetched" />
             <Stat
               value={rated > 0 ? thousands(rated) : "n/a"}
+              of={rated > 0 ? thousands(fetched) : undefined}
               label="Rated for relevance"
             />
             <Stat value={thousands(sample?.items_analysed)} label="Read in full" />

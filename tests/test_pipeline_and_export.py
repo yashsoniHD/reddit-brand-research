@@ -9,6 +9,7 @@ import time
 import pytest
 
 import analysis
+import discovery
 import pipeline
 import report_export
 
@@ -1929,8 +1930,15 @@ class TestRetrievalMode:
         )
         assert bundle["inputs"]["retrieval"] == "search"
         # Each community searched for its own terms, which is the reason terms come
-        # from the same call that chose the community.
-        assert search.calls == [("alpha", ["ad spend"]), ("beta", ["attribution", "tracking"])]
+        # from the same call that chose the community. One request per term, and
+        # breadth-first: every community's first term before any community's
+        # second, so a run that runs out of budget or time has still heard from
+        # every community once.
+        assert search.calls == [
+            ("alpha", ["ad spend"]),
+            ("beta", ["attribution"]),
+            ("beta", ["tracking"]),
+        ]
         assert sorted(bundle["inputs"]["terms"]) == ["ad spend", "attribution", "tracking"]
 
     def test_naming_communities_with_a_plain_brief_reads_them_in_full(self):
@@ -2052,6 +2060,86 @@ class TestRetrievalMode:
             for notice in bundle["notices"]
         )
         assert bundle["inputs"]["subreddits"] == ["alpha"]
+
+    # -- the paced, budgeted search --------------------------------------------
+    # Search used to be strictly serial on the reading that the archive refuses
+    # concurrent text queries; it refuses simultaneous STARTS and sustained
+    # volume, so the stage now runs in paced, breadth-first waves under a per-run
+    # request budget. These cover what that budget is allowed to cost the report.
+
+    def test_a_second_wave_is_skipped_once_the_pool_is_big_enough(self):
+        # Past what the triage can rate, another request is material the run pays
+        # for and cannot use, so the second term is never asked for.
+        search = make_search(count=pipeline.SEARCH_ENOUGH_POSTS)
+        build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["first", "second"]}),
+            search_posts=search,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert search.calls == [("alpha", ["first"])]
+
+    def test_a_thin_first_wave_still_gets_its_second_term(self):
+        # The mirror of the test above: the stop is about having enough, not
+        # about second terms being optional.
+        search = make_search(count=3)
+        build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["first", "second"]}),
+            search_posts=search,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert search.calls == [("alpha", ["first"]), ("alpha", ["second"])]
+
+    def test_the_request_budget_caps_how_many_searches_one_run_issues(self):
+        # Sixteen searches in one window drew a wall of 429s when this was
+        # measured, so a run never issues more than the budget however many
+        # communities and terms it has.
+        names = ["c{}".format(index) for index in range(discovery.MAX_COMMUNITIES)]
+        search = make_search(count=1)
+        build_bundle(
+            discover=make_discover(
+                names, terms={name: ["one", "two"] for name in names}
+            ),
+            search_posts=search,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert len(search.calls) == pipeline.SEARCH_REQUEST_BUDGET
+        # Spent breadth-first: every community heard from once, nobody twice.
+        assert sorted(name for name, _ in search.calls) == sorted(names)
+        assert all(terms == ["one"] for _, terms in search.calls)
+
+    def test_the_report_records_only_the_terms_it_actually_searched_for(self):
+        # The budget and the enough-material stop mean a community's second term
+        # is often never issued. Recording discovery's proposal instead would have
+        # the report claim it searched words it never sent.
+        search = make_search(count=pipeline.SEARCH_ENOUGH_POSTS)
+        bundle = build_bundle(
+            discover=make_discover(
+                ["alpha"], terms={"alpha": ["issued", "never sent"]}
+            ),
+            search_posts=search,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert search.calls == [("alpha", ["issued"])]
+        assert bundle["inputs"]["terms"] == ["issued"]
+
+    def test_a_post_matching_two_terms_is_counted_once(self):
+        # `search_posts` can only dedupe within the request it is making, and a
+        # thread that matches both of a community's terms now arrives in two
+        # separate requests.
+        # Enough posts that the thin-pool rung does not fire and scrape on top of
+        # the search, which would put the count this asserts back out of reach.
+        duplicate = fake_posts("alpha", count=20)
+
+        def search(subreddit, terms, limit=100, deadline=None, phrases=None):
+            return list(duplicate)
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["first", "second"]}),
+            search_posts=search,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert bundle["inputs"]["retrieval"] == "search"
+        assert len(bundle["posts"]) == 20
 
     def test_search_mode_records_no_window_claim_it_cannot_keep(self):
         # `days` is still recorded, because the frontend replays it on re-run, but

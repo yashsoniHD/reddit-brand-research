@@ -82,15 +82,40 @@ PHRASE_MAX_POST_PAGES = 3
 PHRASE_MAX_COMMENT_PAGES = MAX_COMMENT_PAGES
 
 # ── Search tuning ─────────────────────────────────────────────────────────────
-# Text search is the one thing this archive will not parallelise. Probed
-# 2026-07-30 (docs/ARCTIC_SHIFT_API.md): six concurrent `query=` requests came
-# back six 429s, and three workers still drew three. `search_posts` is therefore
-# strictly serial, and the caller's deadline rather than concurrency is what
-# bounds it.
+# What this archive refuses is a BURST of text searches, not concurrency itself.
+# The 2026-07-30 probe that produced the old "strictly serial" rule fired its
+# requests simultaneously: six at once came back six 429s, three at once drew
+# three, and the conclusion drawn was that `query=` cannot be parallelised at all.
+#
+# Re-probed 2026-08-02 with the starts spaced out instead of simultaneous, which
+# is the variable the first probe never separated from concurrency:
+#
+#   2 workers, no spacing     2 requests, both 429 within 1.0s
+#   2 workers, 1.0s spacing   4 requests, 3 OK, 22.8s
+#   3 workers, 1.5s spacing   8 requests, 7 OK, 32.4s, no 429 at all
+#   3 workers, 1.5s spacing   16 requests, 9 OK, 52.4s, the last 7 all 429
+#   3 workers, 1.5s spacing   8 more, 45s later, 8 OK, 29.2s
+#
+# So there are two separate limits, and only one of them is about concurrency:
+# starts closer together than about a second are refused outright, and a sustained
+# run of more than roughly nine searches drains a budget that refills within a
+# minute. Both are respected here rather than avoided by going serial: requests
+# are issued SEARCH_WORKERS at a time with at least SEARCH_MIN_SPACING_SECONDS
+# between any two starts, and the caller keeps the total per run under
+# SEARCH_REQUEST_BUDGET (see pipeline.search).
+#
+# What this buys: the same eight communities that took 135.3s to search serially
+# take about 32s this way, on a run that measured 219s end to end.
 SEARCH_PAGE_SIZE = 100
-# Terms per community per run. Serial search measured 8-18s per request, so each
-# extra term costs a community's worth of the retrieval budget.
+# Terms per community per run. Each extra term is another request out of the
+# per-run budget, which is why pipeline spends them breadth-first: every
+# community's first term before any community's second.
 MAX_SEARCH_TERMS = 2
+# How many text searches may be in flight, and how far apart any two of them may
+# start. Both numbers come from the probe table above: three workers cleared a
+# full wave with no 429s, and a spacing below a second is what draws them.
+SEARCH_WORKERS = 3
+SEARCH_MIN_SPACING_SECONDS = 1.5
 # Longer than REQUEST_TIMEOUT_SECONDS on purpose: an unbounded text query was
 # measured at up to 17.8s, which a 15 second timeout would abandon just before it
 # answered.
@@ -109,6 +134,15 @@ MIN_SEARCH_TIMEOUT_SECONDS = 4
 # rejected with 400), so there is no batching to exploit here, only concurrency.
 COMMENT_FETCH_WORKERS = 3
 MAX_COMMENT_POSTS = 25
+# Comments get a start pacer too, gentler than search's. That 2.6s measurement
+# was taken in isolation; in a real run these 25 requests arrive immediately
+# after a wave of searches, and the budget they are drawing on is shared. Sent
+# unpaced in that position, 5 of 25 posts lost their replies to exhausted 429
+# retries (637 comments in a measured run before, 360 after). Re-probed at half
+# a second between starts: 24 of 24 posts answered, 433 comments, no refusals, in
+# 13.8s, which is what the unpaced burst cost anyway once its retries were paid
+# for. So this buys back the evidence rather than costing wall clock.
+COMMENT_MIN_SPACING_SECONDS = 0.5
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
 # Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
@@ -128,6 +162,58 @@ _DELETED_BODIES = {"[removed]", "[deleted]", ""}
 
 # User-facing messages (complete sentences, no status codes, no URLs).
 _UNAVAILABLE = "The Reddit data service is temporarily unavailable. Please try again in a moment."
+
+
+# ── Search pacing ─────────────────────────────────────────────────────────────
+# The gate that keeps two text searches from starting together. Process-wide and
+# not per-call on purpose: the limit being respected belongs to the archive and
+# to this deployment's address, not to any one run, so two runs sharing a worker
+# instance have to share the gate as well or they would each independently
+# believe they were spacing their requests correctly.
+#
+# Deliberately a floor on start times rather than a token bucket: what the probes
+# refused was requests that STARTED together, and a start-time floor is the
+# smallest thing that expresses exactly that. Threads block here rather than
+# retrying, so a paced request costs its wait once instead of a 429 plus a
+# backoff.
+class _StartPacer:
+    """Hands out permission to start, never closer together than `spacing`.
+
+    `clock` and `sleep` are injectable so the pacing can be tested for what it
+    actually does (how long it holds a caller) rather than by waiting out real
+    seconds, and so the suite can run with a zero-spacing pacer without that
+    being the only thing the tests ever see. A spacing of 0 makes `wait` a no-op
+    beyond taking the lock.
+    """
+
+    def __init__(self, spacing: float, clock=time.monotonic, sleep=time.sleep):
+        self._spacing = spacing
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        # The sleep happens outside the lock, so waiting threads queue on the
+        # clock rather than on each other: holding it while sleeping would
+        # serialise the whole pool behind one sleeper and turn the spacing into
+        # a per-request delay for everybody.
+        while True:
+            with self._lock:
+                now = self._clock()
+                if now >= self._next_allowed:
+                    self._next_allowed = now + self._spacing
+                    return
+                sleep_for = self._next_allowed - now
+            self._sleep(sleep_for)
+
+
+_search_pacer = _StartPacer(SEARCH_MIN_SPACING_SECONDS)
+# A separate pacer, not a shared one: these two stages never overlap inside a run
+# (the comment fetch starts once searching is done), and one gate at the search
+# spacing would stretch 25 comment requests to nearly 40 seconds for a limit that
+# tolerates them four times closer together.
+_comment_pacer = _StartPacer(COMMENT_MIN_SPACING_SECONDS)
 
 
 # ── Input normalisation ───────────────────────────────────────────────────────
@@ -787,10 +873,14 @@ def search_posts(
     answer for the term that produced them. A caller that wants a window should
     use `fetch_posts` instead, because that is the mode a window belongs to.
 
-    One request per term, never concurrent: see the SEARCH_PAGE_SIZE block above
-    for why. Returns [] rather than raising when the archive will not answer, so a
-    caller can fall back to `fetch_posts` for this community; a run-ending failure
-    would throw away the communities that did answer.
+    One request per term, and every request waits for a start slot from the
+    process-wide search pacer first, so several of these may run at once (the
+    caller decides how many) without two of them ever starting together. See the
+    SEARCH_PAGE_SIZE block above for what the archive actually refuses and the
+    probe table behind these numbers. Returns [] rather than raising when the
+    archive will not answer, so a caller can fall back to `fetch_posts` for this
+    community; a run-ending failure would throw away the communities that did
+    answer.
 
     Terms are OR-ed by issuing one request each and merging, not by sending
     "a OR b": the posts index accepts that syntax and does not honour it (probed
@@ -831,6 +921,15 @@ def search_posts(
             "limit": limit,
             "sort": "desc",
         }
+        # Wait for a start slot before the clock is read for the timeout, so a
+        # request that queued behind two others is not also handed a timeout
+        # shortened by the time it spent queuing. The wait is bounded by the
+        # pacing itself (SEARCH_MIN_SPACING_SECONDS per request ahead of this
+        # one), which is why it is not itself deadline-checked: overrunning by a
+        # second or two cannot happen here, and `own_deadline` below still cuts
+        # off the request that follows.
+        _search_pacer.wait()
+        remaining = own_deadline - time.monotonic()
         try:
             resp = _request_page(
                 POSTS_ENDPOINT, params,
@@ -887,9 +986,12 @@ def fetch_comments_for_posts(
     posts being analysed, this asks for the replies to those exact posts. Every
     comment it returns is evidence for a thread in the report.
 
-    Parallel at COMMENT_FETCH_WORKERS, which is safe here in a way that text
-    search is not. No `body=` filter is ever sent alongside `link_id`: that
-    combination reintroduces the timeout that scoping by post exists to avoid.
+    Parallel at COMMENT_FETCH_WORKERS, with starts spaced by the comment pacer:
+    these run immediately after a wave of searches and draw on the same budget,
+    so an unpaced burst here is what costs a run its replies (see the
+    COMMENT_MIN_SPACING_SECONDS block). No `body=` filter is ever sent alongside
+    `link_id`: that combination reintroduces the timeout that scoping by post
+    exists to avoid.
     """
     ids = []
     seen_requested = set()
@@ -906,6 +1008,13 @@ def fetch_comments_for_posts(
         return []
 
     def one(post_id: str) -> List[dict]:
+        if _out_of_time(deadline):
+            return []
+        # Checked before the pacer as well as after: a request that has queued
+        # behind two dozen others is exactly the one most likely to have run out
+        # of time while waiting, and issuing it anyway would spend a request the
+        # run can no longer use.
+        _comment_pacer.wait()
         if _out_of_time(deadline):
             return []
         params = {"link_id": post_id, "limit": limit_per_post}

@@ -289,6 +289,41 @@ The docs' guidance stands: "If you're a normal user and only make a couple
 requests per second, you have nothing to worry about … If you want to process
 massive amounts of data, use the monthly dumps instead."
 
+### What text search actually refuses (probed 2026-08-02)
+
+An earlier probe (2026-07-30) fired concurrent `query=` requests simultaneously,
+saw six 429s from six requests and three from three, and concluded that text
+search cannot be parallelised at all. `pipeline.search` was strictly serial on
+that basis, which measured at 135.3s for eight communities inside a 219s run.
+
+Re-probing with the request *starts* spaced apart separates the two variables the
+first probe held together, and they turn out to be different limits:
+
+| Shape | Result |
+| --- | --- |
+| 2 workers, simultaneous starts | 2 requests, both 429 within 1.0s |
+| 2 workers, 1.0s between starts | 4 requests, 3 OK, 22.8s |
+| 3 workers, 1.5s between starts | 8 requests, 7 OK, 32.4s, no 429 |
+| 3 workers, 1.5s between starts | 16 requests, 9 OK, 52.4s, the last 7 all 429 |
+| 3 workers, 1.5s between starts | 8 more, 45s later, 8 OK, 29.2s |
+
+So: starts closer together than about a second are refused outright, and roughly
+nine searches drain a budget that refills inside a minute. Concurrency itself is
+fine. `reddit_data` now paces search starts (`SEARCH_MIN_SPACING_SECONDS`) and
+`pipeline` keeps a run under `SEARCH_REQUEST_BUDGET`, spending it breadth-first;
+the same eight communities take about 32s.
+
+The budget is shared across endpoints, which the comment fetch pays for. Sent
+unpaced straight after a search wave, 5 of 25 `link_id` requests lost their
+replies to exhausted 429 retries (637 comments in a measured run before the
+search change, 360 after). At 0.5s between starts: 24 of 24 posts answered, 433
+comments, no refusals, 13.8s - no slower than the unpaced burst once its retries
+are counted. Hence the separate, gentler `COMMENT_MIN_SPACING_SECONDS`.
+
+The "25 back-to-back requests, no 429" figure above is not contradicted by any of
+this: those were cheap `limit=1` lookups, and the limits are computed from query
+cost. A text search is one of the expensive ones.
+
 ## Full-text search syntax
 
 Marked out of date in the docs, and subject to change.

@@ -23,6 +23,7 @@ import pytest
 
 import api.index as api_index
 import db as db_module
+import reddit_data
 
 
 class FakeDb:
@@ -280,3 +281,27 @@ def fake_auth(monkeypatch):
     fake = FakeAuth(api_index.authenticate_request)
     monkeypatch.setattr(api_index, "authenticate_request", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def unpaced_search(monkeypatch):
+    """No real seconds spent on search pacing.
+
+    `reddit_data` keeps text-search starts SEARCH_MIN_SPACING_SECONDS apart,
+    which is correct against the live archive and pure waiting against a
+    monkeypatched `_request_page`: it added roughly fifteen seconds to this
+    file's own suite. The pacing itself is covered directly, with a fake clock,
+    in tests/test_reddit_data.py (TestTheSearchPacer), so nothing about it is
+    left untested by this being off everywhere else.
+
+    Yields the real pacer it displaced, so a test that is about the module's own
+    wiring can still assert on the thing production actually uses.
+    """
+    real = reddit_data._search_pacer
+    monkeypatch.setattr(
+        reddit_data, "_search_pacer", reddit_data._StartPacer(0), raising=True
+    )
+    monkeypatch.setattr(
+        reddit_data, "_comment_pacer", reddit_data._StartPacer(0), raising=True
+    )
+    return real
