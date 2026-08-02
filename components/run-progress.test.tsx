@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
 import { RunProgress } from "./run-progress";
 
 /**
@@ -103,77 +103,5 @@ describe("RunProgress monotonic stepper", () => {
     render(<RunProgress messages={[]} />);
     expect(screen.getByText(stepText(0), { exact: false })).toBeInTheDocument();
     expect(screen.getByText("Starting…")).toBeInTheDocument();
-  });
-});
-
-describe("RunProgress elapsed timer", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    cleanup();
-    vi.useRealTimers();
-  });
-
-  it("starts at 0:00 and ticks with real time", () => {
-    render(<RunProgress messages={["Finding communities talking about this…"]} />);
-    expect(screen.getByText(/0:00/)).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(5000);
-    });
-    expect(screen.getByText(/0:05/)).toBeInTheDocument();
-  });
-
-  it("rolls over past a minute", () => {
-    render(<RunProgress messages={["Searching r/test for widgets…"]} />);
-
-    act(() => {
-      vi.advanceTimersByTime(65_000);
-    });
-    expect(screen.getByText(/1:05/)).toBeInTheDocument();
-  });
-
-  it("keeps advancing across repeated heartbeat lines with no new message", () => {
-    const { rerender } = render(
-      <RunProgress messages={["Searching r/test for widgets…"]} />,
-    );
-    act(() => {
-      vi.advanceTimersByTime(10_000);
-    });
-    // The API resends the same line every 10s as a heartbeat; the array
-    // grows but the text is identical.
-    rerender(
-      <RunProgress
-        messages={["Searching r/test for widgets…", "Searching r/test for widgets…"]}
-      />,
-    );
-    expect(screen.getByText(/0:10/)).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(10_000);
-    });
-    expect(screen.getByText(/0:20/)).toBeInTheDocument();
-  });
-
-  it("clamps to 0:00 instead of going negative when the wall clock steps backward", () => {
-    // Date.now() is spied on directly (independent of vi's fake timer clock,
-    // which continues to drive setInterval scheduling below) so the test can
-    // move "now" backward the same way an NTP correction would, without that
-    // also rewinding when the interval itself is due to fire.
-    let now = 1_700_000_000_000;
-    const dateNowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
-
-    render(<RunProgress messages={["Finding communities talking about this…"]} />);
-    expect(screen.getByText(/0:00/)).toBeInTheDocument();
-
-    now -= 10_000; // the wall clock stepped backward by 10 seconds
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-    expect(screen.getByText(/0:00/)).toBeInTheDocument();
-
-    dateNowSpy.mockRestore();
   });
 });

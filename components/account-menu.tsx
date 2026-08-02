@@ -1,5 +1,6 @@
 "use client";
 
+import { DropdownMenu } from "radix-ui";
 import { useEffect, useState } from "react";
 
 import { supabaseBrowser } from "@/lib/supabase/client";
@@ -11,8 +12,15 @@ import { clearHistory } from "@/lib/storage";
  * A monogram rather than the Google profile photo: the photo lives on
  * lh3.googleusercontent.com, and showing it would mean loosening img-src in the
  * production CSP for one 24px circle. The initial carries the same "this is your
- * account" signal, and the email beside it is the part that actually identifies
- * the session.
+ * account" signal.
+ *
+ * The address and the sign-out control sit behind that monogram now instead of
+ * beside it. Spelled out inline they were the two widest things in a header
+ * whose actual job is the wordmark and the reports button, and an address you
+ * cannot act on is reference material rather than a control: it is worth
+ * having, it is not worth the room. Folding them into a menu is also what made
+ * space for the theme toggle without the right-hand side becoming a queue of
+ * four unrelated things.
  */
 function monogram(email: string): string {
   const first = email.trim()[0];
@@ -73,28 +81,53 @@ export function AccountMenu() {
   };
 
   return (
-    <div className="flex items-center gap-1.5">
-      {email ? (
-        <span className="flex items-center gap-2 pl-1 text-sm text-muted-foreground">
-          <span
-            aria-hidden="true"
-            className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[0.6875rem] font-semibold text-[var(--brand-ink)]"
-          >
-            {monogram(email)}
-          </span>
-          {/* Hidden under sm, where the header has room for the wordmark, the
-              history button and nothing else. The monogram stays. */}
-          <span className="hidden max-w-[14rem] truncate sm:inline">{email}</span>
-        </span>
-      ) : null}
-      <button
-        type="button"
-        onClick={() => void signOut()}
-        disabled={signingOut}
-        className="flex h-8 items-center rounded-lg border border-transparent px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger
+        // The address goes in the accessible name because the visible label is
+        // a single letter: "Y" tells a screen reader nothing about whose
+        // account this is, and the menu that would answer that has not been
+        // opened yet.
+        aria-label={email ? `Account: ${email}` : "Account"}
+        className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-xs font-semibold text-[var(--brand-ink)] transition-colors hover:bg-[var(--accent)] data-[state=open]:bg-[var(--accent)]"
       >
-        {signingOut ? "Signing out…" : "Sign out"}
-      </button>
-    </div>
+        <span aria-hidden="true">{monogram(email)}</span>
+      </DropdownMenu.Trigger>
+
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="end"
+          sideOffset={8}
+          className="surface z-50 min-w-[13rem] overflow-hidden p-0 text-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0"
+        >
+          {/* A label, not an item: there is nothing to do to your own address,
+              and making it focusable would put a dead stop at the top of a
+              two-item menu. */}
+          <DropdownMenu.Label className="flex flex-col gap-0.5 border-b px-3 py-2.5">
+            <span className="h-quiet">Signed in as</span>
+            <span className="truncate text-[0.8125rem] text-foreground-soft">
+              {email || "…"}
+            </span>
+          </DropdownMenu.Label>
+
+          <div className="p-1">
+            <DropdownMenu.Item
+              disabled={signingOut}
+              // onSelect rather than onClick: it is the one handler Radix fires
+              // for Enter and Space as well as a pointer, and preventing the
+              // default keeps the menu open while the request is in flight
+              // rather than closing over a button that still says "Signing
+              // out…".
+              onSelect={(event) => {
+                event.preventDefault();
+                void signOut();
+              }}
+              className="flex cursor-pointer items-center rounded-md px-2.5 py-2 text-sm font-medium text-foreground-soft outline-none select-none data-highlighted:bg-[var(--hush)] data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-45"
+            >
+              {signingOut ? "Signing out…" : "Sign out"}
+            </DropdownMenu.Item>
+          </div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }

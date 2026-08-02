@@ -2,10 +2,15 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-/* Theme follows the operating system. There is no in-app toggle, so the dark
-   variant is a media query rather than a class on <html>. Every shadcn
-   component's `dark:` utility rides on this. */
-@custom-variant dark (@media (prefers-color-scheme: dark));
+/* Theme follows the operating system until the reader disagrees with it, so
+   the dark variant reads an attribute on <html> rather than a media query.
+   That indirection is the whole reason a toggle can exist: a media query
+   cannot be overridden from script, so while the palette lived inside
+   `@media (prefers-color-scheme: dark)` there was nothing for a control to
+   change. `data-theme` is resolved from the stored choice, falling back to the
+   media query, before first paint (see THEME_BOOT_SCRIPT in lib/theme.ts).
+   Every shadcn component's `dark:` utility rides on this. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
   --color-background: var(--background);
@@ -153,72 +158,74 @@
   --viz-neg: #d03b3b;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+/* Selected on `:root[data-theme="dark"]` rather than on the bare attribute, so
+   it outranks the `:root` block above on specificity rather than on source
+   order. Order alone would work today and would break silently the first time
+   anything is appended after it. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
 
-    /* Dark mode is planes, not one flat black: the page recedes, cards are
-       lifted a real step above it, and the hush plane sits between the two. */
-    --background: #0b0b0c;
-    --foreground: #f2f2ef;
-    /* Neutralised with the light ramp: the rest of the dark planes were already
-       neutral, so this was the one value reading warm against them. */
-    --foreground-soft: #c3c7ce;
-    --card: #18181a;
-    --card-foreground: #f2f2ef;
-    --hush: #121214;
-    --popover: #18181a;
-    --popover-foreground: #f2f2ef;
+  /* Dark mode is planes, not one flat black: the page recedes, cards are
+     lifted a real step above it, and the hush plane sits between the two. */
+  --background: #0b0b0c;
+  --foreground: #f2f2ef;
+  /* Neutralised with the light ramp: the rest of the dark planes were already
+     neutral, so this was the one value reading warm against them. */
+  --foreground-soft: #c3c7ce;
+  --card: #18181a;
+  --card-foreground: #f2f2ef;
+  --hush: #121214;
+  --popover: #18181a;
+  --popover-foreground: #f2f2ef;
 
-    --brand: #3987e5;
-    --brand-ink: #86b6ef;
-    --brand-soft: #16283f;
-    --brand-line: rgba(57, 135, 229, 0.4);
+  --brand: #3987e5;
+  --brand-ink: #86b6ef;
+  --brand-soft: #16283f;
+  --brand-line: rgba(57, 135, 229, 0.4);
 
-    --primary: #2a78d6;
-    --primary-foreground: #ffffff;
-    --secondary: #26262a;
-    --secondary-foreground: #f2f2ef;
-    --muted: #202024;
-    --muted-foreground: #a3a19a;
-    --accent: #16283f;
-    --accent-foreground: #86b6ef;
-    --destructive: #e66767;
-    --border: rgba(255, 255, 255, 0.1);
-    --input: rgba(255, 255, 255, 0.17);
-    --ring: #3987e5;
+  --primary: #2a78d6;
+  --primary-foreground: #ffffff;
+  --secondary: #26262a;
+  --secondary-foreground: #f2f2ef;
+  --muted: #202024;
+  --muted-foreground: #a3a19a;
+  --accent: #16283f;
+  --accent-foreground: #86b6ef;
+  --destructive: #e66767;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.17);
+  --ring: #3987e5;
 
-    /* A shadow does nothing on a dark plane, so elevation is carried by an
-       inset top highlight plus a deeper cast below. */
-    --lift-1: inset 0 1px 0 rgba(255, 255, 255, 0.045),
-      0 1px 2px rgba(0, 0, 0, 0.5);
-    --lift-2: inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 2px 4px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
-    --lift-3: inset 0 1px 0 rgba(255, 255, 255, 0.07),
-      0 2px 4px rgba(0, 0, 0, 0.55), 0 24px 56px -12px rgba(0, 0, 0, 0.65);
+  /* A shadow does nothing on a dark plane, so elevation is carried by an
+     inset top highlight plus a deeper cast below. */
+  --lift-1: inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 1px 2px rgba(0, 0, 0, 0.5);
+  --lift-2: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --lift-3: inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 2px 4px rgba(0, 0, 0, 0.55), 0 24px 56px -12px rgba(0, 0, 0, 0.65);
 
-    --viz-accent: #3987e5;
-    --viz-track: #2a2a2e;
-    --viz-grid: #2a2a2e;
-    /* Its own step, not the light green reused, because the grey it has to
-       separate from is not the light grey either: #8e949c sits a good deal
-       higher in lightness than #868d95, so the green has to hold its distance
-       against a lighter neutral. #008767 measures OKLab dE 15.7 for normal
-       colour vision and 9.3 protan / 11.4 deutan / 13.2 tritan against
-       --viz-neu, and 28.4 / 11.0 / 8.8 / 33.1 against --viz-neg. The bright
-       mint the eye reaches for in dark mode is not available: #2fc38c sits at
-       OKLCH L 0.73, outside the validator's dark band entirely. Contrast is
-       4.37:1 on --background, 3.94:1 on --card and 3.17:1 on --viz-track. */
-    --viz-pos: #008767;
-    /* Its own step, not the light value reused. The dark planes are darker
-       than the light ones are light, so the neutral pole has to climb to stay
-       legible on them: at 6.43:1 on --background it is nearly twice the light
-       pole's 3.16:1 headroom. #8e949c is the lightest step that still sits
-       inside the dark lightness band. Verified with the dataviz validator;
-       re-run it if either pole or any plane moves. */
-    --viz-neu: #8e949c;
-    --viz-neg: #d03b3b;
-  }
+  --viz-accent: #3987e5;
+  --viz-track: #2a2a2e;
+  --viz-grid: #2a2a2e;
+  /* Its own step, not the light green reused, because the grey it has to
+     separate from is not the light grey either: #8e949c sits a good deal
+     higher in lightness than #868d95, so the green has to hold its distance
+     against a lighter neutral. #008767 measures OKLab dE 15.7 for normal
+     colour vision and 9.3 protan / 11.4 deutan / 13.2 tritan against
+     --viz-neu, and 28.4 / 11.0 / 8.8 / 33.1 against --viz-neg. The bright
+     mint the eye reaches for in dark mode is not available: #2fc38c sits at
+     OKLCH L 0.73, outside the validator's dark band entirely. Contrast is
+     4.37:1 on --background, 3.94:1 on --card and 3.17:1 on --viz-track. */
+  --viz-pos: #008767;
+  /* Its own step, not the light value reused. The dark planes are darker
+     than the light ones are light, so the neutral pole has to climb to stay
+     legible on them: at 6.43:1 on --background it is nearly twice the light
+     pole's 3.16:1 headroom. #8e949c is the lightest step that still sits
+     inside the dark lightness band. Verified with the dataviz validator;
+     re-run it if either pole or any plane moves. */
+  --viz-neu: #8e949c;
+  --viz-neg: #d03b3b;
 }
 
 @layer base {
@@ -405,15 +412,15 @@
     border-color: var(--brand-ink);
     color: #ffffff;
   }
-  @media (prefers-color-scheme: dark) {
-    /* Dark cannot use the same move: --brand-ink is a LIGHT blue here, so
-       darkening is not on the table and white is already the failing side.
-       Inverting instead, page-black on --brand, measures 5.41:1. */
-    .pill:hover {
-      background: var(--brand);
-      border-color: var(--brand);
-      color: var(--background);
-    }
+  /* Dark cannot use the same move: --brand-ink is a LIGHT blue here, so
+     darkening is not on the table and white is already the failing side.
+     Inverting instead, page-black on --brand, measures 5.41:1. Selected off
+     the attribute rather than the media query with the rest of the palette,
+     and it outranks the light rule on specificity (0,4,0 against 0,2,0). */
+  :root[data-theme="dark"] .pill:hover {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: var(--background);
   }
 
   /* ── Chips ────────────────────────────────────────────────────────────
@@ -477,6 +484,46 @@
   /* A hairline that reads on both themes without drawing the eye. */
   .rule {
     border-color: color-mix(in oklab, var(--border) 70%, transparent);
+  }
+
+  /* ── Theme toggle ─────────────────────────────────────────────────────
+     A two-up segmented pill in the header, and the one control in the app
+     whose selected state is painted by CSS rather than by React.
+
+     That is not a stylistic preference. Which half is lit is decided by
+     `data-theme`, and `data-theme` is set by a blocking script before React
+     exists; a component that tracked it in state would have to guess on the
+     server, render the wrong half, and correct itself on mount, which is the
+     flash the boot script was written to remove, reintroduced 32 pixels wide.
+     Reading the attribute in the selector instead means the pill is correct on
+     the first paint of every navigation, including the very first one.
+
+     The buttons still carry `aria-pressed` from React, because an attribute on
+     <html> is not something assistive technology can be pointed at. */
+  .theme-choice {
+    display: grid;
+    place-items: center;
+    /* 28px. Over the 24px WCAG 2.2 target floor with enough room that a
+       change to the header's height cannot quietly drop it under. */
+    inline-size: 1.75rem;
+    block-size: 1.75rem;
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+  .theme-choice:hover {
+    color: var(--foreground);
+  }
+  /* Ink and page, swapped. It reads as a physical switch on both themes
+     without needing a second colour, and it is the one place in the product
+     where the brand blue would be wrong: this control is about the page, not
+     about the product. Contrast lands at 19:1 light and 18:1 dark. */
+  :root[data-theme="light"] .theme-choice[data-theme-value="light"],
+  :root[data-theme="dark"] .theme-choice[data-theme-value="dark"] {
+    background: var(--foreground);
+    color: var(--background);
   }
 }
 

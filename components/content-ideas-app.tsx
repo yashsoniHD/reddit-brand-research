@@ -10,6 +10,7 @@ import { HistoryDrawer } from "@/components/history-drawer";
 import { QueryForm, type FormValues } from "@/components/query-form";
 import { ReportView } from "@/components/report/report-view";
 import { RunProgress } from "@/components/run-progress";
+import { ThemeToggle } from "@/components/theme-toggle";
 import {
   cancelRun,
   createRun,
@@ -667,10 +668,15 @@ export function ContentIdeasApp() {
         // than as whatever the last copy of this header happened to carry.
         pad="roomy"
         action={
-          /* Two quiet controls sharing the header's right-hand slot. The account
-             affordance sits after the history button and behind a hairline, so
-             the primary action in the header stays the one about reports. */
+          /* Three quiet controls sharing the header's right-hand slot, in two
+             groups. The hairline separates what the page is painted in from
+             what the page is about: the theme toggle is a property of this
+             browser, the reports button and the account are the product, and
+             putting the rule between them is what stops the row reading as
+             three unrelated icons in a queue. */
           <div className="flex items-center gap-1">
+            <ThemeToggle />
+            <span aria-hidden="true" className="rule mx-1.5 h-5 w-px bg-border" />
             <button
               type="button"
               onClick={() => {
@@ -686,7 +692,6 @@ export function ContentIdeasApp() {
                 </span>
               ) : null}
             </button>
-            <span aria-hidden="true" className="rule h-5 w-px bg-border" />
             <AccountMenu />
           </div>
         }

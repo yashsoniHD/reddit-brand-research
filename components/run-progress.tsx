@@ -1,7 +1,7 @@
 "use client";
 
 import { Check } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 /**
  * Staged progress, fed by the real NDJSON progress lines.
@@ -94,39 +94,11 @@ function highestStage(messages: string[]): number {
  */
 const FOUND = /^found\s+(r\/[\w-]+(?:\s*,\s*r\/[\w-]+)*)/i;
 
-/**
- * Minutes and seconds since this component mounted, ticking every second.
- *
- * A search-mode run can sit on the same heartbeat line for ten seconds at a
- * time (the API resends the last message so a proxy does not treat the
- * connection as idle), and a repeated line with nothing else moving reads as
- * stuck. The clock is the tell that the run is still alive between lines.
- */
-function useElapsedLabel(): string {
-  const startedAt = useRef<number | null>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-
-  // Reading the clock is a side effect, so it happens here rather than as a
-  // render-time useRef initialiser: an effect is the documented place for an
-  // impure call like Date.now() to live.
-  useEffect(() => {
-    startedAt.current = Date.now();
-    const id = setInterval(() => {
-      // Clamped at zero: Date.now() is a wall clock, not a monotonic one, and can
-      // step backward (an NTP correction, a manual clock change). Without the
-      // clamp that renders as a negative elapsed time, which prints as something
-      // like "-1:-5" and reads as far more broken than a clock that briefly
-      // stalls at 0:00 instead.
-      const rawElapsed = Date.now() - (startedAt.current ?? Date.now());
-      setElapsedSeconds(Math.max(0, Math.round(rawElapsed / 1000)));
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const minutes = Math.floor(elapsedSeconds / 60);
-  const seconds = elapsedSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
+/* There used to be an elapsed clock beside the step count here, on the
+   argument that a search-mode run can sit on the same heartbeat line for ten
+   seconds and needed something visibly moving. It is gone: the live dot, the
+   progress bar and the stage log already carry that, and a clock counting up
+   through a three-minute wait measures the wait rather than the work. */
 
 function communitiesFrom(messages: string[]): string[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -145,7 +117,6 @@ export function RunProgress({ messages }: { messages: string[] }) {
   const latest = messages[messages.length - 1] ?? "Starting…";
   const current = highestStage(messages);
   const communities = communitiesFrom(messages);
-  const elapsed = useElapsedLabel();
   const logRef = useRef<HTMLUListElement>(null);
 
   // The log is a tail, so it should behave like one: the newest line sits at the
@@ -178,7 +149,7 @@ export function RunProgress({ messages }: { messages: string[] }) {
           </span>
         </span>
         <span className="num text-xs text-muted-foreground">
-          Step {current + 1} of {STAGES.length} · {elapsed}
+          Step {current + 1} of {STAGES.length}
         </span>
       </div>
 

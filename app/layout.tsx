@@ -1,5 +1,7 @@
-import type { Metadata, Viewport } from "next";
+import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+
+import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 
 import "./globals.css";
 
@@ -78,30 +80,38 @@ export const metadata: Metadata = {
   },
 };
 
-export const viewport: Viewport = {
-  /**
-   * Both themes are real designs, so the browser chrome should follow suit.
-   *
-   * These MUST track `--background` in globals.css. They cannot read the CSS
-   * variable (this is a serialised meta tag, evaluated before any stylesheet),
-   * so they are the one place the palette is duplicated by hand. The light value
-   * was left on the old warm #f7f7f5 when the ramp went cool, which showed up as
-   * a seam between the mobile address bar and the top of the page.
-   */
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f7f8fa" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b0b0c" },
-  ],
-};
+/* Both themes are real designs, so the browser chrome should follow suit, and
+   `theme-color` is how that is said. It used to live here as a `viewport`
+   export, which writes one tag per media query. That stopped being able to
+   tell the truth the moment the theme became a choice: a media query cannot
+   know the reader picked light on a dark machine, so the address bar would
+   stay black above a white page. The tag is written by the boot script now,
+   from whatever was actually resolved, and updated by the toggle. */
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
+    /* suppressHydrationWarning because the boot script below writes
+       `data-theme` onto this element before React sees it, so the server's
+       markup and the browser's disagree by exactly that attribute, by design.
+       It suppresses the warning for this element's own attributes only, not
+       for the tree underneath it. */
     <html
       lang="en"
+      suppressHydrationWarning
       className={`${inter.variable} h-full antialiased`}
     >
+      <head>
+        {/* In <head>, ahead of the stylesheet and every byte of <body>: this
+            has to have run before the first pixel or the reader watches the
+            page repaint out from under them. dangerouslySetInnerHTML is the
+            only way to emit an inline script from JSX, and the content is a
+            module-level constant with no interpolated input. The production
+            CSP already allows 'unsafe-inline' for script-src, which the RSC
+            payload requires anyway, so this needs no policy change. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
+      </head>
       <body className="flex min-h-full flex-col">{children}</body>
     </html>
   );

@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { ReportView } from "@/components/report/report-view";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { fetchReport } from "@/lib/api";
 import type { Bundle } from "@/lib/types";
 
@@ -32,12 +33,20 @@ function Shell({ children }: { children: React.ReactNode }) {
       // This page is not home, so the wordmark links back to it.
       linkHome
       action={
-        <Link
-          href="/"
-          className="flex h-8 items-center rounded-lg border border-transparent px-3 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground"
-        >
-          Run your own
-        </Link>
+        /* The toggle is chrome, not a feature of the landing page, so it is
+           here too and in the same slot: a shared report is the page most
+           likely to be opened by somebody who has never seen this app, and
+           the theme is the one control that should not require an account. */
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
+          <span aria-hidden="true" className="rule mx-1.5 h-5 w-px bg-border" />
+          <Link
+            href="/"
+            className="flex h-8 items-center rounded-lg border border-transparent px-3 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground"
+          >
+            Run your own
+          </Link>
+        </div>
       }
     >
       {/* AppShell's <main> is a plain block: the rhythm inside the column is
