@@ -4,3 +4,9 @@ python-dotenv==1.2.1
 fastapi==0.128.8
 uvicorn==0.39.0
 psycopg[binary]==3.2.13
+# The API verifies Supabase access tokens itself (see api/index.py): in
+# production vercel.json routes /api/* straight to the Python function, so
+# nothing in Next.js is in front of it. The `crypto` extra is not optional: a
+# Supabase project on asymmetric signing keys issues ES256 tokens, and PyJWT
+# cannot verify those without `cryptography`.
+pyjwt[crypto]==2.13.0

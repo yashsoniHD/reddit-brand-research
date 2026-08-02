@@ -14,6 +14,7 @@ import inspect
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Sequence
 
@@ -59,10 +60,51 @@ MAX_LABEL_QUERY_CHARS = 30
 # and CSV exports, where 300 characters is already more than anyone reads. A real
 # run used to ship a 1.7 MB bundle almost entirely made of post bodies.
 BUNDLE_BODY_CHARS = 300
-# How much of the clock to keep back for classification and synthesis once the
-# fetching is done. Both are single model calls with retries, and a run that
-# spends its last second fetching one more page has nothing to show for it.
-DEADLINE_RESERVE_SECONDS = 60
+# How the 240 seconds the API opens a run for (api.index.REPORT_SOFT_DEADLINE_SECONDS)
+# are divided. Three terms, and they sum to the whole budget rather than to more than
+# it, which is the mistake the previous version of this comment made:
+#
+#   retrieval  80s  = 240 - 110 - 50. Discovery (10 to 15s) and the fetches. This is
+#                     the elastic term on purpose: paging is interruptible, so a
+#                     fetch that wanted 90 seconds gets what is left and the run
+#                     analyses what came back, with a notice naming the communities
+#                     it did not reach. Nothing else here can give like that.
+#   triage     50s  = TRIAGE_ALLOWANCE_SECONDS. The relevance triage plus the one
+#                     brief decomposition it depends on: two parallel waves of
+#                     analysis.TRIAGE_MAX_WORKERS batches, about 25 seconds each.
+#   reserve   110s  = DEADLINE_RESERVE_SECONDS. Classification (30 to 40s on the lite
+#                     tier) then synthesis (45 to 70s with its thinking budget
+#                     capped), so 75 to 110 seconds of work in 110 seconds of clock.
+#
+# The 45 seconds between that 240 and the API's hard stop at 285 are overflow margin,
+# not part of the plan: they absorb a triage wave that was still in flight when its
+# allowance ran out (up to about 25s) and a stage that runs past its own upper bound.
+# Budgeting work into them is what produced the two bugs this arithmetic replaces.
+#
+# 60 was the original reserve and it was too small: a run that fetched right up to it
+# reached `check("synthesis")` with the clock already spent and died on _OUT_OF_TIME
+# with a full sample in hand, which is the worst possible outcome.
+DEADLINE_RESERVE_SECONDS = 110
+# The triage's own protected window, held back on top of the reserve. Fetching stops
+# at `deadline - DEADLINE_RESERVE_SECONDS - TRIAGE_ALLOWANCE_SECONDS`; the triage runs
+# until `deadline - DEADLINE_RESERVE_SECONDS`. Before this existed both shared one
+# soft deadline, so a fetch that ran to the wire left the triage a window of zero
+# seconds: it issued no batches at all, every item fell to the untriaged tier and the
+# sample was chosen by the deterministic fallback, with nothing in the report saying
+# the relevance filter had effectively been switched off. Sized for two waves of
+# analysis.TRIAGE_MAX_WORKERS batches at about 25 seconds a wave, which is what the
+# 800-item pool the batch arithmetic is built around actually costs.
+TRIAGE_ALLOWANCE_SECONDS = 50
+# How many communities a scrape reads at once. Pages within one community stay
+# sequential, because the cursor for the next page comes out of the current one, so
+# this is concurrency across communities and nothing else. Safe here in a way it is
+# not in `search`: a plain paged read of a subreddit draws no rate limiting from the
+# archive (docs/ARCTIC_SHIFT_API.md), while concurrent text queries are refused
+# outright, which is why the search path stays serial. Modest rather than
+# "all of them": discovery.MAX_COMMUNITIES is 8, and reading 4 at a time takes the
+# longest stage in a run from 8 fetches end to end down to 2 waves without turning
+# one report into an 8-way burst against a volunteer-run archive.
+GATHER_MAX_WORKERS = 4
 # What a phrase-filtered pool has to reach before the report is built from the
 # matches alone. Deliberately the threshold the product already owns rather than
 # a new number: LOW_DATA_THRESHOLD is where the report starts telling the reader
@@ -517,6 +559,33 @@ def _phrase_pool_is_enough(n_posts: int, n_items: int) -> bool:
     return n_posts >= PHRASE_MIN_POSTS and n_items >= PHRASE_MIN_ITEMS
 
 
+def _on_topic_count(items: Sequence[dict], phrases: Sequence[str]) -> int:
+    """How many of these items something actually vouched for as on topic.
+
+    With no filter active every item counts: the request that returned them was the
+    only claim on offer and nothing narrower was asked for.
+
+    With a filter active, only the phrase matches count, and this is the whole point
+    of the function. Comments come back from the archive unfiltered by construction:
+    comment search rejects `body=` at subreddit scope, so `reddit_data.fetch_comments`
+    stops asking and stamps `phrase_match` client-side instead (see
+    docs/ARCTIC_SHIFT_API.md). A community's week is hundreds of replies about
+    everything it talks about, so counting all of them made every pool look sufficient
+    no matter how little of it mentioned the reader's words.
+
+    Posts are the other way round and are counted in full by their caller: a filtered
+    scrape sends the phrase to the archive as a prefilter and a search sends the terms
+    as a query, so a post is in the pool because it was asked for. That prefilter is
+    best effort (`fetch_posts` drops the text params if the archive rejects them), so
+    "every post is on topic" is an approximation rather than a guarantee, which is why
+    the tier-1 gate above it still counts matched posts only and this is the gate for
+    the tier below that.
+    """
+    if not phrases:
+        return len(items or [])
+    return sum(1 for item in items or [] if (item or {}).get("phrase_match"))
+
+
 def _requirement_list(requirements: Sequence[dict]) -> str:
     """The brief's own constraint sentences, run together for the middle of a notice."""
     texts = [
@@ -654,8 +723,10 @@ def run_report(
     RunCancelled, which carries no message because nobody is left to read one. A
     passed `deadline` (an absolute time.monotonic() value) raises RunError with a
     sentence the user can act on. Before that, the last DEADLINE_RESERVE_SECONDS
-    are held back: once the clock is inside them, no new community is fetched and
-    no further page is requested, and the run goes on to analyse what it has.
+    plus TRIAGE_ALLOWANCE_SECONDS are held back: once the clock is inside them, no
+    new community is fetched and no further page is requested, and the run goes on
+    to select, classify and synthesise what it has. The two are separate windows on
+    purpose, because the triage has to survive a fetch that ran long.
     """
     say = progress or _noop
     discover = discover or discovery.discover
@@ -707,24 +778,30 @@ def run_report(
             logger.warning("run out of time at %s", stage)
             raise RunError(_OUT_OF_TIME)
 
-    def fetching_time_left() -> bool:
-        """False once the clock is inside the reserve kept for the model calls."""
-        if deadline is None:
-            return True
-        return time.monotonic() < deadline - DEADLINE_RESERVE_SECONDS
-
-    # The deadline handed down to discovery and to the fetchers is the reserved one,
-    # not the hard one: they should stop early enough to leave the analysis its time.
+    # Two derived deadlines, because retrieval and the selection triage cannot share
+    # one: the triage is the only stage whose window a long fetch could take to zero,
+    # and a run that quietly loses its relevance filter is worse than one that reads
+    # one community fewer. `fetch_deadline` is what discovery and the fetchers get;
+    # `soft_deadline` is where the triage itself stops issuing calls.
     soft_deadline = None if deadline is None else deadline - DEADLINE_RESERVE_SECONDS
+    fetch_deadline = (
+        None if soft_deadline is None else soft_deadline - TRIAGE_ALLOWANCE_SECONDS
+    )
+
+    def fetching_time_left() -> bool:
+        """False once the clock is inside the triage allowance and the reserve."""
+        if fetch_deadline is None:
+            return True
+        return time.monotonic() < fetch_deadline
 
     check("start")
     if subreddits:
         say("Checking the communities you chose…")
-        found_communities = _call(manual, subreddits, deadline=soft_deadline)
+        found_communities = _call(manual, subreddits, deadline=fetch_deadline)
         discovery_mode = "manual"
     else:
         say("Finding communities talking about this…")
-        found_communities = _call(discover, model_query, profile, deadline=soft_deadline)
+        found_communities = _call(discover, model_query, profile, deadline=fetch_deadline)
         discovery_mode = "model"
 
     communities = [
@@ -752,11 +829,14 @@ def run_report(
         changes nothing else about the shape of the answer: the fetchers stamp
         every item with `phrase_match` and still return all of them, so the tier
         ladder can fall back to the pool that is already in memory.
+
+        Communities are read GATHER_MAX_WORKERS at a time. Every community's own
+        pages stay strictly sequential inside the fetchers, because the cursor for
+        the next page comes out of the current one; the concurrency is across
+        communities and nowhere else. The answer is assembled in `names` order
+        whatever order the reads land in, so the pool, the notices and `used` read
+        the same as they always did.
         """
-        got_posts: List[dict] = []
-        got_comments: List[dict] = []
-        got_used: List[str] = []
-        got_notices: List[str] = []
         # Both the progress lines and the empty-pool notice have to say what was
         # being looked for. With a filter active, "r/x had no posts in the last 30
         # days" is a false statement: the community had posts, none of them said
@@ -766,65 +846,129 @@ def run_report(
             if phrases_for_fetch
             else ""
         )
+        # Several communities report progress at once now. `say` is the caller's
+        # callable: the API's is a queue put and safe on its own, but a caller that
+        # appends to a list or writes a terminal line is not obliged to be, so the
+        # emit is serialised here rather than assumed to be safe.
+        say_lock = threading.Lock()
 
-        for name in names:
+        def announce(message: str) -> None:
+            with say_lock:
+                say(message)
+
+        def read_one(name: str, first: bool):
+            """One community: (name, posts, comments, notices, state).
+
+            `state` is "read", "empty" (nothing usable came back, including a failure
+            that produced its own notice) or "skipped" (the clock ran out before this
+            one started). The caller turns those into the pool and the notices.
+
+            `first` is the head of `names`, which is read whatever the clock says:
+            stopping before anything at all has been read produces no report, which
+            is worse than one fetch that overran. It is the head of the list rather
+            than "the first one to find something", which is what the serial version
+            could ask, because several reads start at the same instant and none of
+            them can know yet whether another is about to succeed. The cost is one
+            corner: a run that is already inside the reserve when its first community
+            turns out to be unreadable now stops there instead of working down the
+            list. Reading a whole list of communities from inside the reserve is the
+            behaviour that produced _OUT_OF_TIME with a sample in hand.
+            """
             # Discovery already established these exist, so there is nothing for a
-            # separate existence check to add; a name it could not check (checked=False)
-            # is caught by the fetch errors below.
+            # separate existence check to add; a name it could not check
+            # (checked=False) is caught by the fetch errors below.
+            #
             # The reserve is what keeps a run out of the hard deadline: once the clock
-            # is inside it, the remaining communities become a notice and the run goes
-            # on to analyse what it has. Passing the hard deadline anyway means one
-            # community's fetch overran by more than the whole reserve, and there is no
-            # longer time to classify or synthesise, so `check` ends the run there.
+            # is inside it, the communities that have not started become a notice and
+            # the run goes on to analyse what it has. The check is here, in the worker,
+            # rather than at submission time, because a queued community can wait
+            # behind the wave in front of it for longer than the run has left.
+            # Passing the hard deadline anyway means one community's fetch overran by
+            # more than the whole reserve, and there is no longer time to classify or
+            # synthesise, so `check` ends the run instead.
             check("fetch")
-            if got_used and not fetching_time_left():
-                got_notices.append(
-                    "We ran out of time before reading r/{}, so this report is built "
-                    "from the communities above.".format(name)
-                )
+            if not first and not fetching_time_left():
                 logger.warning("skipping r/%s: inside the analysis reserve", name)
-                break
+                return name, [], [], [], "skipped"
 
-            found: List[dict] = []
-            found_comments: List[dict] = []
+            notices_here: List[str] = []
             try:
-                say("Fetching posts{} from r/{}…".format(mention, name))
+                announce("Fetching posts{} from r/{}…".format(mention, name))
                 found = _call(
                     fetch_posts, name, days,
-                    deadline=soft_deadline, phrases=phrases_for_fetch or None,
+                    deadline=fetch_deadline, phrases=phrases_for_fetch or None,
                 )
-                say("Fetching posts{} from r/{}… ({} so far)".format(mention, name, len(found)))
+                announce(
+                    "Fetching posts{} from r/{}… ({} so far)".format(mention, name, len(found))
+                )
             except (ValueError, RuntimeError) as exc:
-                got_notices.append("r/{} was skipped: {}".format(name, _lowercase_first(exc)))
-                continue
+                return name, [], [], [
+                    "r/{} was skipped: {}".format(name, _lowercase_first(exc))
+                ], "empty"
 
             if not found:
-                got_notices.append(
+                return name, [], [], [
                     "r/{} had no posts{} in the last {} days, so it was left out.".format(
                         name, mention, days
                     )
-                )
-                continue
+                ], "empty"
 
+            found_comments: List[dict] = []
             try:
-                say("Fetching comments{} from r/{}…".format(mention, name))
+                announce("Fetching comments{} from r/{}…".format(mention, name))
                 found_comments = _call(
                     fetch_comments, name, days,
-                    deadline=soft_deadline, phrases=phrases_for_fetch or None,
+                    deadline=fetch_deadline, phrases=phrases_for_fetch or None,
                 )
             except (ValueError, RuntimeError) as exc:
                 # Comments are supporting evidence. Throwing away a community's posts
                 # because its comments failed loses the part of the fetch that worked.
                 logger.warning("comments failed for r/%s, keeping its posts: %s", name, exc)
-                got_notices.append(
+                notices_here.append(
                     "We could read r/{}'s posts but not its comments, so its replies are "
                     "missing from this report.".format(name)
                 )
                 found_comments = []
 
+            return name, found, found_comments, notices_here, "read"
+
+        first_flags = [index == 0 for index in range(len(names))]
+        workers = min(GATHER_MAX_WORKERS, len(names))
+        if workers > 1:
+            logger.info("reading %s communities, %s at a time", len(names), workers)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gather") as pool:
+                outcomes = list(pool.map(read_one, names, first_flags))
+        else:
+            # One community needs no pool, and keeping this path means a single
+            # community run has exactly the stack it always had.
+            outcomes = [read_one(name, first) for name, first in zip(names, first_flags)]
+
+        got_posts: List[dict] = []
+        got_comments: List[dict] = []
+        got_used: List[str] = []
+        got_notices: List[str] = []
+        skipped: List[str] = []
+        for name, found, found_comments, notices_here, state in outcomes:
+            got_notices.extend(notices_here)
+            if state == "skipped":
+                skipped.append(name)
+                continue
+            if state != "read":
+                continue
             got_posts.extend(found)
             got_comments.extend(found_comments)
             got_used.append(name)
+
+        if skipped:
+            # One notice for all of them rather than one each: the reader needs to
+            # know which communities are missing from the report, not to read the
+            # same sentence four times.
+            got_notices.append(
+                "We ran out of time before reading {}, so this report is built from "
+                "the communities above.".format(
+                    analysis.join_labels(["r/{}".format(name) for name in skipped])
+                )
+            )
 
         return got_posts, got_comments, got_used, got_notices
 
@@ -880,7 +1024,7 @@ def run_report(
             try:
                 found = _call(
                     search_posts, name, terms,
-                    deadline=soft_deadline, phrases=active or None,
+                    deadline=fetch_deadline, phrases=active or None,
                 )
             except (ValueError, RuntimeError) as exc:
                 got_notices.append("r/{} was skipped: {}".format(name, _lowercase_first(exc)))
@@ -914,7 +1058,7 @@ def run_report(
                     got_comments = _call(
                         fetch_comments_for_posts,
                         [post["id"] for post in wanted],
-                        deadline=soft_deadline, phrases=active or None,
+                        deadline=fetch_deadline, phrases=active or None,
                     )
                 except (ValueError, RuntimeError) as exc:
                     # Comments are supporting evidence, exactly as in `gather`.
@@ -950,8 +1094,13 @@ def run_report(
     else:
         retrieval_mode = "search"
         posts, comments, used, notices = search()
-        if not _phrase_pool_is_enough(len(posts), len(posts) + len(comments)) \
-                and fetching_time_left():
+        # Replies are counted only when they mention the reader's words, because a
+        # thread's replies come back whole whatever the search asked for: 3 matching
+        # threads with 200 replies between them is a thin search that used to look
+        # like a full pool, and the scrape fallback below never fired for it.
+        if not _phrase_pool_is_enough(
+            len(posts), len(posts) + _on_topic_count(comments, active)
+        ) and fetching_time_left():
             # The search was too narrow, or every term missed. Read the
             # communities instead, which is cheap and parallel-safe, and keep
             # whichever pool is actually bigger.
@@ -997,19 +1146,28 @@ def run_report(
             filter_mode = "exact"
             posts = exact_posts
             comments = exact_comments
-        elif _phrase_pool_is_enough(len(posts), len(posts) + len(comments)):
+        elif _phrase_pool_is_enough(len(posts), len(posts) + matched_comments):
             # Tier 2, loose: too few exact matches, so keep the pool that is
             # already in memory. This costs zero extra requests and zero deadline,
-            # and the pool is still what the archive matched on those same words,
-            # so it stays on topic. This is the common case, and not re-fetching
-            # here is the reason the run survives its time budget.
+            # and the posts in it are still what the archive was asked for on those
+            # same words, so it stays on topic. This is the common case, and not
+            # re-fetching here is the reason the run survives its time budget.
+            #
+            # The replies are the exception and are counted as matches only: they
+            # arrive unfiltered (see _on_topic_count), so counting all of them let a
+            # community's whole week of chatter stand in for evidence about the
+            # reader's phrase, and tier 3 below stopped firing when it should have.
             filter_mode = "loose"
             notices.append(
-                "Only {} of the {} threads and replies we read actually mentioned {}, "
-                "which is too few to build a report from, so this report uses "
+                # Two denominators rather than one sum: the threads were filtered at
+                # the archive and the replies could not be, so lumping them together
+                # hid the fact that the replies are the bulk of the pool.
+                "Only {} of the {} threads and {} replies we read actually mentioned "
+                "{}, which is too few to build a report from, so this report uses "
                 "everything we read from those communities.".format(
                     matched_posts + matched_comments,
-                    posts_scanned + comments_scanned,
+                    posts_scanned,
+                    comments_scanned,
                     _phrase_list(active),
                 )
             )

@@ -26,7 +26,6 @@ import inspect
 import json
 import logging
 import os
-import queue
 import re
 import secrets
 import sys
@@ -35,7 +34,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -64,9 +63,10 @@ if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON") and not os.environ.get(
     _creds_file.close()
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _creds_file.name
 
-from fastapi import FastAPI, Request  # noqa: E402
+import jwt  # noqa: E402
+from fastapi import Depends, FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import JSONResponse, Response, StreamingResponse  # noqa: E402
+from fastapi.responses import JSONResponse, Response  # noqa: E402
 
 import analysis  # noqa: E402
 import db  # noqa: E402
@@ -135,6 +135,15 @@ REPORT_ID_BYTES = 12
 # older or newer token length still resolve.
 REPORT_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{8,64}\Z")
 REPORT_NOT_FOUND_MESSAGE = "This report link does not exist or was removed."
+# A run is private to whoever started it (unlike a shareable report), so a run
+# that belongs to someone else is answered exactly like one that does not exist:
+# one 404 and one sentence, with nothing to tell the two apart.
+RUN_NOT_FOUND_MESSAGE = "This run does not exist or is no longer available."
+# The one sentence the worker route returns for any authentication failure:
+# a missing bearer, a wrong secret, or a deployment with no CRON_SECRET at all.
+# Collapsed like the 401 sentence everywhere else so a caller probing the route
+# learns nothing about which of the three tripped.
+CRON_AUTH_FAILED_MESSAGE = "This endpoint is not available."
 # The same cap db.upsert_draft applies, stated here so the boundary refuses an
 # oversized post with a sentence instead of silently storing a truncated one.
 DRAFT_POST_MAX_CHARS = db.MAX_POST_CHARS
@@ -142,21 +151,36 @@ DRAFT_POST_MAX_CHARS = db.MAX_POST_CHARS
 # produces, so it is rejected before it can reach the database.
 MAX_IDEA_INDEX = 999
 
-# If the worker thread has not posted a progress update in this many seconds
-# (a long Vertex or Arctic Shift call), the generator re-sends the last message
-# instead of waiting silently, so a proxy in front of the function does not
-# treat the connection as idle and close it.
-HEARTBEAT_SECONDS = 10
-
-# A soft deadline handed to pipeline.run_report (once it accepts one) so the
-# engine itself can start winding down, and a hard stop in the drain loop
-# below that always fires before Vercel's 300s function limit, so the stream
-# closes cleanly instead of being killed mid-response.
+# A soft deadline handed to pipeline.run_report so the engine can start winding
+# down on its own well before Vercel's 300s function limit ends the worker
+# invocation this run executes inside. There is no hard stop in a drain loop any
+# more: a run is one worker invocation, not a stream held open to a browser, so
+# the platform's own maxDuration is the outer bound and this is the inner one the
+# engine honours cleanly.
 REPORT_SOFT_DEADLINE_SECONDS = 240
-REPORT_HARD_STOP_SECONDS = 285
-REPORT_TIMEOUT_MESSAGE = (
-    "The run took too long and was stopped. Try fewer communities or a shorter time range."
-)
+
+# How the worker keeps the run row honest while pipeline.run_report is blocking.
+# Progress strings accumulate in memory and are flushed to the row at most this
+# often (and always once more on the terminal write), which also refreshes
+# heartbeat_at so claim_next_run's stale-heartbeat reaper does not re-queue a
+# run that is simply mid-stage on a long model call.
+PROGRESS_FLUSH_SECONDS = 2.0
+# How often the cancellation poller asks the database whether the owner has
+# pressed Cancel. The engine only stops at stage boundaries, so polling faster
+# than a stage takes buys nothing but round trips.
+CANCEL_POLL_SECONDS = 3.0
+
+# A completed run's terminal write must survive a momentary database blip. The
+# pipeline has already run by the time set_run_result is called, so if that one
+# write is lost the row stays `running`, its heartbeat goes stale, and the reaper
+# re-executes a run that actually finished, paying for the whole pipeline again.
+# So the terminal write is retried a few times before it is given up on, and
+# giving up logs loudly rather than raising: the worker route then still returns a
+# plain 200 (the run did complete), never a 500 that reads to pg_net as "retry
+# me". Progress writes stay best-effort and swallowed as before; only the one
+# write that records the outcome is worth retrying.
+TERMINAL_WRITE_ATTEMPTS = 3
+TERMINAL_WRITE_RETRY_SECONDS = 0.5
 
 # The same sentence app.py shows for an unexpected exception, so the API and
 # the rest of the engine never disagree about the generic case.
@@ -177,15 +201,17 @@ EXPORTERS = {
 }
 
 
-def _ndjson_line(payload: dict) -> bytes:
-    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+def _invalid_response(errors) -> "JSONResponse":
+    """The validation-failure body, as plain JSON rather than an NDJSON line.
 
-
-def _stream_invalid(errors) -> "StreamingResponse":
-    async def _single():
-        yield _ndjson_line({"type": "invalid", "errors": errors})
-
-    return StreamingResponse(_single(), media_type="application/x-ndjson")
+    Same shape the old streaming terminal line carried, {"type": "invalid",
+    "errors": [...]}, so the frontend reads `type` and `errors` exactly as it did
+    when this was the first (and only) line of a stream. A 200 for the same reason
+    the stream was a 200: a rejected brief is a normal answer to a well-formed
+    request, not a transport error, and the frontend decides what to show off the
+    body, not the status.
+    """
+    return JSONResponse({"type": "invalid", "errors": errors})
 
 
 def _accepts_kwarg(func, name: str) -> bool:
@@ -234,6 +260,362 @@ def _reject_cross_origin(request: Request) -> Optional[JSONResponse]:
     return None
 
 
+# ── Authentication ──────────────────────────────────────────────────────────────
+# Every route in this file requires a Supabase access token, and this file is the
+# only thing that can require it. In production vercel.json rewrites /api/:path*
+# straight to this function, so Next.js and proxy.ts never see an API request at
+# all: a check that lived only in the proxy would be no check anywhere.
+#
+# Only asymmetric signing is accepted. This project sits on Supabase's signing
+# keys, which publish the public half of an ES256 keypair as a JWKS document, so
+# every token is verified against a fetched public key and nothing else. The
+# legacy HS256 path (the shared SUPABASE_JWT_SECRET) is deliberately gone: a
+# secret that verifies a token can also mint one, and keeping it would leave a
+# second forging key in the deployment for no benefit here. The token's header
+# still only ever names one algorithm, it must be in the accepted set below, and
+# `decode` is pinned to that single value, so rewriting `alg` (the classic
+# confusion attack, or `alg: none`) cannot pick a weaker check: anything that is
+# not an accepted asymmetric algorithm is refused before a key is ever chosen.
+
+# What a verified token has to say about itself. `aud` is the fixed value the
+# Supabase auth server stamps on a signed-in user's token, and `iss` is that
+# project's auth origin, so a valid token minted by a different Supabase project
+# is rejected here rather than trusted for being well-formed.
+JWT_AUDIENCE = "authenticated"
+JWKS_PATH = "/auth/v1/.well-known/jwks.json"
+# The one set of algorithms a token may be signed with, as a config constant so
+# there is a single place that decides it. Asymmetric only on purpose (see the
+# note above): HS256 and the shared secret are not here, so a token is only ever
+# checked against a public key fetched from the project's JWKS.
+ACCEPTED_ALGORITHMS = frozenset({"ES256", "RS256"})
+# How long a fetched JWKS document is reused before it is fetched again. Signing
+# keys rotate rarely, and the alternative (a fetch per request) would put a
+# network round trip on the critical path of every single API call.
+JWKS_LIFESPAN_SECONDS = 3600
+
+AUTH_REQUIRED_MESSAGE = "Please sign in and try again."
+# The one sentence every 401 returns. A server-side problem (no SUPABASE_URL, a
+# JWKS document that could not be fetched) is still answered with exactly this,
+# not a distinct "sign-in unavailable" sentence: a client that could tell a
+# misconfigured deployment apart from a stale token would be reading the
+# server's configuration state off the error, so the difference is collapsed
+# here and the real reason goes only to the log.
+
+# The account is real and the token is valid, but this principal is not permitted
+# (anonymous, the wrong provider, or off the email allowlist). A 403 rather than
+# a 401 because signing in again cannot fix it, and one sentence for every reason
+# so it does not become an oracle for which rule was tripped.
+NOT_PERMITTED_MESSAGE = "This account is not allowed here. Please sign in with an approved Google account."
+
+
+class AuthenticatedUser(NamedTuple):
+    """Who a verified token says is calling.
+
+    `email` is "" when the token carries no email claim, which is possible and
+    is not an error: `user_id` (the `sub` claim) is the identity, the email is
+    only ever something to show the reader.
+    """
+
+    user_id: str
+    email: str
+
+
+class Unauthorized(Exception):
+    """No usable token on this request.
+
+    Carries the one sentence the caller is allowed to see. "expired", "signed by
+    the wrong key" and "not a JWT at all" deliberately collapse into the same
+    answer: telling them apart would help a caller probing for the shape of a
+    valid token and helps a signed-out reader not at all.
+    """
+
+    def __init__(self, message: str = AUTH_REQUIRED_MESSAGE):
+        super().__init__(message)
+
+
+class Forbidden(Exception):
+    """A verified token whose principal is not allowed to use this app.
+
+    Separate from Unauthorized because the answer is different: the signature
+    checked out and the session is real, so re-authenticating changes nothing.
+    Anonymous sign-ins, a provider other than the allowed ones, and an email off
+    the allowlist all raise this, and all carry the same sentence so it cannot be
+    used to discover which rule refused the caller.
+    """
+
+    def __init__(self, message: str = NOT_PERMITTED_MESSAGE):
+        super().__init__(message)
+
+
+@app.exception_handler(Unauthorized)
+async def _unauthorized_handler(request: Request, exc: Unauthorized) -> JSONResponse:
+    """One shape for every rejection: {"message": "..."} with a 401.
+
+    Not FastAPI's own HTTPException, whose body is {"detail": ...}: every other
+    error this API produces says `message`, and the frontend reads that one key.
+    `no-store` because a 401 must never be cached and replayed at a reader who
+    has since signed in.
+    """
+    return JSONResponse(
+        {"message": str(exc)},
+        status_code=401,
+        headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
+    )
+
+
+@app.exception_handler(Forbidden)
+async def _forbidden_handler(request: Request, exc: Forbidden) -> JSONResponse:
+    """The same body shape as a 401, with a 403 and no WWW-Authenticate.
+
+    403 rather than 401 says "authenticated, but not allowed": the browser must
+    not respond by prompting for credentials again, so the challenge header the
+    401 carries is deliberately absent. `no-store` for the same reason a 401 has
+    it: a cached refusal must never outlive a change to who is permitted.
+    """
+    return JSONResponse(
+        {"message": str(exc)},
+        status_code=403,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# (base url, client). One PyJWKClient per process, built on first use and reused
+# for the life of the instance, so the JWKS document is fetched once per cold
+# start rather than once per request. Keyed on the URL it was built for so a
+# changed SUPABASE_URL (a test, a rebound environment) cannot be served by a
+# client still pointing at the old project.
+_jwks_client: Optional[tuple] = None
+_jwks_client_lock = threading.Lock()
+
+
+def _supabase_base_url() -> str:
+    """The project's origin, with no trailing slash.
+
+    Read per call rather than at import: this module is imported once per cold
+    start, and a test that rebinds the environment should be describing the
+    world this function sees.
+    """
+    raw = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or ""
+    return raw.strip().rstrip("/")
+
+
+def _jwks_client_for(base_url: str) -> "jwt.PyJWKClient":
+    global _jwks_client
+    with _jwks_client_lock:
+        if _jwks_client is None or _jwks_client[0] != base_url:
+            _jwks_client = (
+                base_url,
+                jwt.PyJWKClient(
+                    base_url + JWKS_PATH,
+                    cache_keys=True,
+                    lifespan=JWKS_LIFESPAN_SECONDS,
+                ),
+            )
+        return _jwks_client[1]
+
+
+# ── Authorization ─────────────────────────────────────────────────────────────
+# Signature verification proves a token was minted by this project; authorization
+# decides whether the person it names may use the app at all. The scope, set by
+# env so it can change without a deploy, is: any Google account. Three env knobs
+# express it, all read at call time so a test or a rebound deployment sees the
+# world it set:
+#
+#   AUTH_ALLOWED_PROVIDERS       comma-separated, DEFAULTS to "google". The
+#                                token's app_metadata.provider must be in the set.
+#                                Email/password self-signup is a hole precisely
+#                                because anyone can open an account, so the
+#                                provider gate is what closes it; widening the set
+#                                later (add "azure", say) is a config change.
+#   AUTH_ALLOWED_EMAILS          comma-separated exact addresses.
+#   AUTH_ALLOWED_EMAIL_DOMAINS   comma-separated domains.
+#
+# The email allowlist is only enforced when at least one of its two knobs is set;
+# with both unset (the shipped default) any authenticated Google address is
+# allowed, which is the decided scope. Anonymous sign-ins and any role other than
+# "authenticated" are always refused, independent of every knob: Supabase gives
+# anonymous users the "authenticated" role too, so is_anonymous is checked
+# directly rather than inferred from the role.
+_DEFAULT_ALLOWED_PROVIDERS = frozenset({"google"})
+
+
+def _split_env_set(name: str) -> frozenset:
+    """A comma-separated env var as a lowercased set, empty when unset."""
+    raw = os.environ.get(name, "")
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _allowed_providers() -> frozenset:
+    """The permitted OAuth providers. Defaults to {"google"} when the knob is
+    unset; an explicitly empty value disables the provider gate."""
+    if os.environ.get("AUTH_ALLOWED_PROVIDERS") is None:
+        return _DEFAULT_ALLOWED_PROVIDERS
+    return _split_env_set("AUTH_ALLOWED_PROVIDERS")
+
+
+def _token_email(claims: dict) -> str:
+    """The token's email, top-level first and then user_metadata, or "".
+
+    Supabase stamps `email` at the top level of an access token; the copy under
+    user_metadata is the fallback for a token shape that omits it. Never an
+    error to have none: the address is only ever a label and an allowlist input.
+    """
+    email = claims.get("email")
+    if isinstance(email, str) and email:
+        return email
+    metadata = claims.get("user_metadata")
+    if isinstance(metadata, dict):
+        nested = metadata.get("email")
+        if isinstance(nested, str):
+            return nested
+    return ""
+
+
+def _token_provider(claims: dict) -> str:
+    """The lowercased app_metadata.provider, or "" when absent."""
+    metadata = claims.get("app_metadata")
+    if isinstance(metadata, dict):
+        provider = metadata.get("provider")
+        if isinstance(provider, str):
+            return provider.strip().lower()
+    return ""
+
+
+def authorization_reason(
+    claims: dict,
+    *,
+    allowed_providers: frozenset,
+    allowed_emails: frozenset,
+    allowed_domains: frozenset,
+) -> Optional[str]:
+    """Pure: None if this token's principal is permitted, else a short reason.
+
+    A non-None result means 403. Kept free of os.environ so it can be unit-tested
+    by handing it claims and allowlists directly; `_authorize_claims` is the thin
+    wrapper that reads the env and turns a reason into a `Forbidden`.
+    """
+    if claims.get("is_anonymous") is True:
+        return "anonymous"
+    if claims.get("role") != "authenticated":
+        return "role"
+    if allowed_providers and _token_provider(claims) not in allowed_providers:
+        return "provider"
+    if allowed_emails or allowed_domains:
+        email = _token_email(claims).lower()
+        domain = email.rpartition("@")[2]
+        if email in allowed_emails:
+            return None
+        if domain and domain in allowed_domains:
+            return None
+        return "email"
+    return None
+
+
+def _authorize_claims(claims: dict) -> None:
+    """Raise Forbidden unless the verified token's principal is permitted."""
+    reason = authorization_reason(
+        claims,
+        allowed_providers=_allowed_providers(),
+        allowed_emails=_split_env_set("AUTH_ALLOWED_EMAILS"),
+        allowed_domains=_split_env_set("AUTH_ALLOWED_EMAIL_DOMAINS"),
+    )
+    if reason is not None:
+        # The reason is for the log, never the client: the 403 body is one fixed
+        # sentence so it cannot be probed to learn which rule refused the caller.
+        logger.info("token refused by authorization: %s", reason)
+        raise Forbidden()
+
+
+def verify_bearer_token(token: str) -> AuthenticatedUser:
+    """Decode and fully verify one Supabase access token, or raise Unauthorized."""
+    base_url = _supabase_base_url()
+    if not base_url:
+        # A server-side misconfiguration, logged as one, but answered with the
+        # same 401 sentence a stale token gets: the caller learns nothing about
+        # the deployment's configuration state (see AUTH_REQUIRED_MESSAGE).
+        logger.error("SUPABASE_URL is not set, so no access token can be verified")
+        raise Unauthorized()
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        raise Unauthorized() from None
+
+    algorithm = header.get("alg")
+    if algorithm not in ACCEPTED_ALGORITHMS:
+        # HS256 (the retired shared secret), `alg: none`, and any unknown value
+        # all land here and are refused before a key is chosen, so no forged
+        # token can steer verification onto a weaker check.
+        raise Unauthorized()
+
+    try:
+        key = _jwks_client_for(base_url).get_signing_key_from_jwt(token).key
+    except jwt.PyJWTError:
+        # A token naming a key this project does not publish. That is a bad
+        # token, not a broken server.
+        raise Unauthorized() from None
+    except Exception:  # noqa: BLE001 - a JWKS fetch is a network call
+        # A network problem reaching the JWKS document is server-side, but the
+        # caller still sees only the one sentence; the real reason goes to the log.
+        logger.exception("could not fetch the Supabase JWKS document")
+        raise Unauthorized() from None
+
+    try:
+        claims = jwt.decode(
+            token,
+            key,
+            # Pinned to the single algorithm the header named, which is already
+            # known to be in ACCEPTED_ALGORITHMS: an asymmetric public key can
+            # never be misused as an HS256 secret here.
+            algorithms=[algorithm],
+            audience=JWT_AUDIENCE,
+            issuer=base_url + "/auth/v1",
+            # `require` rather than trusting the defaults: a token with no `exp`
+            # would otherwise verify and never expire, and one with no `sub` has
+            # no identity to rate-limit or attribute a report to.
+            options={"require": ["exp", "sub"]},
+        )
+    except jwt.PyJWTError:
+        raise Unauthorized() from None
+
+    user_id = claims.get("sub")
+    if not isinstance(user_id, str) or not user_id:
+        raise Unauthorized()
+
+    # Signature and standard claims are good; now authorization. A validly signed
+    # token is not the same as a permitted one: an anonymous sign-in, an
+    # email/password account, or an address off the allowlist all get this far
+    # and are refused here with a 403, not a 401.
+    _authorize_claims(claims)
+
+    return AuthenticatedUser(user_id, _token_email(claims))
+
+
+def authenticate_request(request: Request) -> AuthenticatedUser:
+    """The whole check for one request: find the bearer token, then verify it."""
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise Unauthorized()
+    return verify_bearer_token(token.strip())
+
+
+async def require_user(request: Request) -> AuthenticatedUser:
+    """The dependency every route below carries.
+
+    It reaches `authenticate_request` through the module rather than closing over
+    it, and that is the point rather than a stylistic choice: FastAPI captured
+    *this* function when the routes were declared, so the only way tests can
+    stand in a fake authenticated user for the whole existing suite is if the
+    thing they replace is looked up at call time.
+    """
+    return authenticate_request(request)
+
+
+# Written once and shared, so a new route cannot be added with a subtly
+# different dependency, or with none at all by omission.
+CurrentUser = Depends(require_user)
+
+
 # ── Rate limiting ────────────────────────────────────────────────────────────────
 # A per-instance, in-memory sliding window. This is defense in depth, not the
 # durable fix: it resets whenever the serverless instance recycles and does
@@ -254,6 +636,14 @@ DRAFTS_PER_HOUR = _rate_limit_env("RATE_LIMIT_DRAFTS_PER_HOUR", 30)
 # call every time. It gets its own bucket for exactly that reason: a reader
 # tidying up six posts must never use up their remaining generations.
 DRAFT_SAVES_PER_HOUR = _rate_limit_env("RATE_LIMIT_DRAFT_SAVES_PER_HOUR", 60)
+# The per-user budgets above follow the person, which is right for a normal
+# account but multiplies without bound if one attacker opens N accounts behind a
+# single address: N times the per-user cost, for free. So every per-user budget
+# also has a per-IP ceiling, a higher cap that every account behind one address
+# shares. It is a multiple of the per-user limit rather than an absolute so a
+# deployment only tunes one number; the multiple is the abuse floor, not the
+# normal path, so a handful of colleagues in one office never feel it.
+RATE_LIMIT_IP_CEILING_MULTIPLIER = _rate_limit_env("RATE_LIMIT_IP_CEILING_MULTIPLIER", 5)
 RATE_LIMIT_WINDOW_SECONDS = 3600
 
 _rate_limit_lock = threading.Lock()
@@ -261,29 +651,86 @@ _rate_limit_hits: dict = defaultdict(deque)
 
 
 def _client_ip(request: Request) -> str:
+    """The caller's address, taken so it cannot be spoofed on Vercel.
+
+    Vercel overwrites X-Forwarded-For with the real client address and does not
+    forward a client-supplied one (per Vercel's request-headers docs), so the
+    trustworthy value is the one the platform appended: the RIGHTMOST entry, not
+    the leftmost. Reading the first entry would trust whatever a caller chose to
+    put there and let the per-IP ceiling be evaded by rotating a fake prefix.
+    X-Real-IP (also Vercel-set) is the fallback, then the socket peer for local
+    runs where no proxy header exists at all.
+    """
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+        if parts:
+            return parts[-1]
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
     client = request.client
     return client.host if client else "unknown"
 
 
-def _rate_limited(bucket: str, ip: str, limit: int) -> bool:
-    """True (and records the hit) once `ip` has made `limit` calls to `bucket`
-    within the last hour; otherwise records this call and returns False."""
-    key = "{}:{}".format(bucket, ip)
+def _rate_limit_identity(request: Request, user: Optional[AuthenticatedUser]) -> str:
+    """Which per-user budget this call spends from.
+
+    The signed-in user, so a limit follows the person rather than the network: an
+    office behind one NAT address used to share a single budget between everyone
+    in it, and a caller who wanted a fresh one only had to change address. The IP
+    path stays as the floor for a request with no user attached. Nothing reaches
+    it today, because every route requires a user, and that is exactly why it is
+    kept: it is what an intentionally public route would fall back to, and
+    deleting it would make adding one a rate-limiting hole.
+    """
+    if user is not None and user.user_id:
+        return "user:{}".format(user.user_id)
+    return "ip:{}".format(_client_ip(request))
+
+
+def _ip_ceiling(limit: int) -> int:
+    """The per-IP cap that corresponds to a per-user `limit`."""
+    return max(limit, limit * RATE_LIMIT_IP_CEILING_MULTIPLIER)
+
+
+def _window_count(key: str, now: float) -> int:
+    """Drop this key's hits older than the window and return how many remain.
+    Caller must hold `_rate_limit_lock`."""
+    hits = _rate_limit_hits[key]
+    while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
+        hits.popleft()
+    return len(hits)
+
+
+def _rate_limited(
+    request: Request, user: Optional[AuthenticatedUser], bucket: str, limit: int
+) -> bool:
+    """True once this call would exceed either the per-user budget for `bucket`
+    or the per-IP ceiling that caps every account behind one address.
+
+    Both gates share one sliding window. The call is allowed only when it is
+    under the per-user limit AND under the per-IP ceiling, and it is recorded
+    against both only when allowed, so a call rejected by one gate never fills
+    the other. The ceiling is a distinct gate only for a signed-in caller: a
+    request with no user already spends from its address (see
+    `_rate_limit_identity`), and adding a second address bucket would just limit
+    it twice over.
+    """
+    identity = _rate_limit_identity(request, user)
+    gates = [("{}:{}".format(bucket, identity), limit)]
+    if user is not None and user.user_id:
+        gates.append(("{}:ip:{}".format(bucket, _client_ip(request)), _ip_ceiling(limit)))
     now = time.monotonic()
     with _rate_limit_lock:
-        hits = _rate_limit_hits[key]
-        while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
-            hits.popleft()
-        if len(hits) >= limit:
+        if any(_window_count(key, now) >= cap for key, cap in gates):
             return True
-        hits.append(now)
+        for key, _cap in gates:
+            _rate_limit_hits[key].append(now)
         return False
 
 
-def _save_report(query: str, profile: str, bundle) -> Optional[str]:
+def _save_report(query: str, profile: str, bundle, user_id: Optional[str] = None) -> Optional[str]:
     """Store a finished run and return the id it can be reached at, or None.
 
     Persistence is a bonus on top of a run that already succeeded, never a
@@ -291,12 +738,16 @@ def _save_report(query: str, profile: str, bundle) -> Optional[str]:
     machine without `.env.local`) or simply slow costs the reader a share link
     and nothing else, so every failure here is one warning line and a None.
     The bundle itself is already on its way to the browser either way.
+
+    `user_id` records who ran it. It is only ever attribution: reading a saved
+    report is not restricted to its owner (see `get_saved_report`), because a
+    share link is meant to be shareable with anyone who can sign in.
     """
     if not isinstance(bundle, dict):
         return None
     report_id = secrets.token_urlsafe(REPORT_ID_BYTES)
     try:
-        db.save_report(report_id, query, profile, bundle)
+        db.save_report(report_id, query, profile, bundle, user_id=user_id)
     except db.StorageUnavailable as exc:
         logger.warning("report not saved: %s", exc)
         return None
@@ -306,122 +757,173 @@ def _save_report(query: str, profile: str, bundle) -> Optional[str]:
     return report_id
 
 
-def _run_report_lines(
-    query: str, profile: str, days: int, subreddits, relevance_filter: bool, content_types=None,
-    phrases=None, channels=None,
-):
-    """Run pipeline.run_report in a worker thread, yielding NDJSON lines.
+def _set_run_result_durably(
+    run_id: str,
+    status: str,
+    report_id: Optional[str] = None,
+    error: Optional[str] = None,
+) -> bool:
+    """Write a run's terminal status, retrying a transient database blip.
 
-    run_report is synchronous and, with a live model and Reddit archive, can
-    take minutes, so it cannot run on the event loop. It runs on a plain
-    background thread instead. The thread's progress callback pushes onto a
-    thread-safe queue.Queue; this generator (itself run in a threadpool by
-    Starlette, since it is a plain sync generator) drains that queue and turns
-    each entry into one NDJSON line, ending with exactly one terminal line:
-    a "report" line with the bundle, or an "error" line with a user-ready
-    message.
-
-    A finished run is saved before its terminal line goes out, and the id it
-    was saved under rides on that line as `report_id`, next to the bundle
-    rather than inside it (see `_save_report`). Saving happens here, on the
-    server, rather than in a follow-up call from the browser: the client would
-    have to send the whole multi-megabyte bundle back, and a reader who closed
-    the tab would lose the report entirely.
-
-    A threading.Event is created here and set again in the `finally` below,
-    which runs when this generator is closed early, i.e. when the client
-    disconnects; once run_report accepts a `cancel` argument (guarded by
-    _accepts_kwarg so this works before and after that lands) that is its
-    signal to stop early instead of finishing a run nobody is listening for.
-    A `deadline` is passed the same way, so the engine can start winding down
-    on its own before the hard stop below fires.
+    Unlike a progress flush, the terminal write is not something to lose quietly:
+    if it does not land, the run stays `running` and the stale-heartbeat reaper
+    re-runs a pipeline that already finished. So this retries a bounded number of
+    times with a short sleep, and only when every attempt has failed does it give
+    up - loudly, in the log, and by returning False rather than raising, so the
+    caller (and the worker route above it) treats the run as the completed thing
+    it is instead of surfacing a 500 that would invite yet another execution.
     """
-    updates: "queue.Queue[tuple]" = queue.Queue()
+    for attempt in range(1, TERMINAL_WRITE_ATTEMPTS + 1):
+        try:
+            db.set_run_result(run_id, status, report_id=report_id, error=error)
+            return True
+        except Exception:  # noqa: BLE001 - StorageUnavailable and any surprise alike
+            if attempt >= TERMINAL_WRITE_ATTEMPTS:
+                logger.error(
+                    "could not record terminal status %r for run %s after %d attempts; "
+                    "the run finished but its row may be reaped and retried",
+                    status,
+                    run_id,
+                    TERMINAL_WRITE_ATTEMPTS,
+                )
+                return False
+            time.sleep(TERMINAL_WRITE_RETRY_SECONDS)
+    return False
+
+
+def _execute_run(run: dict) -> None:
+    """Run one claimed row to a terminal state, in the worker invocation.
+
+    The old design ran pipeline.run_report in a background thread and streamed
+    its progress to a browser that had to stay connected; a client disconnect
+    was the cancel signal, and a closed tab killed the run. This is the queued
+    replacement: `run` is a row `claim_next_run` already flipped to `running`,
+    and this function takes it the rest of the way, writing exactly one terminal
+    result (`succeeded`, `failed`, or `cancelled`). Nothing here depends on a
+    client being connected, so a closed tab is a no-op server-side.
+
+    Progress is coalesced rather than streamed: strings accumulate in memory and
+    are flushed to the row at most every PROGRESS_FLUSH_SECONDS (and once more
+    before the terminal write), which doubles as the heartbeat the stale-run
+    reaper reads. Cancellation is a small daemon poller that watches
+    `db.is_cancelling` and sets the same threading.Event the engine honours at
+    stage boundaries, so a Cancel press stops the run between stages and raises
+    RunCancelled. run_report is blocking and can take minutes, which is exactly
+    why this is reached from a plain `def` worker route (run in Starlette's
+    threadpool) and not from the event loop.
+    """
+    run_id = run["id"]
+    user_id = run.get("user_id")
+    query = run.get("query") or ""
+    profile = run.get("profile") or ""
+    inputs = run.get("inputs") or {}
+
     cancel_event = threading.Event()
     deadline = time.monotonic() + REPORT_SOFT_DEADLINE_SECONDS
 
-    def progress(message: str) -> None:
-        updates.put(("progress", message))
+    progress_log: list = []
+    last_flush = {"at": 0.0}
 
-    def worker() -> None:
+    def flush_progress(force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - last_flush["at"] < PROGRESS_FLUSH_SECONDS:
+            return
+        last_flush["at"] = now
+        try:
+            db.update_run_progress(run_id, list(progress_log))
+        except Exception:  # noqa: BLE001 - progress is best effort, never fatal
+            logger.exception("could not flush run progress for %s", run_id)
+
+    def progress(message: str) -> None:
+        progress_log.append(message)
+        flush_progress()
+
+    stop_poll = threading.Event()
+
+    def poll_cancel() -> None:
+        # `wait` rather than `sleep` so the finally below can wake the poller
+        # immediately once the run is done, instead of it sitting out one last
+        # interval. It returns True only when stop_poll is set, which is the
+        # signal to stop watching.
+        while not stop_poll.wait(CANCEL_POLL_SECONDS):
+            try:
+                if db.is_cancelling(run_id):
+                    cancel_event.set()
+                    return
+            except Exception:  # noqa: BLE001 - a failed poll must not kill the run
+                logger.exception("could not poll cancellation for %s", run_id)
+
+    poller = threading.Thread(target=poll_cancel, daemon=True)
+    poller.start()
+
+    try:
         run_kwargs = dict(
-            days=days, subreddits=subreddits, relevance_filter=relevance_filter, progress=progress,
+            days=inputs.get("days"),
+            subreddits=inputs.get("subreddits"),
+            relevance_filter=inputs.get("relevance_filter"),
+            progress=progress,
         )
         if _accepts_kwarg(pipeline.run_report, "content_types"):
-            run_kwargs["content_types"] = list(content_types or [])
+            run_kwargs["content_types"] = list(inputs.get("content_types") or [])
         elif _accepts_kwarg(pipeline.run_report, "content_type"):
             # An engine from before the setting took several values: it can still
             # honour one, and one is what the overwhelming majority of runs pick.
-            run_kwargs["content_type"] = (content_types or [None])[0]
+            run_kwargs["content_type"] = (inputs.get("content_types") or [None])[0]
         if _accepts_kwarg(pipeline.run_report, "channels"):
-            # Where the user publishes. An engine that predates channels runs
-            # channel-neutral, which is exactly what it did before they existed.
-            run_kwargs["channels"] = list(channels or [])
+            run_kwargs["channels"] = list(inputs.get("channels") or [])
         if _accepts_kwarg(pipeline.run_report, "phrases"):
-            # The quoted phrases the validator found in the query. An engine that
-            # predates the keyword filter simply never sees them, and the run it
-            # does instead is the run it would have done before the feature landed.
-            run_kwargs["phrases"] = list(phrases or [])
+            run_kwargs["phrases"] = list(inputs.get("phrases") or [])
         if _accepts_kwarg(pipeline.run_report, "cancel"):
             run_kwargs["cancel"] = cancel_event
         if _accepts_kwarg(pipeline.run_report, "deadline"):
             run_kwargs["deadline"] = deadline
+
         try:
             bundle = pipeline.run_report(query, profile, **run_kwargs)
-            updates.put(("report", bundle))
-        except pipeline.RunCancelled:
-            # Not a failure and not a RunError: the only thing that sets the
-            # cancel event is the `finally` below, which runs when the client
-            # disconnects. Nothing goes on the queue because there is nobody
-            # left to read it, and this is logged at info without a traceback
-            # because a user pressing Cancel is the system working.
-            logger.info("run cancelled by client")
-        except (pipeline.RunError, ValueError) as exc:
-            # These already carry a user-ready sentence (see pipeline.py and
-            # analysis.py's error mapping), so it is passed straight through.
-            updates.put(("error", str(exc)))
-        except Exception:  # noqa: BLE001 - last resort, details go to the log only
-            logger.exception("unhandled error while building a report")
-            updates.put(("error", GENERIC_ERROR_MESSAGE))
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-
-    started = time.monotonic()
-    last_message = "Starting..."
-    try:
-        while True:
-            # Belt and suspenders alongside the soft deadline above: even if
-            # the engine never learns about `deadline`, the stream itself
-            # always closes cleanly before Vercel's 300s function limit.
-            if time.monotonic() - started > REPORT_HARD_STOP_SECONDS:
-                yield _ndjson_line({"type": "error", "message": REPORT_TIMEOUT_MESSAGE})
-                return
-            try:
-                kind, value = updates.get(timeout=HEARTBEAT_SECONDS)
-            except queue.Empty:
-                yield _ndjson_line({"type": "progress", "message": last_message})
-                continue
-
-            if kind == "progress":
-                last_message = value
-                yield _ndjson_line({"type": "progress", "message": value})
-            elif kind == "report":
-                line = {"type": "report", "bundle": value}
-                report_id = _save_report(query, profile, value)
-                if report_id:
-                    line["report_id"] = report_id
-                yield _ndjson_line(line)
-                return
-            else:
-                yield _ndjson_line({"type": "error", "message": value})
-                return
+        finally:
+            # Always land the last progress the engine reported, whatever the
+            # outcome, so the row a reader polls matches where the run actually got.
+            flush_progress(force=True)
+    except pipeline.RunCancelled:
+        # A user pressing Cancel is the system working, not an incident: no
+        # traceback, and a terminal `cancelled` rather than a failure.
+        logger.info("run cancelled: %s", run_id)
+        _set_run_result_durably(run_id, "cancelled")
+        return
+    except (pipeline.RunError, ValueError) as exc:
+        # These already carry a user-ready sentence (see pipeline.py and
+        # analysis.py's error mapping), so it is passed straight through.
+        _set_run_result_durably(run_id, "failed", error=str(exc))
+        return
+    except Exception:  # noqa: BLE001 - last resort, details go to the log only
+        # The genuine last resort still logs a traceback, exactly as the old
+        # streaming path did, and the reader sees only the generic sentence.
+        logger.exception("unhandled error while building a report for %s", run_id)
+        _set_run_result_durably(run_id, "failed", error=GENERIC_ERROR_MESSAGE)
+        return
     finally:
-        cancel_event.set()
+        # Stop the poller whatever happened; it is a daemon, but leaving it
+        # spinning against a finished run is a round trip nobody needs.
+        stop_poll.set()
+
+    # The bundle is saved the same server-side, best-effort way it always was
+    # (see _save_report): a storage miss costs the reader a share link, not the
+    # run, so a None report_id still lands as a `succeeded` terminal.
+    report_id = _save_report(query, profile, bundle, user_id)
+    _set_run_result_durably(run_id, "succeeded", report_id=report_id)
 
 
 @app.post("/api/report")
-async def post_report(request: Request):
+async def post_report(request: Request, user: AuthenticatedUser = CurrentUser):
+    """Create a queued run and return its id, without doing the work here.
+
+    This used to stream the whole run as NDJSON while a worker thread built it;
+    now it validates, mints an id, writes one `queued` row, and returns 202 with
+    that id. The browser polls GET /api/runs/{id} and an external minute-cron
+    drives POST /api/run-worker, which is what actually executes the run. A
+    validation failure comes back as the same {"type": "invalid", ...} body the
+    old terminal line carried, just as plain JSON rather than a one-line stream.
+    """
     origin_error = _reject_cross_origin(request)
     if origin_error is not None:
         return origin_error
@@ -429,10 +931,10 @@ async def post_report(request: Request):
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 - any body that is not valid JSON
-        return _stream_invalid(["Send a JSON body with query and profile."])
+        return _invalid_response(["Send a JSON body with query and profile."])
 
     if not isinstance(body, dict):
-        return _stream_invalid(["Send a JSON body with query and profile."])
+        return _invalid_response(["Send a JSON body with query and profile."])
 
     # `content_type` is the single value the form used to send. It is still read
     # here because a shared link or a replayed history entry can carry it, and it
@@ -454,11 +956,11 @@ async def post_report(request: Request):
         **validate_kwargs,
     )
     if checked["errors"]:
-        return _stream_invalid(checked["errors"])
+        return _invalid_response(checked["errors"])
 
-    if _rate_limited("report", _client_ip(request), REPORTS_PER_HOUR):
+    if _rate_limited(request, user, "report", REPORTS_PER_HOUR):
         return JSONResponse(
-            {"message": "Too many report runs from this network in the last hour. Please try again later."},
+            {"message": "Too many report runs on this account in the last hour. Please try again later."},
             status_code=429,
         )
 
@@ -468,29 +970,180 @@ async def post_report(request: Request):
         legacy = checked.get("content_type")
         chosen_types = [legacy] if legacy else []
 
-    generator = _run_report_lines(
-        checked["query"],
-        checked["profile"],
-        checked["days"],
-        checked["subreddits"],
-        checked["relevance_filter"],
-        content_types=chosen_types,
-        # `.get(...) or []` rather than `checked["phrases"]`: an engine from before
-        # the keyword filter returns no such key, and version skew must not be a
-        # KeyError on the boundary. `channels` is read the same way for the same
-        # reason.
-        phrases=checked.get("phrases") or [],
-        channels=checked.get("channels") or [],
+    # The whole run request, frozen onto the row so the worker reconstructs it
+    # without the browser being involved again. `.get(...) or []` rather than
+    # `checked["..."]` for the same reason the old boundary used it: an engine
+    # from before phrases or channels returns no such key, and version skew must
+    # not be a KeyError here.
+    inputs = {
+        "days": checked["days"],
+        "subreddits": checked["subreddits"],
+        "relevance_filter": checked["relevance_filter"],
+        "content_types": chosen_types,
+        "phrases": checked.get("phrases") or [],
+        "channels": checked.get("channels") or [],
+    }
+
+    run_id = secrets.token_urlsafe(REPORT_ID_BYTES)
+    try:
+        db.create_run(run_id, user.user_id, checked["query"], checked["profile"], inputs)
+    except db.StorageUnavailable as exc:
+        # No durable queue means no run: unlike a saved report, a run cannot be a
+        # best-effort bonus, so this surfaces as a clean 503 the frontend shows.
+        return JSONResponse({"message": str(exc)}, status_code=503)
+    except Exception:  # noqa: BLE001 - last resort, details go to the log only
+        logger.exception("unexpected failure while creating a run")
+        return JSONResponse({"message": db.UNAVAILABLE_MESSAGE}, status_code=503)
+
+    return JSONResponse({"run_id": run_id}, status_code=202)
+
+
+# ── The worker entrypoint ────────────────────────────────────────────────────────
+# Driven by an external minute-cron (Supabase pg_cron calling this route through
+# pg_net), not by a browser and not by Vercel Cron (the project is on Hobby). It
+# is the one route in this file that does NOT carry require_user: pg_net cannot
+# hold a Supabase session, so it authenticates with a shared CRON_SECRET instead,
+# and it is listed in the test suite's PUBLIC_API_ROUTES precisely so that
+# exemption is deliberate rather than an accident.
+
+
+def _reject_worker_caller(request: Request) -> Optional[JSONResponse]:
+    """None if this request carries the cron secret, else a 401 JSONResponse.
+
+    Fails closed when CRON_SECRET itself is unset: a deployment that forgot to
+    configure the secret refuses every call rather than running the worker open.
+    The comparison is constant-time so a caller cannot learn the secret a byte at
+    a time from response timing, and every failure returns the one collapsed
+    sentence so the route is not an oracle for which check tripped.
+    """
+    secret = os.environ.get("CRON_SECRET", "")
+    if not secret:
+        logger.error("CRON_SECRET is not set, so the worker route refuses every call")
+        return JSONResponse({"message": CRON_AUTH_FAILED_MESSAGE}, status_code=401)
+
+    scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(token.strip(), secret):
+        return JSONResponse({"message": CRON_AUTH_FAILED_MESSAGE}, status_code=401)
+    return None
+
+
+@app.post("/api/run-worker")
+def post_run_worker(request: Request):
+    """Claim and execute exactly one run per invocation.
+
+    One per invocation is deliberate, not a throttle: a single run can take most
+    of the 285s budget, and a worker that tried to drain the queue in a loop
+    would blow past Vercel's 300s maxDuration on the second one. Overlapping
+    minute-ticks are safe because claim_next_run uses FOR UPDATE SKIP LOCKED, so
+    two workers racing either take different rows or one takes nothing. This is a
+    plain `def` (not `async def`) on purpose: pipeline.run_report blocks for
+    minutes, and Starlette runs a sync route in a threadpool, keeping the event
+    loop free instead of freezing it for the whole run.
+    """
+    auth_error = _reject_worker_caller(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        # Durable safety net first, before anything is claimed: end runs that can
+        # no longer make progress (a `running` row retried up to the cap, or a
+        # `queued` row no worker ever picked up) so neither the retry storm nor a
+        # forever-queued run outlives this tick. See db.fail_stalled_runs.
+        swept = db.fail_stalled_runs()
+        if swept:
+            logger.info("failed %d stalled run(s) before claiming", swept)
+        claim = db.claim_next_run()
+    except db.StorageUnavailable as exc:
+        return JSONResponse({"message": str(exc)}, status_code=503)
+
+    if claim is None:
+        return JSONResponse({"ran": None})
+
+    _execute_run(claim)
+    return JSONResponse({"ran": claim["id"]})
+
+
+# ── Run status and control ───────────────────────────────────────────────────────
+# All three require_user, and a run is private to whoever started it: a row that
+# belongs to someone else is a 404, the same as one that does not exist, because
+# a run (unlike a shareable report) is nobody else's business. Every id is shape-
+# checked against REPORT_ID_PATTERN before the database is touched, exactly as a
+# report id is.
+
+
+@app.get("/api/runs")
+async def get_runs(user: AuthenticatedUser = CurrentUser):
+    """The caller's own runs, newest first. `no-store` because this is a private,
+    per-user view whose freshness matters (a run's status changes as it runs)."""
+    headers = {"Cache-Control": "no-store"}
+    try:
+        runs = db.list_runs(user.user_id)
+    except db.StorageUnavailable as exc:
+        return JSONResponse({"message": str(exc)}, status_code=503, headers=headers)
+    return JSONResponse({"runs": runs}, headers=headers)
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run_status(run_id: str, user: AuthenticatedUser = CurrentUser):
+    """One run's live state, for the browser to poll. `no-store` so a poll always
+    reads the real status rather than a cached one, and owner-checked so a run id
+    guessed or leaked cannot be read by anyone but the person who started it."""
+    headers = {"Cache-Control": "no-store"}
+    if not REPORT_ID_PATTERN.match(run_id):
+        return JSONResponse({"message": RUN_NOT_FOUND_MESSAGE}, status_code=404, headers=headers)
+
+    try:
+        row = db.get_run(run_id)
+    except db.StorageUnavailable as exc:
+        return JSONResponse({"message": str(exc)}, status_code=503, headers=headers)
+
+    if row is None or row.get("user_id") != user.user_id:
+        return JSONResponse({"message": RUN_NOT_FOUND_MESSAGE}, status_code=404, headers=headers)
+
+    return JSONResponse(
+        {
+            "status": row.get("status"),
+            "progress": row.get("progress"),
+            "report_id": row.get("report_id"),
+            "error": row.get("error"),
+        },
+        headers=headers,
     )
-    return StreamingResponse(generator, media_type="application/x-ndjson")
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def post_cancel_run(run_id: str, request: Request, user: AuthenticatedUser = CurrentUser):
+    """Ask a run to stop. Owner-checked in one query (see db.mark_run_cancelling):
+    a run that is not the caller's, or is already terminal, flips nothing and is a
+    404, so this is never an oracle for whether a given id exists for someone else.
+    The worker's poller sees the flag at the next stage boundary and stops."""
+    headers = {"Cache-Control": "no-store"}
+    if not REPORT_ID_PATTERN.match(run_id):
+        return JSONResponse({"message": RUN_NOT_FOUND_MESSAGE}, status_code=404, headers=headers)
+
+    try:
+        flipped = db.mark_run_cancelling(run_id, user.user_id)
+    except db.StorageUnavailable as exc:
+        return JSONResponse({"message": str(exc)}, status_code=503, headers=headers)
+
+    if not flipped:
+        return JSONResponse({"message": RUN_NOT_FOUND_MESSAGE}, status_code=404, headers=headers)
+
+    return JSONResponse({"status": "cancelling"}, headers=headers)
 
 
 @app.get("/api/reports/{report_id}")
-async def get_saved_report(report_id: str):
+async def get_saved_report(report_id: str, user: AuthenticatedUser = CurrentUser):
     """One saved report and every draft written against it.
 
+    Any signed-in reader holding the link may open it, whoever ran it: that is
+    the product decision behind share links, so `user` is required here (a
+    signed-out visitor gets nothing) but is deliberately not compared against
+    the report's own `user_id`.
+
     Shape: {"bundle": {...}, "drafts": {"<idea_index>": "<post>", ...}}. The id
-    in the path is the only credential, so this is deliberately uncacheable:
+    in the path is the only credential beyond a session, so this is deliberately
+    uncacheable:
     `no-store` keeps a shared browser or a proxy from holding on to a report
     somebody else can then read out of the cache, and it also means an edited
     draft is never served stale.
@@ -560,20 +1213,28 @@ def _load_sample_payload() -> dict:
 
 
 @app.get("/api/sample")
-async def get_sample():
+async def get_sample(user: AuthenticatedUser = CurrentUser):
     payload = _load_sample_payload()
     # Only the hit is cacheable. A miss is usually transient from the caller's
     # side (a sample not deployed yet, a version the file has since caught up
-    # with), and an hour-long public cache on it means the frontend's "try again
-    # in a moment" is a promise the browser will not honour: the retry is served
-    # from cache and fails identically until the entry expires. That is now a
+    # with), and an hour-long cache on it means the frontend's "try again in a
+    # moment" is a promise the browser will not honour: the retry is served from
+    # cache and fails identically until the entry expires. That is now a
     # user-facing path rather than a dev-only one, so the miss is no-store.
-    cache = "public, max-age=3600" if payload.get("available") else "no-store"
+    #
+    # `private`, not `public`: this route requires a session now, and Vercel's
+    # CDN sits in front of this function and will cache a `public` response. One
+    # signed-in reader's request would then be enough to leave a copy of the
+    # sample in a shared cache that anonymous requests could be served from,
+    # which is the gate coming off for exactly the route that advertises the
+    # product. The body is identical for every reader either way, so nothing is
+    # lost but the shared hit.
+    cache = "private, max-age=3600" if payload.get("available") else "no-store"
     return JSONResponse(payload, headers={"Cache-Control": cache})
 
 
 @app.get("/api/sample/available")
-async def get_sample_available():
+async def get_sample_available(user: AuthenticatedUser = CurrentUser):
     """A cheap existence probe for the mount-time check: just a stat, no JSON
     parse. It intentionally does not confirm the bundle version, so it can
     disagree with GET /api/sample (e.g. a stale v1 file on disk still counts
@@ -587,7 +1248,7 @@ async def get_sample_available():
 
 
 @app.post("/api/draft")
-async def post_draft(request: Request):
+async def post_draft(request: Request, user: AuthenticatedUser = CurrentUser):
     """Draft a publish-ready post for one content idea.
 
     Plain JSON, no streaming: unlike /api/report this is a single Gemini call
@@ -649,9 +1310,9 @@ async def post_draft(request: Request):
             status_code=422,
         )
 
-    if _rate_limited("draft", _client_ip(request), DRAFTS_PER_HOUR):
+    if _rate_limited(request, user, "draft", DRAFTS_PER_HOUR):
         return JSONResponse(
-            {"message": "Too many drafts from this network in the last hour. Please try again later."},
+            {"message": "Too many drafts on this account in the last hour. Please try again later."},
             status_code=429,
         )
 
@@ -681,7 +1342,7 @@ async def post_draft(request: Request):
         )
     except ValueError as exc:
         # A user-ready sentence from the model layer, same treatment as the
-        # RunError/ValueError branch in _run_report_lines.
+        # RunError/ValueError branch in _execute_run.
         return JSONResponse({"error": str(exc)}, status_code=500)
     except Exception:  # noqa: BLE001 - last resort, details go to the log only
         logger.exception("unhandled error while drafting a post")
@@ -746,7 +1407,7 @@ def _persist_draft(report_id: str, idea_index: int, post: str) -> bool:
 
 
 @app.post("/api/drafts")
-async def post_save_draft(request: Request):
+async def post_save_draft(request: Request, user: AuthenticatedUser = CurrentUser):
     """Save an edited draft against a saved report.
 
     Unlike /api/draft this writes nothing but a row: the post arrives already
@@ -794,9 +1455,9 @@ async def post_save_draft(request: Request):
             status_code=413,
         )
 
-    if _rate_limited("draft-save", _client_ip(request), DRAFT_SAVES_PER_HOUR):
+    if _rate_limited(request, user, "draft-save", DRAFT_SAVES_PER_HOUR):
         return JSONResponse(
-            {"message": "Too many draft saves from this network in the last hour. Please try again later."},
+            {"message": "Too many draft saves on this account in the last hour. Please try again later."},
             status_code=429,
         )
 
@@ -816,7 +1477,7 @@ def _bundle_from_payload(payload) -> Optional[dict]:
 
 
 @app.post("/api/export/{kind}")
-async def post_export(kind: str, request: Request):
+async def post_export(kind: str, request: Request, user: AuthenticatedUser = CurrentUser):
     exporter = EXPORTERS.get(kind)
     if exporter is None:
         return JSONResponse({"message": "Unknown export type."}, status_code=404)

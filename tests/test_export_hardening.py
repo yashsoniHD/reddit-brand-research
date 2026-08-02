@@ -157,7 +157,7 @@ class TestOriginHardening:
         response = client.post(
             "/api/report", json=VALID_REPORT_BODY, headers={"sec-fetch-site": "same-origin"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 202
 
     def test_absent_sec_fetch_site_is_allowed(self, monkeypatch):
         # Older browsers and non-browser same-origin callers never send the
@@ -180,8 +180,8 @@ class TestRateLimiter:
         second = client.post("/api/report", json=VALID_REPORT_BODY)
         third = client.post("/api/report", json=VALID_REPORT_BODY)
 
-        assert first.status_code == 200
-        assert second.status_code == 200
+        assert first.status_code == 202
+        assert second.status_code == 202
         assert third.status_code == 429
         assert "message" in third.json()
 
@@ -205,25 +205,27 @@ class TestRateLimiter:
 
         first = client.post("/api/report", json=VALID_REPORT_BODY)
         blocked = client.post("/api/report", json=VALID_REPORT_BODY)
-        assert first.status_code == 200
+        assert first.status_code == 202
         assert blocked.status_code == 429
 
         fake_now[0] += api_index.RATE_LIMIT_WINDOW_SECONDS + 1
         allowed_again = client.post("/api/report", json=VALID_REPORT_BODY)
-        assert allowed_again.status_code == 200
+        assert allowed_again.status_code == 202
 
-    def test_a_different_ip_gets_its_own_budget(self, monkeypatch):
+    def test_a_different_signed_in_user_gets_its_own_budget(self, monkeypatch, fake_auth):
+        # This was keyed on X-Forwarded-For until sign-in landed. Buckets follow
+        # the user now, so two people sharing one office address get a budget
+        # each; the per-IP floor is covered in test_api.py, which can reach it by
+        # turning the fake user off.
         monkeypatch.setattr(api_index, "REPORTS_PER_HOUR", 1)
         monkeypatch.setattr(api_index.pipeline, "run_report", _fake_run_report)
 
-        first = client.post(
-            "/api/report", json=VALID_REPORT_BODY, headers={"x-forwarded-for": "1.1.1.1"}
-        )
-        other_ip = client.post(
-            "/api/report", json=VALID_REPORT_BODY, headers={"x-forwarded-for": "2.2.2.2"}
-        )
-        assert first.status_code == 200
-        assert other_ip.status_code == 200
+        fake_auth.user = api_index.AuthenticatedUser("user-one", "one@example.com")
+        first = client.post("/api/report", json=VALID_REPORT_BODY)
+        fake_auth.user = api_index.AuthenticatedUser("user-two", "two@example.com")
+        other_user = client.post("/api/report", json=VALID_REPORT_BODY)
+        assert first.status_code == 202
+        assert other_user.status_code == 202
 
 
 class TestExportBuilderExceptions:
@@ -391,7 +393,10 @@ class TestSampleAvailableEndpoint:
 
         response = client.get("/api/sample")
         assert response.status_code == 200
-        assert response.headers["cache-control"] == "public, max-age=3600"
+        # `private`, not `public`: the route requires a session now, and Vercel's
+        # CDN caches a public response from this function, which would let one
+        # signed-in request leave a copy anonymous requests could be served.
+        assert response.headers["cache-control"] == "private, max-age=3600"
 
     def test_full_sample_endpoint_cache_misses_on_a_regenerated_file(self, tmp_path, monkeypatch):
         sample_path = tmp_path / "sample.json"

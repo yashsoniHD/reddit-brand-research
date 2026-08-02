@@ -20,8 +20,11 @@ import json
 import logging
 import math
 import os
+import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
@@ -34,10 +37,35 @@ logger = logging.getLogger(__name__)
 
 # ── Model configuration ───────────────────────────────────────────────────────
 PRIMARY_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-FALLBACK_MODEL = "gemini-2.5-flash-lite"
+# The cheap, fast tier. Also the model every stage falls back to when its own is
+# not available to this project (see _fallback_model), which is why there is no
+# second FALLBACK_MODEL constant holding a copy of this id: a copy taken at import
+# goes stale the moment anything moves LITE_MODEL, and a lite stage would then fall
+# sideways onto the old id instead of up to the primary model.
+LITE_MODEL = os.environ.get("GEMINI_LITE_MODEL", "gemini-2.5-flash-lite")
 MODEL_DISPLAY_NAMES = {
     "gemini-2.5-flash": "Gemini 2.5 Flash on Vertex AI",
     "gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite on Vertex AI",
+}
+# Which tier each model call runs on, keyed by the label the call already passes
+# to _chat_json, so a stage's model is decided in one table instead of being
+# threaded through every call site as an argument.
+#
+# "lite" is for high-volume labelling: the triage rates up to 800 items and the
+# classification labels up to 300, and in both cases the shape of every answer is
+# dictated by the prompt, so the smaller model does the same job for a fraction of
+# the latency and cost. Everything that has to recall the world (discovery) or
+# write prose a reader will judge (synthesis, drafts) stays on the primary model,
+# and so does the one-per-run brief decomposition, where a misreading would be
+# applied to every triage batch after it. A label that is not named here gets the
+# primary model, so an unrecognised stage can never silently be downgraded.
+STAGE_TIERS = {
+    "relevance-triage": "lite",
+    "classification": "lite",
+    "brief-decomposition": "primary",
+    "discovery": "primary",
+    "synthesis": "primary",
+    "draft": "primary",
 }
 
 DEFAULT_LOCATION = "global"
@@ -51,10 +79,29 @@ CLASSIFY_MAX_TOKENS = 32000
 # purpose: only tokens actually emitted are billed, while a ceiling that comes up
 # short truncates the JSON and fails the run outright.
 SYNTHESIS_MAX_TOKENS = 24000
+# What synthesis is allowed to spend on reasoning. Left dynamic, Gemini decides for
+# itself and routinely spends five figures of tokens on a prompt this size, which is
+# both billed and, more to the point, waited for: it was the single longest call in a
+# run. Synthesis does genuinely reason (it groups labelled evidence into ideas), so
+# the budget is not zero, but the work is bounded: pick the strongest threads per
+# topic and write them up. A few thousand tokens covers that, and whatever is not
+# spent on reasoning stays available to the answer, because Gemini draws both from
+# the same max_output_tokens.
+SYNTHESIS_THINKING_BUDGET = 3072
 TEMPERATURE = 0
 MAX_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (1, 2)
 MAX_RATE_LIMIT_WAIT_SECONDS = 25
+# How much random jitter is added on top of a retry wait, as a share of it. Without
+# it, TRIAGE_MAX_WORKERS calls that were rate limited together are handed the same
+# reset hint, sleep the same number of seconds and hit Vertex again in lockstep,
+# which is how one 429 becomes a wave of them. A share rather than a fixed number of
+# seconds so it scales with the wait: it spreads a 25 second cap over 7 seconds and
+# a 1 second ladder step over a third of one, and it is added rather than subtracted
+# so a provider's own reset hint is never undercut. The effective ceiling on any one
+# wait is therefore MAX_RATE_LIMIT_WAIT_SECONDS * (1 + this), which is still well
+# inside a single stage's budget.
+RETRY_JITTER_SHARE = 0.3
 # Enough of a bad payload to recognise the malformation in a log without dumping a
 # whole report's worth of model output into it.
 BAD_PAYLOAD_LOG_CHARS = 200
@@ -197,6 +244,25 @@ TRIAGE_FLAIR_CHARS = 40
 # at the qualifier output reservation below, 200 items would reserve 12,300 tokens
 # against TRIAGE_MAX_TOKENS and truncate the answer mid-array.
 TRIAGE_BATCH_SIZE = 120
+# How many triage batches are in flight at once. The batches are independent (global
+# indices, union merge, a failure costs only its own items), so running them one at a
+# time turned an 800 item pool into 7 calls end to end, of which a run's soft deadline
+# only ever paid for 2 to 4 before the rest fell to UNTRIAGED_WEIGHT. Deliberately
+# modest rather than "all of them": Vertex enforces requests and tokens per minute,
+# and a wide fan-out trades sequential latency for 429s that _chat_json answers by
+# sleeping up to MAX_RATE_LIMIT_WAIT_SECONDS, which is slower than having waited.
+#
+# 4 rather than 5, which costs nothing and buys headroom. The pool this is sized for
+# is 800 items at TRIAGE_BATCH_SIZE, which is 7 batches: at 5 workers that is a wave
+# of 5 and a wave of 2, at 4 workers a wave of 4 and a wave of 3, and both finish in
+# two waves, so the wall clock (and pipeline.TRIAGE_ALLOWANCE_SECONDS, which budgets
+# for exactly two waves) is unchanged. What does change is the burst: the very next
+# call after this one is the classification, on the same lite tier and out of the
+# same per-minute allowance, and it is the call the report cannot be produced without.
+# Spending 20 percent less of that allowance on a stage whose failure mode is a
+# degraded ranking, to protect a stage whose failure mode is no report, is the right
+# way round.
+TRIAGE_MAX_WORKERS = 4
 # Measured the same way as _classification_output_tokens: Gemini pretty-prints, so
 # each {"i": n, "r": n} costs four indented lines, and the sibling classification
 # call measures 45 tokens per labelled item. The earlier figure of 30 was carried
@@ -712,6 +778,7 @@ _BARE_DOMAIN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _client = None
+_CLIENT_LOCK = threading.Lock()
 
 
 class PayloadTooLarge(Exception):
@@ -753,25 +820,41 @@ def token_budget() -> int:
     return int(DEFAULT_TOKEN_BUDGET * BUDGET_SAFETY)
 
 
+def _jittered(seconds: float) -> float:
+    """A wait with up to RETRY_JITTER_SHARE of itself added at random.
+
+    Kept separate so every return path of _retry_wait_seconds goes through it: the
+    whole point is that two callers waiting on the same failure never wake together,
+    and one un-jittered path is enough to put a whole triage wave back in lockstep.
+    """
+    return seconds * (1.0 + random.random() * RETRY_JITTER_SHARE)
+
+
 def _retry_wait_seconds(exc: Exception, attempt: int) -> float:
-    """Respect the provider's own reset hint, capped so nobody waits a minute."""
+    """Respect the provider's own reset hint, capped so nobody waits a minute, jittered.
+
+    The jitter matters because the triage runs several of these calls at once: a rate
+    limit hits the whole wave, every worker reads the same reset hint, and identical
+    waits mean they all come back at the same instant and are limited again. See
+    RETRY_JITTER_SHARE for the size of it.
+    """
     default = RETRY_DELAYS_SECONDS[min(attempt, len(RETRY_DELAYS_SECONDS) - 1)]
     headers = getattr(getattr(exc, "response", None), "headers", None)
     if not headers:
-        return default
+        return _jittered(default)
     for key in ("retry-after", "x-ratelimit-reset-tokens"):
         try:
             raw = headers.get(key)
         except AttributeError:
-            return default
+            return _jittered(default)
         if not raw:
             continue
         try:
             seconds = float(str(raw).rstrip("s"))
         except ValueError:
             continue
-        return max(default, min(seconds + 0.5, MAX_RATE_LIMIT_WAIT_SECONDS))
-    return default
+        return _jittered(max(default, min(seconds + 0.5, MAX_RATE_LIMIT_WAIT_SECONDS)))
+    return _jittered(default)
 
 
 # ── Vertex AI client ──────────────────────────────────────────────────────────
@@ -793,27 +876,104 @@ def _location() -> str:
     return (os.environ.get("GOOGLE_CLOUD_LOCATION") or "").strip() or DEFAULT_LOCATION
 
 
+# `HttpOptions.timeout` (google-genai 1.47.0) is in milliseconds and is applied,
+# per request, as the httpx client's single timeout value (connect, read, write and
+# pool all share it) - see google.genai._api_client.get_timeout_in_seconds, which
+# divides it by 1000 before handing it to httpx. Without it, httpx defaults to no
+# read timeout, so a stuck `generate_content` call blocks forever: the pipeline's
+# stage-boundary deadline check cannot interrupt a call already in flight, and only
+# a client-level timeout can. 90s comfortably clears the documented worst-case
+# synthesis call (~70s) while still being far short of the 240s soft deadline and
+# the 300s Vercel maxDuration, so a single hung call can no longer be what drags a
+# worker to SIGKILL.
+_MODEL_CALL_TIMEOUT_MS = 90_000
+
+
 def _get_client():
+    """The one shared Vertex client, built on first use.
+
+    Locked because the triage now calls this from several threads at once, and an
+    unguarded lazy global would build a handful of clients on the first batch and
+    throw all but one away. The lock is only ever contended on that first call.
+    """
     global _client
-    if _client is None:
-        # No SDK-level retries: this module does its own with a capped wait, and
-        # silent multi-second retries underneath make a run look hung.
-        _client = genai.Client(
-            vertexai=True,
-            project=_project(),
-            location=_location(),
-            http_options={"retry_options": {"attempts": 1}},
-        )
-    return _client
+    with _CLIENT_LOCK:
+        if _client is None:
+            # No SDK-level retries: this module does its own with a capped wait, and
+            # silent multi-second retries underneath make a run look hung. The
+            # explicit timeout is the real backstop: it is what actually interrupts
+            # a call that never comes back.
+            _client = genai.Client(
+                vertexai=True,
+                project=_project(),
+                location=_location(),
+                http_options={
+                    "timeout": _MODEL_CALL_TIMEOUT_MS,
+                    "retry_options": {"attempts": 1},
+                },
+            )
+        return _client
 
 
-def _generation_config(max_tokens: int, thinking: bool) -> dict:
+def _stage_env_var(label: str) -> str:
+    """The environment variable that overrides one stage's model.
+
+    "relevance-triage" becomes GEMINI_MODEL_RELEVANCE_TRIAGE, so a deployment can
+    move a single stage onto another model without a code change.
+    """
+    name = re.sub(r"[^A-Z0-9]+", "_", str(label or "").upper()).strip("_")
+    return "GEMINI_MODEL_{}".format(name)
+
+
+def model_for_stage(label: str) -> str:
+    """The model id a stage's calls go to.
+
+    Resolution order: the stage's own environment override, then the tier
+    STAGE_TIERS puts it in, then the primary model. Resolved per call rather than
+    captured at import, so moving PRIMARY_MODEL or LITE_MODEL moves every stage
+    that follows it, and the two globals stay the single source of truth.
+    """
+    override = (os.environ.get(_stage_env_var(label)) or "").strip()
+    if override:
+        return override
+    if STAGE_TIERS.get(label) == "lite":
+        return LITE_MODEL
+    return PRIMARY_MODEL
+
+
+def _fallback_model(model: str) -> Optional[str]:
+    """The model to try when `model` itself is unavailable, or None when there is none.
+
+    The lite tier is the usual fallback, so a stage that already starts there falls
+    up to the primary model instead. The point is to reach a model that answers, not
+    to preserve a hierarchy. When both names are the same model there is nowhere
+    left to go and the caller's error handling takes over.
+
+    Both names are read at call time, exactly as model_for_stage reads them, so
+    moving LITE_MODEL at runtime moves what a lite stage falls back to as well as
+    what it starts on. Comparing against a copy captured at import used to send a
+    lite stage sideways onto the id LITE_MODEL had before it moved.
+    """
+    if model != LITE_MODEL:
+        return LITE_MODEL
+    if PRIMARY_MODEL != LITE_MODEL:
+        return PRIMARY_MODEL
+    return None
+
+
+def _generation_config(
+    max_tokens: int, thinking: bool, thinking_budget: Optional[int] = None
+) -> dict:
     """JSON mode, deterministic, with thinking left to the caller.
 
     Gemini spends reasoning tokens out of `max_output_tokens`, so thinking and the
     output ceiling are one decision, not two: a call that thinks needs headroom for
     the thinking on top of its answer, or it truncates mid-JSON. Each caller owns both
     numbers together rather than inheriting a default it did not size for.
+
+    `thinking_budget` caps the reasoning of a call that thinks. Left unset, Gemini
+    decides for itself, which is what every thinking call did before synthesis grew
+    a cap. Thinking switched off wins over any budget: zero is zero.
     """
     config = {
         "response_mime_type": "application/json",
@@ -822,6 +982,8 @@ def _generation_config(max_tokens: int, thinking: bool) -> dict:
     }
     if not thinking:
         config["thinking_config"] = {"thinking_budget": 0}
+    elif thinking_budget is not None:
+        config["thinking_config"] = {"thinking_budget": max(0, int(thinking_budget))}
     return config
 
 
@@ -985,16 +1147,35 @@ def _parse_json_object(text: str) -> Optional[dict]:
 
 
 def _chat_json(
-    prompt: str, max_tokens: int, label: str, thinking: bool = True
+    prompt: str,
+    max_tokens: int,
+    label: str,
+    thinking: bool = True,
+    thinking_budget: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> Tuple[dict, str]:
     """One JSON-mode generation with retries, model fallback and clean errors.
 
     Returns (parsed_json, model_used). `thinking` is the caller's call: leave it on for
     work that genuinely reasons, turn it off for recall and labelling, and size
     `max_tokens` to match, because reasoning tokens come out of the same allowance.
+    `thinking_budget` caps that reasoning for a call that keeps thinking on.
+
+    `label` also decides which model the call goes to (see model_for_stage), so a
+    stage's cost and speed are configured in one table rather than at every call
+    site. An unrecognised label runs on the primary model.
+
+    `deadline` is an absolute time.monotonic() value that bounds the retries, not the
+    call: a request already in flight is uninterruptible, but a wait before the next
+    attempt is not, and a rate limited call can otherwise sleep MAX_ATTEMPTS - 1
+    times up to MAX_RATE_LIMIT_WAIT_SECONDS each, which is longer than the whole
+    stage was given. Once the next wait would land past the deadline, the attempts
+    stop and the error the caller already handles is raised immediately. Callers
+    whose stage owns the rest of the clock (classification, synthesis) pass nothing
+    and keep the old behaviour.
     """
     client = _get_client()
-    model = PRIMARY_MODEL
+    model = model_for_stage(label)
     tried_fallback = False
     started = time.time()
     last_exc: Optional[Exception] = None
@@ -1011,7 +1192,11 @@ def _chat_json(
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=_generation_config(max_tokens, thinking=effective_thinking),
+                config=_generation_config(
+                    max_tokens,
+                    thinking=effective_thinking,
+                    thinking_budget=thinking_budget,
+                ),
             )
         except Exception as exc:
             last_exc = exc
@@ -1025,9 +1210,14 @@ def _chat_json(
                 logger.warning("%s payload above the request ceiling; refitting", label)
                 raise PayloadTooLarge(str(exc))
             if _is_model_error(exc) and not tried_fallback:
-                logger.warning("%s model %s unavailable, falling back", label, model)
-                model, tried_fallback = FALLBACK_MODEL, True
-                continue
+                alternative = _fallback_model(model)
+                if alternative:
+                    logger.warning(
+                        "%s model %s unavailable, falling back to %s",
+                        label, model, alternative,
+                    )
+                    model, tried_fallback = alternative, True
+                    continue
             if _is_quota_error(exc):
                 logger.warning("%s rate limited (attempt %s)", label, attempt + 1)
             elif isinstance(exc, genai_errors.ClientError):
@@ -1076,7 +1266,19 @@ def _chat_json(
             )
 
         if attempt < MAX_ATTEMPTS - 1:
-            time.sleep(_retry_wait_seconds(last_exc, attempt))
+            wait = _retry_wait_seconds(last_exc, attempt)
+            if deadline is not None and time.monotonic() + wait >= deadline:
+                # Sleeping here would spend time the next stage is counting on, and
+                # then spend a call's worth more on top of it. The items this call
+                # was for have an honest home without it (see rate_relevance), so
+                # stopping now is strictly better than overrunning.
+                logger.warning(
+                    "%s stopping after attempt %s of %s: waiting %.1fs to retry would "
+                    "overrun the deadline this call was given",
+                    label, attempt + 1, MAX_ATTEMPTS, wait,
+                )
+                break
+            time.sleep(wait)
 
     logger.error("%s exhausted retries: %s", label, last_exc)
     # Order matters: an unparseable payload can contain any words at all, including a
@@ -1514,6 +1716,7 @@ def decompose_brief(
     query: str,
     profile: str = "",
     chat: Optional[Any] = None,
+    soft_deadline: Optional[float] = None,
 ) -> Brief:
     """Split the brief into its topic and the constraints it states about authors.
 
@@ -1530,6 +1733,11 @@ def decompose_brief(
     Fails open to Brief(query, ()) on anything at all, which reproduces today's
     behaviour exactly. A brief that could not be read is never worth failing a run
     over, and running without the constraints is what every run did until now.
+
+    `soft_deadline` bounds this call's retries, for the same reason the triage's does:
+    the two of them share one window (pipeline.TRIAGE_ALLOWANCE_SECONDS), so a rate
+    limited decomposition that slept out its attempts would leave the triage it exists
+    to inform with nothing.
     """
     text = " ".join(str(query or "").split())
     if not text:
@@ -1537,11 +1745,13 @@ def decompose_brief(
 
     chat = chat or chat_json
     try:
-        raw, _ = chat(
+        raw, _ = _call(
+            chat,
             _decompose_prompt(text, " ".join(str(profile or "").split())),
             DECOMPOSE_MAX_TOKENS,
             "brief-decomposition",
             thinking=False,
+            deadline=soft_deadline,
         )
         brief = sanitize_brief(raw, query)
     except Exception as exc:  # noqa: BLE001 - fail open, this call is never fatal
@@ -1827,52 +2037,104 @@ def rate_relevance(
     were before requirements existed.
 
     Batches keep each call small; indices are global across batches so results
-    merge by simple union. A batch that fails after chat_json's own retries is
+    merge by simple union, which is also what makes them safe to run at the same
+    time: TRIAGE_MAX_WORKERS of them are in flight at once and the merge does not
+    care which one lands first. A batch that fails after chat_json's own retries is
     dropped (its items fall back to the untriaged tier in rank_items); only when
-    every batch fails does this return None, telling the caller to select
-    deterministically. Triage failure is never worth failing a run over.
+    every batch that was actually issued fails does this return None, telling the
+    caller to select deterministically. Triage failure is never worth failing a run
+    over.
 
     `soft_deadline` is an absolute time.monotonic() value. Once it has passed, no
-    new batch is issued: these calls are uninterruptible once started, there are 7
-    or more of them, and the items that never get rated already have an honest home
-    in the UNTRIAGED_WEIGHT tier. Stopping early degrades the ranking; overrunning
-    fails the whole run.
+    new batch is issued: these calls are uninterruptible once started, and the items
+    that never get rated already have an honest home in the UNTRIAGED_WEIGHT tier.
+    Stopping early degrades the ranking; overrunning fails the whole run. The check
+    happens inside the worker, immediately before its call, rather than only when the
+    batch was queued, because a queued batch can wait behind the wave in front of it
+    for longer than the run has left. It also reaches the call itself, which is what
+    stops a rate limited batch from sleeping out its retries past the same deadline
+    (see _chat_json).
     """
     chat = chat or chat_json
     brief = _as_brief(brief if brief is not None else query)
     n_requirements = len(brief.requirements)
-    ratings: Dict[int, Verdict] = {}
-    batches = 0
-    failures = 0
     batch_size = _triage_batch_size(query, profile, brief)
     _, output_per_item = _triage_shape(brief)
+    offsets = list(range(0, len(items), batch_size))
+    if not offsets:
+        return {}
 
-    for offset in range(0, len(items), batch_size):
-        if _past(soft_deadline):
-            logger.warning(
-                "out of time after %s triage batch(es); %s items stay untriaged",
-                batches, len(items) - offset,
-            )
-            break
+    # Set by the first worker to hit something this function has no answer for, which
+    # is on its way to the caller as an exception. Every other worker checks it before
+    # issuing, so an aborting run stops paying for batches whose results are about to
+    # be thrown away. `pool.map` submits all of them up front, so there is nothing
+    # left to cancel by then; a flag the work itself reads is the only thing that
+    # still bites.
+    aborted = threading.Event()
+
+    def rate_batch(offset: int) -> Tuple[int, Optional[Dict[int, Verdict]], bool]:
+        """One batch: (offset, ratings or None on failure, whether it was skipped)."""
+        if aborted.is_set() or _past(soft_deadline):
+            return offset, None, True
         batch = items[offset : offset + batch_size]
         start = offset + 1
-        batches += 1
         try:
-            raw, _ = chat(
+            raw, _ = _call(
+                chat,
                 _triage_prompt(batch, query, profile, start, brief),
                 _triage_output_tokens(len(batch), output_per_item),
                 "relevance-triage",
                 thinking=False,
+                # Dropped for an injected fake that does not take it, exactly as
+                # every other optional keyword in this module is.
+                deadline=soft_deadline,
             )
         except (ValueError, PayloadTooLarge) as exc:
-            failures += 1
             logger.warning(
                 "relevance-triage batch at %s failed, items keep the default rating: %s",
                 start, exc,
             )
-            continue
-        ratings.update(_sanitize_ratings(raw, len(batch), start, n_requirements))
+            return offset, None, False
+        except BaseException:
+            # Not a model failure: it is going to the caller. Tell the batches that
+            # have not started yet, so they skip instead of spending a call each.
+            aborted.set()
+            raise
+        return offset, _sanitize_ratings(raw, len(batch), start, n_requirements), False
 
+    workers = min(TRIAGE_MAX_WORKERS, len(offsets))
+    logger.info(
+        "triaging %s items in %s batch(es) of %s, %s at a time",
+        len(items), len(offsets), batch_size, workers,
+    )
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="triage") as pool:
+            outcomes = list(pool.map(rate_batch, offsets))
+    else:
+        # One batch needs no pool, and keeping this path means a single-batch run has
+        # exactly the stack it always had.
+        outcomes = [rate_batch(offset) for offset in offsets]
+
+    ratings: Dict[int, Verdict] = {}
+    batches = 0
+    failures = 0
+    untriaged = 0
+    for offset, rated, skipped in outcomes:
+        if skipped or rated is None:
+            untriaged += len(items[offset : offset + batch_size])
+        if skipped:
+            continue
+        batches += 1
+        if rated is None:
+            failures += 1
+            continue
+        ratings.update(rated)
+
+    if untriaged:
+        logger.warning(
+            "%s of %s triage batch(es) came back; %s items stay untriaged",
+            batches - failures, len(offsets), untriaged,
+        )
     if batches > 0 and failures == batches:
         return None
     return ratings
@@ -2797,8 +3059,12 @@ def _select_sample(
     every ranking decision from those ratings.
 
     `soft_deadline` is an absolute time.monotonic() value, threaded down to the
-    triage so it stops issuing batches rather than overrunning the run's budget.
-    Past it, neither the decomposition call nor the triage is made at all.
+    triage so it stops issuing batches rather than overrunning the run's budget, and
+    into both calls so neither can sleep out its retries past it. Past the deadline,
+    neither the decomposition call nor the triage is made at all. The window it marks
+    the end of belongs to this function alone (pipeline.TRIAGE_ALLOWANCE_SECONDS): the
+    fetching that runs before it stops earlier, precisely so that a long retrieval
+    cannot leave this stage with no time and the report with a sample nothing ranked.
     """
     posts = [item for item in posts or [] if isinstance(item, dict)]
     comments = [item for item in comments or [] if isinstance(item, dict)]
@@ -2822,7 +3088,7 @@ def _select_sample(
     brief = _as_brief(query)
     ratings = None
     if query and not _past(soft_deadline):
-        brief = _as_brief(decompose_brief(query, profile))
+        brief = _as_brief(_call(decompose_brief, query, profile, soft_deadline=soft_deadline))
         ratings = _call(
             rate_relevance, pool, query, profile,
             brief=brief, soft_deadline=soft_deadline,
@@ -2978,6 +3244,7 @@ def synthesize(
             ),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
+            thinking_budget=SYNTHESIS_THINKING_BUDGET,
         )
     except PayloadTooLarge:
         logger.warning("synthesis payload rejected; retrying with a tighter listing")
@@ -2990,6 +3257,7 @@ def synthesize(
             ),
             SYNTHESIS_MAX_TOKENS,
             "synthesis",
+            thinking_budget=SYNTHESIS_THINKING_BUDGET,
         )
     result = sanitize_synthesis(
         raw, len(items), topics, query, content_types, profile, channels

@@ -5,6 +5,9 @@ prefixes, duplicates, markdown in a reason, a candidate that does not exist, a
 private or over-18 community, and the lookup service itself being unavailable.
 """
 
+import threading
+import time
+
 import pytest
 
 import discovery
@@ -24,9 +27,12 @@ def _chat(raw):
 
 def _lookup(table):
     """A fake `lookup` callable. `table[name]` is a dict (found), None (missing) or
-    the string "raise" (service outage)."""
+    the string "raise" (service outage). Accepts (and ignores) `deadline` because
+    discover()/manual() now call every `lookup` as `lookup(name, deadline=...)`,
+    passing it down to `reddit_data.lookup_subreddit` so a call already in flight
+    can cut its own retries short (see `_run_lookup`)."""
 
-    def fake(name):
+    def fake(name, deadline=None):
         entry = table.get(name, None)
         if entry == "raise":
             raise RuntimeError("The Reddit data service is temporarily unavailable.")
@@ -201,6 +207,83 @@ class TestDiscover:
         assert "http" not in message
 
 
+class TestDiscoverConcurrentLookups:
+    """Candidate lookups run in a thread pool (each is an independent network
+    round trip), not one at a time. These pin down what has to survive that: the
+    model's ranking order in the result, and the stop-at-cap semantics even
+    though validating a candidate no longer happens one at a time."""
+
+    def test_lookups_run_concurrently_not_one_request_at_a_time(self):
+        # Each fake lookup blocks for a bit. If they ran serially, three of them
+        # would take at least 3 * delay; run concurrently, the whole call should
+        # finish in well under that.
+        delay = 0.2
+        names = ["subaaa", "subbbb", "subccc"]
+        raw = {"candidates": [{"name": n, "reason": "x"} for n in names]}
+
+        def lookup(name, deadline=None):
+            time.sleep(delay)
+            return _found(name)
+
+        started = time.monotonic()
+        discovery.discover("q", chat=_chat(raw), lookup=lookup)
+        elapsed = time.monotonic() - started
+        assert elapsed < delay * len(names)
+
+    def test_result_order_follows_the_models_ranking_not_finish_order(self):
+        # subaaa is slowest, subbbb finishes first, subccc is in between. If
+        # ordering leaked from thread completion order instead of being read
+        # back against the original candidate list, this would come back
+        # bbb-ccc-aaa instead of the model's aaa-bbb-ccc.
+        raw = {"candidates": [
+            {"name": "subaaa", "reason": "a"},
+            {"name": "subbbb", "reason": "b"},
+            {"name": "subccc", "reason": "c"},
+        ]}
+        delays = {"subaaa": 0.06, "subbbb": 0.0, "subccc": 0.03}
+
+        def lookup(name, deadline=None):
+            time.sleep(delays[name])
+            return _found(name)
+
+        result = discovery.discover("q", chat=_chat(raw), lookup=lookup)
+        assert [c["name"] for c in result["communities"]] == ["subaaa", "subbbb", "subccc"]
+
+    def test_every_candidate_is_validated_even_though_only_the_cap_survives(self):
+        # MAX_CANDIDATES worth of good candidates, all past MAX_COMMUNITIES.
+        # Validating all of them concurrently is fine (the audit's explicit
+        # trade-off); what must hold is that only the cap's worth make it into
+        # the result, in the model's order.
+        names = ["sub{:02d}".format(i) for i in range(discovery.MAX_CANDIDATES)]
+        raw = {"candidates": [{"name": n, "reason": "x"} for n in names]}
+        looked_up = []
+
+        def lookup(name, deadline=None):
+            looked_up.append(name)
+            return _found(name)
+
+        result = discovery.discover("q", chat=_chat(raw), lookup=lookup)
+        assert [c["name"] for c in result["communities"]] == names[: discovery.MAX_COMMUNITIES]
+        assert sorted(looked_up) == sorted(names)
+
+    def test_a_slow_rejected_candidate_does_not_block_a_faster_later_one(self):
+        # subaaa exists but is over-18 (rejected); subbbb is fine. Both are
+        # looked up concurrently, so subbbb's accept does not wait on subaaa.
+        raw = {"candidates": [
+            {"name": "subaaa", "reason": "a"},
+            {"name": "subbbb", "reason": "b"},
+        ]}
+
+        def lookup(name, deadline=None):
+            if name == "subaaa":
+                time.sleep(0.05)
+                return _found(name, over18=True)
+            return _found(name)
+
+        result = discovery.discover("q", chat=_chat(raw), lookup=lookup)
+        assert [c["name"] for c in result["communities"]] == ["subbbb"]
+
+
 class TestPromptShape:
     def test_prompt_includes_query_and_profile_only_when_present(self):
         without_profile = discovery._discovery_prompt("skincare routines", "")
@@ -217,7 +300,7 @@ class TestPromptShape:
 
 class TestManual:
     def test_looked_up_names_carry_real_subscriber_counts(self):
-        def lookup(name):
+        def lookup(name, deadline=None):
             return {"name": "Freelance", "subscribers": 120000, "over18": False, "public": True}
 
         result = discovery.manual(["freelance"], lookup=lookup)
@@ -229,7 +312,7 @@ class TestManual:
         assert result["considered"] == ["freelance"]
 
     def test_a_failed_lookup_keeps_the_name_rather_than_dropping_it(self):
-        def lookup(name):
+        def lookup(name, deadline=None):
             raise RuntimeError("archive down")
 
         community = discovery.manual(["mysub"], lookup=lookup)["communities"][0]
@@ -237,7 +320,9 @@ class TestManual:
         assert community["checked"] is False
 
     def test_an_unknown_community_is_kept_for_the_fetch_stage_to_judge(self):
-        community = discovery.manual(["ghost"], lookup=lambda name: None)["communities"][0]
+        community = discovery.manual(
+            ["ghost"], lookup=lambda name, deadline=None: None
+        )["communities"][0]
         assert community["name"] == "ghost"
         assert community["checked"] is False
         assert community["subscribers"] == 0
@@ -257,7 +342,7 @@ class TestDeadline:
     def test_a_deadline_already_past_stops_the_candidate_checks(self):
         looked_up = []
 
-        def lookup(name):
+        def lookup(name, deadline=None):
             looked_up.append(name)
             return {"name": name, "subscribers": 1, "over18": False, "public": True}
 
@@ -268,31 +353,60 @@ class TestDeadline:
             )
         assert looked_up == []
 
-    def test_a_deadline_reached_partway_keeps_what_was_already_checked(self):
-        clock = {"now": discovery.time.monotonic()}
-        looked_up = []
+    def test_a_deadline_expiring_partway_through_the_batch_stops_the_rest(self):
+        """Lookups run concurrently, but not all at once when candidates outnumber
+        LOOKUP_WORKERS: the pool's task queue is FIFO, so the first LOOKUP_WORKERS
+        candidates start immediately and the rest wait for a worker to free up.
+        The deadline is rechecked right before each individual lookup fires (see
+        `_run_lookup`), so a deadline that only expires once that first wave is
+        already in flight must stop the still-queued second wave from starting,
+        rather than committing to the full batch regardless.
 
-        def lookup(name):
-            looked_up.append(name)
-            # The clock runs out the moment the first community is in hand.
-            clock["now"] += 100
+        A `Barrier` sized to LOOKUP_WORKERS proves exactly that many run
+        concurrently before the deadline flips; its `action` callback flips a
+        shared "expired" flag while all of them are still blocked on it, so the
+        flip is guaranteed to happen before any of the first wave returns and
+        frees a worker for the second wave to start on.
+        """
+        names = ["sub{:02d}".format(i) for i in range(discovery.LOOKUP_WORKERS + 2)]
+        expired = {"flag": False}
+
+        def _mark_expired():
+            expired["flag"] = True
+
+        first_wave = threading.Barrier(
+            discovery.LOOKUP_WORKERS, action=_mark_expired, timeout=5
+        )
+        looked_up = []
+        lock = threading.Lock()
+
+        def lookup(name, deadline=None):
+            with lock:
+                looked_up.append(name)
+            first_wave.wait()  # blocks until LOOKUP_WORKERS lookups are in flight
             return {"name": name, "subscribers": 1, "over18": False, "public": True}
+
+        def fake_monotonic():
+            return 1.0 if expired["flag"] else 0.0
 
         original = discovery.time.monotonic
         try:
-            discovery.time.monotonic = lambda: clock["now"]
+            discovery.time.monotonic = fake_monotonic
             result = discovery.discover(
-                "query", chat=self._chat(["one", "two", "three"]), lookup=lookup,
-                deadline=clock["now"] + 50,
+                "query", chat=self._chat(names), lookup=lookup, deadline=0.5,
             )
         finally:
             discovery.time.monotonic = original
 
-        assert looked_up == ["one"]
-        assert [c["name"] for c in result["communities"]] == ["one"]
+        # Only the first wave (exactly LOOKUP_WORKERS candidates) was ever looked
+        # up; the second wave was skipped once the deadline had passed instead of
+        # committing to the rest of the batch.
+        assert len(looked_up) == discovery.LOOKUP_WORKERS
+        assert set(looked_up) == set(names[: discovery.LOOKUP_WORKERS])
+        assert [c["name"] for c in result["communities"]] == names[: discovery.LOOKUP_WORKERS]
 
     def test_a_generous_deadline_changes_nothing(self):
-        def lookup(name):
+        def lookup(name, deadline=None):
             return {"name": name, "subscribers": 1, "over18": False, "public": True}
 
         result = discovery.discover(
@@ -302,7 +416,7 @@ class TestDeadline:
         assert len(result["communities"]) == 2
 
     def test_manual_keeps_every_name_even_when_the_clock_has_run_out(self):
-        def lookup(name):
+        def lookup(name, deadline=None):
             raise AssertionError("no lookup once the clock has run out")
 
         result = discovery.manual(

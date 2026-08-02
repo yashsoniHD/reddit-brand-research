@@ -1,3 +1,4 @@
+import { accessToken } from "./supabase/client";
 import {
   isBundle,
   type Bundle,
@@ -6,18 +7,49 @@ import {
   type ReportRequest,
   type SampleResponse,
   type SavedReport,
-  type StreamLine,
 } from "./types";
+
+/**
+ * Every request this module makes, with the session token attached.
+ *
+ * There is exactly one of these and every call site below goes through it,
+ * which is the point: in production vercel.json routes /api/* straight to the
+ * Python function, bypassing Next.js entirely, so a bearer token is the only
+ * thing that identifies the caller and a single forgotten header would be a
+ * route that silently 401s.
+ *
+ * Cookies cannot do this job. The Python function is a different origin from
+ * Next.js as far as the Supabase cookie is concerned in local development, and
+ * it has no way to read the chunked cookie format @supabase/ssr writes anyway.
+ *
+ * Deliberately thin. It adds one header and forwards everything else untouched,
+ * so `signal` still aborts and every caller below sees exactly what a plain
+ * fetch would have given it. A missing token is not an error here: the
+ * request goes anyway and the API answers 401, which keeps one place
+ * deciding what signed out means.
+ */
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const token = await accessToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(path, { ...init, headers });
+}
 
 /**
  * A run ends in exactly one of these. `invalid` carries per-field validation
  * messages from the engine; `error` carries one already user-ready sentence.
  *
  * The bundle a `report` outcome carries already has `report_id` stashed on it
- * when the server saved the run: the id arrives beside the bundle on the
- * terminal line, and putting it on the bundle here means every consumer
- * downstream (history, exports, the draft dialog) reads it from the one object
- * they already pass around.
+ * when the server saved the run: `outcomeForFinishedRun` reads it off the
+ * `/api/runs/{id}` poll and fetches the saved report, so every consumer
+ * downstream (history, exports, the draft dialog) reads it from the one
+ * object they already pass around, exactly as when the bundle rode a
+ * streamed terminal line.
+ *
+ * `aborted` survives the move from streaming to polling for `createRun`
+ * alone: the initial POST can still be given a signal, and an aborted POST is
+ * not a validation failure or a dead service, it is the caller changing its
+ * mind before a run even started.
  */
 export type RunOutcome =
   | { kind: "report"; bundle: Bundle }
@@ -25,45 +57,83 @@ export type RunOutcome =
   | { kind: "error"; message: string }
   | { kind: "aborted" };
 
-const STREAM_DIED =
-  "The connection to the analysis service dropped before the report was finished. Please try again.";
 const UNREADABLE =
   "The analysis service sent something this app could not read. Please try again.";
+const RUN_FAILED = "The analysis run failed before it finished. Please try again.";
+const RUN_LOST_REPORT =
+  "That run finished but the report could not be found. Please try again.";
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
-function parseLine(line: string): StreamLine | null {
-  try {
-    const parsed: unknown = JSON.parse(line);
-    if (!parsed || typeof parsed !== "object") return null;
-    const type = (parsed as { type?: unknown }).type;
-    if (type === "progress" || type === "report" || type === "invalid" || type === "error") {
-      return parsed as StreamLine;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+/** The five states a run can be in. Mirrors the engine's own run record. */
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelling"
+  | "cancelled";
+
+function isRunStatus(value: unknown): value is RunStatus {
+  return (
+    value === "queued" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelling" ||
+    value === "cancelled"
+  );
+}
+
+/** GET /api/runs/{id}. */
+export interface RunPoll {
+  status: RunStatus;
+  progress: string[];
+  report_id: string | null;
+  error: string | null;
+}
+
+/** One row of GET /api/runs, newest first. */
+export interface RunSummary {
+  id: string;
+  status: RunStatus;
+  query: string;
+  created_at: string;
+  report_id: string | null;
+}
+
+function isRunSummary(value: unknown): value is RunSummary {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<RunSummary>;
+  return (
+    typeof candidate.id === "string" &&
+    isRunStatus(candidate.status) &&
+    typeof candidate.query === "string" &&
+    typeof candidate.created_at === "string"
+  );
 }
 
 /**
- * POST /api/report and read the NDJSON stream line by line.
+ * POST /api/report. Starts a run server-side and returns immediately with its
+ * id; the caller polls `pollRun` for progress and the terminal result instead
+ * of holding a stream open, which is what lets a run outlive the tab that
+ * started it.
  *
- * `onProgress` fires for every progress line as it arrives; the promise
- * resolves with the terminal line. A stream that ends without a terminal line
- * resolves as an error rather than hanging or throwing something raw at the UI.
+ * The validation-failure shape is unchanged from the old streamed contract
+ * (`{"type": "invalid", "errors": [...]}` or `{"type": "error", "message":
+ * "..."}`), it just now arrives as one JSON body rather than a terminal NDJSON
+ * line, on whatever status code the engine sent it on. That shape is checked
+ * first, before the HTTP status, for exactly that reason.
  */
-export async function runReport(
+export async function createRun(
   request: ReportRequest,
-  options: { onProgress?: (message: string) => void; signal?: AbortSignal } = {},
-): Promise<RunOutcome> {
-  const { onProgress, signal } = options;
-
+  signal?: AbortSignal,
+): Promise<{ kind: "started"; runId: string } | RunOutcome> {
   let response: Response;
   try {
-    response = await fetch("/api/report", {
+    response = await authedFetch("/api/report", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
@@ -78,81 +148,113 @@ export async function runReport(
     };
   }
 
-  if (!response.ok || !response.body) {
-    // A non-streaming failure (a proxy error page, a crashed function) has no
-    // usable body for the user, so it gets one sentence rather than a status code.
-    return {
-      kind: "error",
-      message: `The analysis service returned an unexpected response (${response.status}). Please try again.`,
-    };
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let terminal: RunOutcome | null = null;
-  let sawUnparseable = false;
-
-  const handle = (raw: string) => {
-    const line = raw.trim();
-    if (!line) return;
-    const parsed = parseLine(line);
-    if (!parsed) {
-      sawUnparseable = true;
-      return;
-    }
-    if (parsed.type === "progress") {
-      onProgress?.(parsed.message);
-      return;
-    }
-    if (parsed.type === "report") {
-      const savedId =
-        typeof parsed.report_id === "string" && parsed.report_id ? parsed.report_id : null;
-      terminal = isBundle(parsed.bundle)
-        ? {
-            kind: "report",
-            bundle: savedId ? { ...parsed.bundle, report_id: savedId } : parsed.bundle,
-          }
-        : {
-            kind: "error",
-            message:
-              "That report came back in a format this app does not recognise. Please try again.",
-          };
-      return;
-    }
-    if (parsed.type === "invalid") {
-      const errors = Array.isArray(parsed.errors) ? parsed.errors.map(String) : [];
-      terminal = { kind: "invalid", errors };
-      return;
-    }
-    terminal = { kind: "error", message: String(parsed.message || UNREADABLE) };
-  };
-
+  let payload: unknown = null;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let newline = buffer.indexOf("\n");
-      while (newline !== -1) {
-        handle(buffer.slice(0, newline));
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-      }
-    }
-    buffer += decoder.decode();
-    handle(buffer);
-  } catch (error) {
-    if (isAbort(error)) return { kind: "aborted" };
-    // The stream died mid-flight. If a terminal line already arrived it still
-    // counts; otherwise the run is lost and the user is told plainly.
-    return terminal ?? { kind: "error", message: STREAM_DIED };
-  } finally {
-    reader.releaseLock();
+    payload = await response.json();
+  } catch {
+    payload = null;
   }
 
-  if (terminal) return terminal;
-  return { kind: "error", message: sawUnparseable ? UNREADABLE : STREAM_DIED };
+  const type = (payload as { type?: unknown } | null)?.type;
+  if (type === "invalid") {
+    const errors = (payload as { errors?: unknown }).errors;
+    return { kind: "invalid", errors: Array.isArray(errors) ? errors.map(String) : [] };
+  }
+  if (type === "error") {
+    const message = (payload as { message?: unknown }).message;
+    return { kind: "error", message: String(message || UNREADABLE) };
+  }
+
+  if (response.status === 202) {
+    const runId = (payload as { run_id?: unknown } | null)?.run_id;
+    if (typeof runId === "string" && runId) return { kind: "started", runId };
+    return { kind: "error", message: UNREADABLE };
+  }
+
+  return {
+    kind: "error",
+    message: `The analysis service returned an unexpected response (${response.status}). Please try again.`,
+  };
+}
+
+/**
+ * GET /api/runs/{id}. Returns null on any transport or shape failure rather
+ * than throwing, so a caller polling every couple of seconds can treat one
+ * missed beat as exactly that instead of ending the run over a single dropped
+ * request.
+ */
+export async function pollRun(runId: string, signal?: AbortSignal): Promise<RunPoll | null> {
+  try {
+    const response = await authedFetch(`/api/runs/${encodeURIComponent(runId)}`, {
+      signal,
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as Partial<RunPoll> | null;
+    if (!payload || !isRunStatus(payload.status)) return null;
+    return {
+      status: payload.status,
+      progress: Array.isArray(payload.progress) ? payload.progress.map(String) : [],
+      report_id: typeof payload.report_id === "string" ? payload.report_id : null,
+      error: typeof payload.error === "string" ? payload.error : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** GET /api/runs. The signed-in user's own runs, newest first. Empty on any failure. */
+export async function listRuns(signal?: AbortSignal): Promise<RunSummary[]> {
+  try {
+    const response = await authedFetch("/api/runs", { signal, cache: "no-store" });
+    if (!response.ok) return [];
+    const payload = (await response.json()) as { runs?: unknown } | null;
+    const runs = Array.isArray(payload?.runs) ? payload.runs : [];
+    return runs.filter(isRunSummary);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * POST /api/runs/{id}/cancel. Resolves to whether the request landed, not to
+ * whether the run has actually stopped: cancellation is asynchronous
+ * (`"cancelling"` before `"cancelled"`), and the poll loop is what observes
+ * the run actually winding down.
+ */
+export async function cancelRun(runId: string): Promise<boolean> {
+  try {
+    const response = await authedFetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: "POST",
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Turn a terminal poll (`"succeeded"` or `"failed"`) into the same
+ * `RunOutcome` the UI has always consumed. Calling this on a non-terminal
+ * poll is a caller bug, not a state this function tries to make sense of, so
+ * it falls through to the generic failure message rather than pretending to
+ * know what a "queued" or "cancelled" outcome would mean.
+ */
+export async function outcomeForFinishedRun(
+  poll: RunPoll,
+  signal?: AbortSignal,
+): Promise<RunOutcome> {
+  if (poll.status === "succeeded") {
+    if (!poll.report_id) return { kind: "error", message: RUN_LOST_REPORT };
+    const saved = await fetchReport(poll.report_id, signal);
+    if (saved.kind === "report") return { kind: "report", bundle: saved.bundle };
+    return { kind: "error", message: saved.message };
+  }
+  if (poll.status === "failed") {
+    const message = poll.error?.trim();
+    return { kind: "error", message: message || RUN_FAILED };
+  }
+  return { kind: "error", message: RUN_FAILED };
 }
 
 /**
@@ -165,7 +267,7 @@ export async function runReport(
  */
 export async function fetchSampleAvailable(signal?: AbortSignal): Promise<boolean> {
   try {
-    const response = await fetch("/api/sample/available", { signal });
+    const response = await authedFetch("/api/sample/available", { signal });
     if (response.status === 404) return true;
     if (!response.ok) return false;
     const payload = (await response.json()) as { available?: unknown } | null;
@@ -178,7 +280,7 @@ export async function fetchSampleAvailable(signal?: AbortSignal): Promise<boolea
 /** GET /api/sample. Returns null when no v3 sample is available. */
 export async function fetchSample(signal?: AbortSignal): Promise<Bundle | null> {
   try {
-    const response = await fetch("/api/sample", { signal });
+    const response = await authedFetch("/api/sample", { signal });
     if (!response.ok) return null;
     const payload = (await response.json()) as SampleResponse;
     if (!payload || payload.available !== true) return null;
@@ -218,7 +320,7 @@ export async function fetchReport(
 ): Promise<SavedReportOutcome> {
   let response: Response;
   try {
-    response = await fetch(`/api/reports/${encodeURIComponent(id)}`, { signal });
+    response = await authedFetch(`/api/reports/${encodeURIComponent(id)}`, { signal });
   } catch {
     return { kind: "error", message: REPORT_UNREACHABLE };
   }
@@ -278,7 +380,7 @@ export async function saveDraft(
   post: string,
 ): Promise<boolean> {
   try {
-    const response = await fetch("/api/drafts", {
+    const response = await authedFetch("/api/drafts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ report_id: reportId, idea_index: ideaIndex, post }),
@@ -325,7 +427,7 @@ export async function draftPost(
 ): Promise<DraftOutcome> {
   let response: Response;
   try {
-    response = await fetch("/api/draft", {
+    response = await authedFetch("/api/draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
@@ -337,7 +439,7 @@ export async function draftPost(
     if (response.status >= 500 && !signal?.aborted) {
       await sleep(DRAFT_RETRY_DELAY_MS, signal);
       if (signal?.aborted) return { kind: "aborted" };
-      response = await fetch("/api/draft", {
+      response = await authedFetch("/api/draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -388,7 +490,7 @@ const EXPORT_PATHS: Record<ExportKind, string> = {
  * are named identically however they are produced.
  */
 export async function downloadExport(bundle: Bundle, kind: ExportKind): Promise<void> {
-  const response = await fetch(EXPORT_PATHS[kind], {
+  const response = await authedFetch(EXPORT_PATHS[kind], {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bundle }),

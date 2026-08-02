@@ -937,8 +937,12 @@ class TestCancelAndDeadline:
 
         deadline = time.monotonic() + 3600
         build_bundle(fetch_posts=deadline_aware, deadline=deadline)
+        # The fetchers stop a triage allowance earlier than the analysis does: paging
+        # is what has to give when the clock is short, not the selection triage.
         assert captured["deadline"] == pytest.approx(
-            deadline - pipeline.DEADLINE_RESERVE_SECONDS
+            deadline
+            - pipeline.DEADLINE_RESERVE_SECONDS
+            - pipeline.TRIAGE_ALLOWANCE_SECONDS
         )
 
     def test_a_fetcher_that_predates_the_deadline_is_still_called(self):
@@ -1504,6 +1508,168 @@ class TestDeadlineKeepsWhatItRead:
             )
 
 
+class TestTriageHasItsOwnWindow:
+    """Fetching and the selection triage cannot share one soft deadline.
+
+    They used to: fetching was allowed to run right up to it and the triage was
+    gated on the same instant, so a fetch that used every second it was given left
+    the triage a window of zero. It issued no batches, every item fell to the
+    untriaged tier, and the sample was chosen by the deterministic fallback with
+    nothing in the report saying the relevance filter had stopped working.
+    """
+
+    def _frozen_clock(self, monkeypatch, start=1000.0):
+        clock = {"now": start}
+        monkeypatch.setattr(pipeline.time, "monotonic", lambda: clock["now"])
+        return clock
+
+    def test_a_fetch_that_runs_to_the_wire_still_leaves_the_triage_its_allowance(
+        self, monkeypatch
+    ):
+        clock = self._frozen_clock(monkeypatch)
+        deadline = clock["now"] + 240  # the budget the API opens a run for
+
+        def spends_everything_it_was_given(subreddit, days=30, deadline=None):
+            # Exactly what a paged fetch does: page until the deadline it was handed.
+            clock["now"] = deadline
+            return fake_posts(subreddit, days)
+
+        captured = {}
+
+        def spy(posts, comments, subreddits, query="", profile="", soft_deadline=None):
+            captured["left"] = soft_deadline - pipeline.time.monotonic()
+            return fake_classify(posts, comments, subreddits)
+
+        build_bundle(
+            fetch_posts=spends_everything_it_was_given, classify=spy, deadline=deadline
+        )
+        assert captured["left"] == pytest.approx(pipeline.TRIAGE_ALLOWANCE_SECONDS)
+
+    def test_the_triage_still_issues_batches_after_such_a_fetch(self, monkeypatch):
+        # The end of the same story, with the real triage in it: batches, not zero.
+        clock = self._frozen_clock(monkeypatch)
+        deadline = clock["now"] + 240
+        issued = []
+
+        def spends_everything_it_was_given(subreddit, days=30, deadline=None):
+            clock["now"] = deadline
+            return fake_posts(subreddit, days, count=40)
+
+        def fake_chat(prompt, max_tokens, label, thinking=True, deadline=None):
+            issued.append(label)
+            clock["now"] += 25  # one wave of the allowance
+            return {"ratings": [{"i": 1, "r": 2}]}, "m"
+
+        def classify_through_the_real_triage(
+            posts, comments, subreddits, query="", profile="", soft_deadline=None
+        ):
+            ratings = analysis.rate_relevance(
+                posts, query, profile, chat=fake_chat, soft_deadline=soft_deadline
+            )
+            # Not None (which would mean "triage failed, select deterministically")
+            # and not empty (which is what a zero-second window produced).
+            assert ratings
+            return fake_classify(posts, comments, subreddits)
+
+        build_bundle(
+            fetch_posts=spends_everything_it_was_given,
+            classify=classify_through_the_real_triage,
+            deadline=deadline,
+        )
+        assert issued == ["relevance-triage"]
+
+    def test_the_windows_add_up_to_less_than_the_run_they_are_carved_from(self):
+        # The arithmetic in the constants' own comment: 80s of retrieval, 50s of
+        # triage, 110s of reserve, out of the 240 the API opens. The hard stop above
+        # that is overflow margin, not a term in this sum.
+        held_back = pipeline.DEADLINE_RESERVE_SECONDS + pipeline.TRIAGE_ALLOWANCE_SECONDS
+        assert held_back == 160
+        assert 240 - held_back == 80
+        # Two waves of triage batches at roughly 25 seconds each is what the
+        # allowance is for, and the reserve still has to cover two whole calls.
+        assert pipeline.TRIAGE_ALLOWANCE_SECONDS >= 2 * 25
+        assert pipeline.DEADLINE_RESERVE_SECONDS >= 40 + 70
+
+
+class TestCommunitiesAreReadInParallel:
+    """The scrape reads several communities at once; everything else stays in order.
+
+    Pages inside one community cannot overlap (the cursor for the next page comes out
+    of the current one), so the concurrency is across communities, which is where the
+    whole cost of the stage is. A plain paged read draws no rate limiting from the
+    archive, which is why this is safe here and deliberately not done in search mode.
+    """
+
+    def test_the_communities_are_genuinely_in_flight_at_the_same_time(self):
+        # A barrier is the only honest test of concurrency: read one after another,
+        # no fetch can ever be the third to arrive and the wait breaks the barrier.
+        barrier = threading.Barrier(3, timeout=10)
+
+        def waits_for_the_others(subreddit, days=30):
+            barrier.wait()
+            return fake_posts(subreddit, days)
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta", "gamma"]),
+            fetch_posts=waits_for_the_others,
+        )
+        assert bundle["inputs"]["subreddits"] == ["alpha", "beta", "gamma"]
+
+    def test_the_answer_is_assembled_in_discovery_order_not_arrival_order(self):
+        def slow_first(subreddit, days=30):
+            if subreddit == "alpha":
+                time.sleep(0.05)
+            return fake_posts(subreddit, days)
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta"]), fetch_posts=slow_first,
+        )
+        # r/beta answered first and r/alpha last, which is exactly the ordering a
+        # fan-out produces and the one an append-as-they-land assembly gets wrong.
+        assert bundle["inputs"]["subreddits"] == ["alpha", "beta"]
+
+    def test_progress_messages_are_emitted_one_at_a_time(self):
+        # The API's own callback is a queue put, but a caller is not obliged to be
+        # thread safe, so the emit is serialised rather than assumed to be.
+        live = {"now": 0, "peak": 0}
+
+        def progress(message):
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+            time.sleep(0.002)
+            live["now"] -= 1
+
+        build_bundle(
+            discover=make_discover(["alpha", "beta", "gamma"]), progress=progress,
+        )
+        assert live["peak"] == 1
+
+    def test_a_failure_in_one_parallel_read_costs_only_that_community(self):
+        def flaky(subreddit, days=30):
+            if subreddit == "beta":
+                raise RuntimeError("The Reddit data service is temporarily unavailable.")
+            return fake_posts(subreddit, days)
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta", "gamma"]), fetch_posts=flaky,
+        )
+        assert bundle["inputs"]["subreddits"] == ["alpha", "gamma"]
+        assert any("r/beta was skipped" in notice for notice in bundle["notices"])
+
+    def test_the_communities_that_never_started_share_one_notice(self):
+        # Already inside the reserve when the fetch begins: the first community is
+        # read anyway (stopping here produces no report at all) and the rest say so
+        # once, by name, instead of four times.
+        deadline = time.monotonic() + pipeline.DEADLINE_RESERVE_SECONDS - 1
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta", "gamma"]), deadline=deadline,
+        )
+        assert bundle["inputs"]["subreddits"] == ["alpha"]
+        ran_out = [notice for notice in bundle["notices"] if "ran out of time" in notice]
+        assert len(ran_out) == 1
+        assert "r/beta and r/gamma" in ran_out[0]
+
+
 class TestCallForwardsArbitraryKeywords:
     """`_call` is the injection point every fetch/discovery fake goes through, so
     it has to forward whatever keywords a follow-up wires in (today: `deadline`;
@@ -1897,6 +2063,73 @@ class TestRetrievalMode:
         )
         assert bundle["inputs"]["days"] == 7
         assert bundle["inputs"]["retrieval"] == "search"
+
+
+class TestOnlyMatchesCountTowardsASufficientPool:
+    """Replies come back from the archive unfiltered, so counting them all lies.
+
+    Comment search rejects `body=` at subreddit scope, so `reddit_data.fetch_comments`
+    stops asking and stamps `phrase_match` client-side over whatever came back. A
+    community's week is hundreds of replies about everything it talks about, and
+    counting all of them as pool made every phrase-filtered run look like it had
+    plenty of evidence: the tier that keeps the pool passed almost always, and the
+    tier that re-reads without the filter almost never fired.
+    """
+
+    QUERY = 'What agencies say about "meta ads" pricing'
+
+    def _posts(self, count, matched=False):
+        return [
+            dict(post, phrase_match=matched)
+            for post in fake_posts("alpha", count=count)
+        ]
+
+    def _replies(self, count, matched=False):
+        return [
+            dict(comment, phrase_match=matched)
+            for comment in fake_comments("alpha", count=count)
+        ]
+
+    def _run(self, found, replies, read=0, **overrides):
+        kwargs = dict(
+            query=self.QUERY,
+            subreddits=["alpha"], manual=fake_manual,
+            search_posts=lambda subreddit, terms, limit=100, deadline=None, phrases=None: list(found),
+            fetch_comments_for_posts=lambda ids, limit_per_post=100, deadline=None, phrases=None: list(replies),
+            fetch_posts=lambda subreddit, days=30, deadline=None, phrases=None: self._posts(read),
+            fetch_comments=lambda subreddit, days=30, deadline=None, phrases=None: [],
+        )
+        kwargs.update(overrides)
+        return build_bundle(**kwargs)
+
+    def test_replies_that_never_mentioned_the_phrase_do_not_carry_the_pool(self):
+        # 3 threads and 50 replies, none of which said it. The pool the reader asked
+        # for is 3 items, so the run re-reads without the filter rather than passing
+        # 53 items off as evidence about "meta ads".
+        bundle = self._run(found=self._posts(3), replies=self._replies(50), read=2)
+        assert bundle["sample"]["filter"]["mode"] == "unfiltered"
+        assert any("without the phrase filter" in notice for notice in bundle["notices"])
+
+    def test_replies_that_did_mention_it_count_and_keep_the_pool(self):
+        bundle = self._run(found=self._posts(3), replies=self._replies(12, matched=True))
+        assert bundle["sample"]["filter"]["mode"] == "loose"
+        # Two denominators, because only the threads were filtered at the archive.
+        assert any(
+            "of the 3 threads and 12 replies we read actually mentioned" in notice
+            for notice in bundle["notices"]
+        )
+
+    def test_a_thin_search_is_not_rescued_by_the_replies_it_pulled_in(self):
+        # The same arithmetic one stage earlier: 3 matched threads with 50 replies
+        # hanging off them is a thin search, so the communities are read as well.
+        bundle = self._run(found=self._posts(3), replies=self._replies(50), read=20)
+        assert bundle["inputs"]["retrieval"] == "search+scrape"
+
+    def test_an_unfiltered_run_counts_every_item_as_before(self):
+        # No phrases, nothing stamped: the pool is the pool, and a run that predates
+        # the filter entirely is unaffected by any of this.
+        assert pipeline._on_topic_count(fake_comments("alpha", count=7), []) == 7
+        assert pipeline._on_topic_count(self._replies(7), []) == 7
 
 
 class TestDefaultWindow:

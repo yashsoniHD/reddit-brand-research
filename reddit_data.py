@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -61,12 +62,24 @@ POSTS_TEXT_PARAM = "query"      # matches title and selftext, AND of words
 # Verified live 2026-07-29: GET /api/posts/search?query=meta%20ads returns 200
 # and matches across both title and selftext with AND-of-words semantics.
 # `body=` on posts is rejected with 400 Unknown query parameter: 'body'.
-# `body=` on comments is accepted: the probe got a 422 transient timeout back,
-# not a 400, which means the parameter itself is recognised.
-COMMENTS_TEXT_PARAM = "body"    # posts reject `body=` with 400 Unknown query parameter
+#
+# Comments have no equivalent constant here. `body=` at subreddit scope is
+# recognised (a 422, not a 400) but 6 of 6 live probes across two subreddits
+# came back 422 anyway (docs/ARCTIC_SHIFT_API.md), and 422 is retryable, so
+# sending it used to burn MAX_ATTEMPTS requests and their backoff before
+# fetch_comments gave up with zero comments. There is nothing to gain from
+# sending it, so `fetch_comments` never does: it fetches unfiltered pages from
+# the first request and leaves matching to `keywords.matches_all` client-side.
 MAX_TEXT_PARAM_CHARS = 120
 PHRASE_MAX_POST_PAGES = 3
-PHRASE_MAX_COMMENT_PAGES = 2
+# Equal to MAX_COMMENT_PAGES, not lower: unlike posts, comments never get an
+# archive-side text prefilter (see the note above), so phrase mode has to sift
+# every comment client-side with keywords.matches_all. A lower ceiling here
+# used to hand the mode that most needs raw material less of it than the
+# unfiltered mode gets, which is backwards; there is nothing about phrase mode
+# that costs more per page; the only extra cost is CPU-cheap client-side
+# matching after the fetch.
+PHRASE_MAX_COMMENT_PAGES = MAX_COMMENT_PAGES
 
 # ── Search tuning ─────────────────────────────────────────────────────────────
 # Text search is the one thing this archive will not parallelise. Probed
@@ -397,12 +410,84 @@ def _text_params(phrases: Optional[List[str]], field: str) -> dict:
     return {field: joined} if joined else {}
 
 
+# ── Lookup cache ──────────────────────────────────────────────────────────────
+# `lookup_subreddit` is pure metadata (does the community exist, is it private,
+# how many subscribers), never post or comment content, so caching it briefly is
+# safe. Discovery now checks up to MAX_CANDIDATES candidates concurrently on
+# every run and a manual pick re-checks whatever the reader typed, so the same
+# name recurs within and across requests often enough that a short cache saves
+# real round trips. Fifteen minutes is short enough that a community banned or
+# created since is stale for one run at most, and long enough to absorb the
+# repeats a single request produces.
+LOOKUP_CACHE_TTL_SECONDS = 15 * 60
+# A generous ceiling, not a tuned one: this process never runs enough distinct
+# discovery queries between restarts for the cache to grow large on its own, so
+# the cap exists purely to stop it growing without bound, not to bound typical
+# usage. Single-flight (coalescing concurrent lookups of the same not-yet-cached
+# name) is deliberately not attempted here: the duplicate-request cost it would
+# save is small and already bounded by LOOKUP_WORKERS, and a wrong-but-simple
+# cache is safer to ship than a subtly wrong locking scheme.
+LOOKUP_CACHE_MAX_ENTRIES = 512
+_CACHE_MISS = object()
+_lookup_cache: dict = {}
+_lookup_cache_lock = threading.Lock()
+
+
+def _cache_get(name: str):
+    """The cached `lookup_subreddit` result for `name`, or `_CACHE_MISS`.
+
+    A sentinel rather than `None` marks a miss, because `None` is itself a valid
+    cached answer: it means the archive does not know this name.
+
+    Returns a shallow copy when the cached value is a dict, never the object
+    itself: `lookup_subreddit`'s result is otherwise the exact dict every future
+    call to this name returns, and a caller mutating what it thinks is its own
+    result would silently poison the cache for everyone after it.
+    """
+    with _lookup_cache_lock:
+        entry = _lookup_cache.get(name.lower())
+    if entry is None:
+        return _CACHE_MISS
+    stamped_at, value = entry
+    if time.monotonic() - stamped_at >= LOOKUP_CACHE_TTL_SECONDS:
+        return _CACHE_MISS
+    return dict(value) if isinstance(value, dict) else value
+
+
+def _cache_set(name: str, value) -> None:
+    """Stash `value` for `name`, then purge what has expired and cap the size.
+
+    Both happen here, on every write, rather than on a timer or a background
+    thread: a write is exactly when the cache is already being touched, and
+    lookups happen in bursts (discovery checks up to MAX_CANDIDATES names
+    concurrently), so there is no meaningful gap to schedule cleanup into
+    instead. Without this, entries that expire between one run and the next
+    would sit in the dict forever, since nothing ever deletes an expired key on
+    its own, only refuses to return it.
+    """
+    now = time.monotonic()
+    with _lookup_cache_lock:
+        expired = [
+            key for key, (stamped_at, _) in _lookup_cache.items()
+            if now - stamped_at >= LOOKUP_CACHE_TTL_SECONDS
+        ]
+        for key in expired:
+            del _lookup_cache[key]
+
+        _lookup_cache[name.lower()] = (now, value)
+
+        while len(_lookup_cache) > LOOKUP_CACHE_MAX_ENTRIES:
+            oldest_key = min(_lookup_cache, key=lambda key: _lookup_cache[key][0])
+            del _lookup_cache[oldest_key]
+
+
 # ── Lookup ────────────────────────────────────────────────────────────────────
-def _search_subreddits(params: dict) -> List[dict]:
+def _search_subreddits(params: dict, deadline: Optional[float] = None) -> List[dict]:
     """Raises requests.RequestException / ValueError so callers can fail open."""
     resp = _request_page(
         SUBREDDITS_ENDPOINT, dict(params, limit=LOOKUP_FETCH_LIMIT),
         timeout=VALIDATION_TIMEOUT_SECONDS,
+        deadline=deadline,
     )
     if resp.status_code >= 400:
         raise requests.HTTPError("lookup unavailable")
@@ -410,7 +495,7 @@ def _search_subreddits(params: dict) -> List[dict]:
     return [entry for entry in results if isinstance(entry, dict)]
 
 
-def lookup_subreddit(name: str) -> Optional[dict]:
+def lookup_subreddit(name: str, deadline: Optional[float] = None) -> Optional[dict]:
     """Everything discovery needs to judge a candidate community in one lookup.
 
     The archive answers 200 with an empty list for a name that does not exist, so
@@ -420,18 +505,35 @@ def lookup_subreddit(name: str) -> Optional[dict]:
     it also needs the subscriber count and the private/over-18 flags. So this
     returns the metadata, returns None for a name the archive does not know, and
     raises RuntimeError when the lookup service itself failed.
+
+    Cached for LOOKUP_CACHE_TTL_SECONDS (see the cache block above); a service
+    failure is never cached, so an outage gets retried on the very next call
+    instead of being stuck "unavailable" for the rest of the window.
+
+    `deadline`, an absolute time.monotonic() value exactly like `fetch_posts` and
+    `fetch_comments` take (see `_out_of_time`), is passed all the way down to
+    `_request_page` so a lookup issued near the end of a run's time budget cuts
+    its own retries short instead of spending up to MAX_ATTEMPTS attempts and
+    their backoff on a candidate the run no longer has time to read. Only
+    retries are shortened this way, never the first attempt (see
+    `_request_page`'s own docstring): an empty result is worse than a late one.
     """
+    cached = _cache_get(name)
+    if cached is not _CACHE_MISS:
+        return cached
+
     try:
-        results = _search_subreddits({"subreddit": name})
+        results = _search_subreddits({"subreddit": name}, deadline=deadline)
     except (requests.RequestException, ValueError) as exc:
         logger.warning("subreddit lookup failed for %s: %s", name, exc)
         raise RuntimeError(_UNAVAILABLE)
 
+    result = None
     for entry in results:
         display = _clean_text(entry.get("display_name"))
         if not display or display.lower() != name.lower():
             continue
-        return {
+        result = {
             "name": display,
             "subscribers": max(0, _safe_int(entry.get("subscribers"))),
             "over18": bool(entry.get("over18")),
@@ -439,8 +541,14 @@ def lookup_subreddit(name: str) -> Optional[dict]:
             # public, the same reading `_suggestions_for` takes.
             "public": entry.get("subreddit_type") in (None, "public", "restricted"),
         }
+        break
 
-    return None
+    _cache_set(name, result)
+    # A copy, for the same reason `_cache_get` hands one out: `result` is the
+    # exact object just stored in the cache, and returning it directly here
+    # would let this very first, cache-populating call poison the cache just
+    # as easily as a later cache hit would (see `_cache_get`'s docstring).
+    return dict(result) if isinstance(result, dict) else result
 
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
@@ -569,17 +677,25 @@ def fetch_comments(
 ) -> List[dict]:
     """Newest-first comments from the last `days` days, deduped, deleted ones dropped.
 
-    `phrases`, keyword-only and last for the same reason as `fetch_posts`, adds
-    the same best-effort prefilter and `phrase_match` stamp. Matching uses the
-    comment body only, since a comment has no title.
+    `phrases`, keyword-only and last for the same reason as `fetch_posts`, stamps
+    every comment with `phrase_match` (`keywords.matches_all` over the comment
+    body, since a comment has no title) without narrowing what comes back.
+
+    Unlike `fetch_posts`, this never sends an archive-side text prefilter.
+    Comment search rejects `body=` at subreddit scope with a 422 on
+    effectively every attempt (6 of 6 live probes, docs/ARCTIC_SHIFT_API.md),
+    and 422 is retryable, so sending it used to cost MAX_ATTEMPTS requests and
+    their backoff for a page that was always going to come back unfiltered
+    anyway. Fetching unfiltered from the first request gets to the same place
+    for a fraction of the cost; correctness does not depend on the prefilter,
+    since `keywords.matches_all` re-checks every phrase against every returned
+    comment regardless.
     """
     cutoff = _cutoff_timestamp(days)
     comments: List[dict] = []
     seen_ids = set()
     before = None
     max_pages = PHRASE_MAX_COMMENT_PAGES if phrases else MAX_COMMENT_PAGES
-    text_active = bool(phrases)
-    text_params = _text_params(phrases, COMMENTS_TEXT_PARAM)
 
     for page in range(max_pages):
         if len(comments) >= limit:
@@ -591,8 +707,6 @@ def fetch_comments(
         params = {"subreddit": subreddit, "limit": PAGE_SIZE, "after": cutoff, "sort": "desc"}
         if before is not None:
             params["before"] = before
-        if text_active and text_params:
-            params.update(text_params)
 
         try:
             resp = _request_page(COMMENTS_ENDPOINT, params, deadline=deadline)
@@ -600,17 +714,6 @@ def fetch_comments(
             # Comments are supporting evidence: never fail the whole run for them.
             logger.warning("comment page %s failed for r/%s: %s", page, subreddit, exc)
             break
-
-        if resp.status_code == 400 and text_active and text_params:
-            # Same reasoning as fetch_posts: retry once for this page without
-            # the text params before treating this as a plain failed page.
-            retry_params = {k: v for k, v in params.items() if k not in text_params}
-            try:
-                resp = _request_page(COMMENTS_ENDPOINT, retry_params, deadline=deadline)
-            except requests.RequestException as exc:
-                logger.warning("comment page %s retry failed for r/%s: %s", page, subreddit, exc)
-                break
-            text_active = False
 
         if resp.status_code >= 400:
             logger.warning("comment page %s returned %s for r/%s", page, resp.status_code, subreddit)

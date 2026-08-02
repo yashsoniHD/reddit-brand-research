@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Sequence
 
 import analysis
@@ -38,6 +39,23 @@ MAX_REASON_WORDS = 15
 # reddit_data.MAX_SEARCH_TERMS will use gives the sanitiser something to drop
 # without leaving a community with no term at all.
 MAX_TERMS_ASKED = 3
+# Candidate lookups are independent network round trips (each up to MAX_ATTEMPTS
+# tries with backoff in reddit_data), so they run concurrently rather than one
+# at a time. Bounded well under MAX_CANDIDATES so one discovery call cannot open
+# more sockets than the archive's per-minute budget can comfortably absorb.
+#
+# Four, not eight: nobody has actually probed /subreddits/search (this
+# endpoint) for its concurrency tolerance. What has been probed, on the
+# neighbouring /posts/search text-search endpoint, is not encouraging (see
+# reddit_data.py:79-80): six concurrent `query=` requests came back six 429s,
+# and three still drew three. A different endpoint may well behave better, but
+# nobody has measured it, and the fail-open path just below (unreachable ==
+# attempted trusts the model's candidates unchecked, private/over-18 filter
+# and all) gets easier to trigger the more of these requests land inside the
+# same second. Four is picked to be conservative against evidence from a
+# sibling endpoint, not because four itself has been shown safe; a real probe
+# of this endpoint should replace this reasoning, not just the number.
+LOOKUP_WORKERS = 4
 # Twelve candidates with a short reason each is roughly 600 tokens of JSON. The
 # ceiling is set well above that because the failure mode is asymmetric: spare
 # allowance costs nothing (only tokens actually emitted are billed), while coming up
@@ -173,6 +191,33 @@ def _out_of_time(deadline: Optional[float]) -> bool:
     return deadline is not None and time.monotonic() >= deadline
 
 
+class _DeadlineExceeded(Exception):
+    """Internal signal only: a lookup was skipped because the deadline had
+    already passed by the time a pool worker was free to start it, as opposed
+    to the lookup running and failing. Raised and caught only inside this
+    module (see `_run_lookup`); nothing outside it should ever see this type.
+    """
+
+
+def _run_lookup(lookup: Callable, name: str, deadline: Optional[float]):
+    """Call `lookup(name, deadline=deadline)`, unless the deadline has already
+    passed by the time a pool worker is free to run this particular task.
+
+    Every candidate's lookup is submitted to the pool up front, so with more
+    candidates than there are workers, the later ones do not actually start
+    until an earlier one finishes and frees a worker. Checking the deadline
+    here, right before the call, rather than only once before the whole batch
+    is submitted, is what stops a deadline that expires partway through a
+    large batch from still committing to lookups for candidates near the end
+    of it. `deadline` is also passed into the lookup itself so a call that
+    does go ahead can cut its own retries short (see
+    `reddit_data.lookup_subreddit`'s deadline handling).
+    """
+    if _out_of_time(deadline):
+        raise _DeadlineExceeded()
+    return lookup(name, deadline=deadline)
+
+
 def discover(
     query: str,
     profile: str = "",
@@ -198,9 +243,19 @@ def discover(
     `pipeline.run_report` takes, so tests and cached wrappers can substitute
     their own without this module importing either.
 
-    `deadline` is an absolute time.monotonic() value. Past it, the remaining
-    candidates are left unchecked rather than spending the run's last seconds on
-    lookups for communities it will not have time to read.
+    `deadline` is an absolute time.monotonic() value. It is checked once before
+    any lookup starts: past the deadline already, no candidate is looked up at
+    all rather than spending the run's last seconds on lookups for communities
+    it will not have time to read. It is then checked again for each
+    individual candidate, right before that candidate's lookup actually fires
+    (see `_run_lookup`): the lookups are all submitted to the pool up front,
+    but with more candidates than LOOKUP_WORKERS the later ones do not start
+    until an earlier one finishes, so a deadline that only expires partway
+    through a large batch must not still commit to the ones still queued.
+    `deadline` is also handed down into `lookup` itself, so a lookup that does
+    go ahead can cut its own retries short rather than spending the full
+    MAX_ATTEMPTS worth of backoff on a candidate the run is about to give up
+    on anyway.
     """
     chat = chat or analysis.chat_json
     lookup = lookup or reddit_data.lookup_subreddit
@@ -228,41 +283,66 @@ def discover(
     attempted = 0
     unreachable = 0
 
-    # The model ranked these, so its order is kept: the first ones that pass are the
-    # ones that get read.
-    for candidate in candidates:
-        if len(communities) >= MAX_COMMUNITIES:
-            break
-        if _out_of_time(deadline):
-            logger.warning(
-                "out of time after %s candidates; keeping the %s already checked",
-                attempted, len(communities),
+    if _out_of_time(deadline):
+        logger.warning("out of time before checking any of %s candidates", len(candidates))
+    else:
+        # Every lookup this call will make is issued concurrently up front (each
+        # is an independent network round trip), then results are walked back in
+        # the model's order below to decide what survives and where the cap
+        # falls. That is deliberately looser than "stop the instant eight are
+        # accepted": a candidate validated but not used costs one extra
+        # concurrent lookup, not one extra serial one, which is a fair trade for
+        # candidates now taking one round of lookups instead of up to twelve.
+        # `_run_lookup` still rechecks the deadline per candidate (see its
+        # docstring), so this looseness never extends past the workers already
+        # running once the clock actually runs out mid-batch.
+        workers = min(LOOKUP_WORKERS, len(candidates))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_run_lookup, lookup, candidate["name"], deadline)
+                for candidate in candidates
+            ]
+
+        # The model ranked these, so its order is kept even though every lookup
+        # ran at once: the first ones that pass are the ones that get read.
+        for candidate, future in zip(candidates, futures):
+            if len(communities) >= MAX_COMMUNITIES:
+                break
+            try:
+                found = future.result()
+            except _DeadlineExceeded:
+                # Not counted as `attempted`: this candidate was never actually
+                # checked, the same as if the clock had already run out before
+                # the whole batch started, so it must not skew the fail-open
+                # decision below toward "every attempt failed".
+                logger.info(
+                    "discovery skipped r/%s: out of time before its lookup started",
+                    candidate["name"],
+                )
+                continue
+            except RuntimeError as exc:
+                attempted += 1
+                unreachable += 1
+                logger.warning("could not check r/%s: %s", candidate["name"], exc)
+                continue
+            attempted += 1
+
+            if not found:
+                logger.info("discovery dropped r/%s: no such community", candidate["name"])
+                continue
+            if found.get("over18") or not found.get("public"):
+                logger.info("discovery dropped r/%s: private or over-18", candidate["name"])
+                continue
+
+            communities.append(
+                {
+                    "name": found.get("name") or candidate["name"],
+                    "reason": candidate["reason"],
+                    "subscribers": reddit_data._safe_int(found.get("subscribers")),
+                    "checked": True,
+                    "terms": list(candidate.get("terms") or []),
+                }
             )
-            break
-        attempted += 1
-        try:
-            found = lookup(candidate["name"])
-        except RuntimeError as exc:
-            unreachable += 1
-            logger.warning("could not check r/%s: %s", candidate["name"], exc)
-            continue
-
-        if not found:
-            logger.info("discovery dropped r/%s: no such community", candidate["name"])
-            continue
-        if found.get("over18") or not found.get("public"):
-            logger.info("discovery dropped r/%s: private or over-18", candidate["name"])
-            continue
-
-        communities.append(
-            {
-                "name": found.get("name") or candidate["name"],
-                "reason": candidate["reason"],
-                "subscribers": reddit_data._safe_int(found.get("subscribers")),
-                "checked": True,
-                "terms": list(candidate.get("terms") or []),
-            }
-        )
 
     if not communities and attempted and unreachable == attempted:
         # Fail OPEN, the same choice `validate_subreddit` makes: our own lookup being
@@ -305,22 +385,47 @@ def manual(
     can show real subscriber counts, but a failed or empty lookup keeps the name
     rather than dropping it: the user chose it deliberately, and the fetch stage
     already turns a community that does not exist into a plain-language notice.
+
+    The lookups run concurrently, the same reasoning as discover(): they are
+    independent network round trips. `deadline` is checked once up front,
+    before submitting any lookup at all, and then again per name right before
+    each one actually runs (see `_run_lookup`), the same two-part check
+    discover() does and for the same reason: with more names than
+    LOOKUP_WORKERS, a deadline that only expires partway through the batch
+    must not still commit to the ones still queued.
     """
     lookup = lookup or reddit_data.lookup_subreddit
+    names = list(names)
     communities: List[dict] = []
 
-    for name in names:
+    if not names:
+        return {"communities": communities, "considered": names}
+
+    if _out_of_time(deadline):
+        # The names still go in: the user chose them, and the fetch stage is what
+        # actually needs the time. Only the cosmetic lookups are skipped.
+        logger.info(
+            "out of time; skipping the lookup for %s manually chosen communities", len(names)
+        )
+        futures = [None] * len(names)
+    else:
+        workers = min(LOOKUP_WORKERS, len(names))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_run_lookup, lookup, name, deadline) for name in names]
+
+    for name, future in zip(names, futures):
         subscribers = 0
         display = name
         checked = False
         found = None
-        if _out_of_time(deadline):
-            # The name still goes in: the user chose it, and the fetch stage is what
-            # actually needs the time. Only the cosmetic lookup is skipped.
-            logger.info("out of time; skipping the lookup for manually chosen r/%s", name)
-        else:
+        if future is not None:
             try:
-                found = lookup(name)
+                found = future.result()
+            except _DeadlineExceeded:
+                logger.info(
+                    "out of time; skipping the lookup for manually chosen r/%s", name
+                )
+                found = None
             except RuntimeError as exc:
                 logger.warning("could not check manually chosen r/%s: %s", name, exc)
                 found = None

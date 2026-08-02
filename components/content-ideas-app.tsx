@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AccountMenu } from "@/components/account-menu";
 import { AppShell } from "@/components/app-shell";
 import { ErrorBanner } from "@/components/error-banner";
 import { Hero } from "@/components/hero";
@@ -9,9 +10,26 @@ import { HistoryDrawer } from "@/components/history-drawer";
 import { QueryForm, type FormValues } from "@/components/query-form";
 import { ReportView } from "@/components/report/report-view";
 import { RunProgress } from "@/components/run-progress";
-import { fetchSample, fetchSampleAvailable, runReport } from "@/lib/api";
+import {
+  cancelRun,
+  createRun,
+  fetchSample,
+  fetchSampleAvailable,
+  listRuns,
+  outcomeForFinishedRun,
+  pollRun,
+  type RunOutcome,
+} from "@/lib/api";
 import { bundleKey, reportPath } from "@/lib/format";
-import { addToHistory, loadHistory, saveHistory } from "@/lib/storage";
+import {
+  addToHistory,
+  clearActiveRun,
+  loadActiveRun,
+  loadActiveRunStartedAt,
+  loadHistory,
+  saveActiveRun,
+  saveHistory,
+} from "@/lib/storage";
 import { checkCommunities, mentionsCommunities } from "@/lib/validate";
 import {
   DEFAULT_DAYS,
@@ -38,6 +56,42 @@ const DEFAULT_VALUES: FormValues = {
   contentTypes: [],
   channels: [],
 };
+
+/** How often an in-flight run is polled for progress and a terminal result. */
+const POLL_INTERVAL_MS = 2500;
+/**
+ * Consecutive failed polls tolerated before the run is given up on. At
+ * `POLL_INTERVAL_MS` that is roughly 20 seconds of no contact, long enough to
+ * ride out a brief network blip without either hanging forever or declaring a
+ * run dead the first time one request drops.
+ */
+const MAX_POLL_FAILURES = 8;
+const POLL_LOST_MESSAGE =
+  "Lost contact with the analysis service while your report was running. Please try again.";
+
+/**
+ * Wall-clock cap on how long a run is polled from this tab, measured from
+ * when it actually started (see `runStartedAt` below), not from when polling
+ * of it began here.
+ *
+ * This is a separate failure mode from `MAX_POLL_FAILURES`: that one counts
+ * transport/shape errors from `pollRun`, but a run stuck "queued" or
+ * "running" forever (a wedged worker, a cron that never drains the queue)
+ * answers every poll with a valid, non-terminal status. That resets the
+ * failure counter each time, so without this cap the UI would spin forever
+ * with a live-looking spinner and no way out.
+ *
+ * The engine's own run budget is roughly 300s of processing, plus whatever
+ * time a run sits queued before a worker picks it up, and the server has its
+ * own sweep that hard-fails a run stuck past that budget. 8 minutes (480s)
+ * gives about 3 minutes of headroom over the 300s processing budget for
+ * queueing and network latency, so this client-side cap sits comfortably
+ * above what the server would take on a run that is genuinely still working,
+ * and only fires for a run the server-side sweep has not (yet) caught.
+ */
+const RUN_TIMEOUT_MS = 8 * 60 * 1000;
+const RUN_TIMEOUT_MESSAGE =
+  "This run is taking longer than expected. It may still finish - check your recent runs shortly.";
 
 /**
  * What is wrong with the form.
@@ -200,6 +254,16 @@ export function ContentIdeasApp() {
   const [errors, setErrors] = useState<string[]>([]);
   const [progress, setProgress] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
+  // The run this page is currently polling, or null between runs. Persisted to
+  // localStorage (see the resume-on-mount effect below) so a reload can pick a
+  // run back up instead of losing track of it: the run itself now lives
+  // server-side and keeps going whether or not anything here is watching it.
+  const [runId, setRunId] = useState<string | null>(null);
+  // When the current `runId` actually started, for the wall-clock timeout
+  // below. Set alongside `runId` at every site that sets it (submit, and
+  // both mount-resume paths), so a run resumed after a reload times out
+  // relative to when it originally started rather than the resume moment.
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [highlightCommunities, setHighlightCommunities] = useState(false);
@@ -209,7 +273,6 @@ export function ContentIdeasApp() {
   const [sampleAvailable, setSampleAvailable] = useState(false);
   const [sampleLoading, setSampleLoading] = useState(false);
 
-  const controller = useRef<AbortController | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -238,7 +301,46 @@ export function ContentIdeasApp() {
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  useEffect(() => () => controller.current?.abort(), []);
+  /**
+   * Pick a run back up after a reload.
+   *
+   * A persisted run id wins outright: whatever its status turns out to be,
+   * the polling effect below (keyed on `runId`) resolves it the same way it
+   * resolves a run that just started, including a run that finished while
+   * this tab was closed. Only when nothing is persisted (storage was
+   * cleared, or this is a different device) does this fall back to asking
+   * the server for this user's own runs and picking up the newest one still
+   * active; a finished-but-unopened run is left for the history drawer
+   * rather than surfaced unasked.
+   */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    let cancelled = false;
+    const stored = loadActiveRun();
+    if (stored) {
+      setRunning(true);
+      setRunId(stored);
+      // Falls back to now only if this record somehow predates `startedAt`
+      // ever being written; every record saveActiveRun writes has one.
+      setRunStartedAt(loadActiveRunStartedAt() ?? Date.now());
+      return;
+    }
+    void listRuns().then((runs) => {
+      if (cancelled) return;
+      const active = runs.find(
+        (run) => run.status === "queued" || run.status === "running" || run.status === "cancelling",
+      );
+      if (!active) return;
+      saveActiveRun(active.id);
+      setRunning(true);
+      setRunId(active.id);
+      setRunStartedAt(Date.now());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
    * Ask once, on mount, whether this deployment has a sample report.
@@ -333,6 +435,137 @@ export function ContentIdeasApp() {
     [clearMessages],
   );
 
+  /**
+   * Render whatever a run ended in, whether it just finished in this tab or
+   * this tab merely resumed polling one that finished elsewhere.
+   *
+   * Shared between a run that was just submitted and one recovered on mount:
+   * both paths hand their terminal `RunOutcome` here rather than duplicating
+   * the report/invalid/error branching.
+   */
+  const finishOutcome = useCallback(
+    (outcome: RunOutcome) => {
+      if (outcome.kind === "aborted") return;
+      if (outcome.kind === "report") {
+        show(outcome.bundle, true);
+        // A saved run gets the link to the report itself; one the server could
+        // not store keeps the settings URL, which is all it can honestly offer.
+        if (outcome.bundle.report_id) {
+          writeSavedReportPath(outcome.bundle.report_id);
+        } else {
+          writeQueryParams(urlStateFor(outcome.bundle, values));
+        }
+        scrollTo(reportRef.current);
+        return;
+      }
+      if (outcome.kind === "invalid") {
+        fail(
+          outcome.errors.length > 0
+            ? outcome.errors
+            : ["That search could not be used. Please adjust it and try again."],
+        );
+        return;
+      }
+      // A failed run must never destroy the report already on screen.
+      fail([
+        report
+          ? `${outcome.message} Your previous report is still shown below.`
+          : outcome.message,
+      ]);
+    },
+    [show, fail, scrollTo, report, values],
+  );
+
+  /** End the local view of a run: stop polling it and forget it was ever ours. */
+  const stopRun = useCallback(() => {
+    setRunId(null);
+    setRunStartedAt(null);
+    setRunning(false);
+    setProgress([]);
+    clearActiveRun();
+  }, []);
+
+  /**
+   * Poll `runId` until it reaches a terminal state, or until polling itself
+   * has clearly stopped working.
+   *
+   * `setTimeout` rather than `setInterval`: a poll that takes longer than
+   * `POLL_INTERVAL_MS` to answer must not overlap with the next one, and a
+   * fixed interval cannot guarantee that. Cleanup here only clears the local
+   * timer, never the run: closing the tab (or this effect simply
+   * re-running) must not cancel work happening server-side, which is the
+   * entire point of moving execution off this page.
+   */
+  useEffect(() => {
+    if (!runId) return;
+    // Falls back to now only in the defensive case that `runId` was somehow
+    // set without `runStartedAt` alongside it; every call site above sets
+    // both together, in the same batch, so the effect never actually sees
+    // that split.
+    const startedAt = runStartedAt ?? Date.now();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+
+    const scheduleNext = () => {
+      timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+    };
+
+    const tick = async () => {
+      // Checked before every poll, not just after a failure: a run stuck
+      // "queued" or "running" answers every poll validly, which is exactly
+      // the case MAX_POLL_FAILURES cannot see. A run that is going to finish
+      // keeps polling right up to the cap, so this never cuts off a run that
+      // was about to resolve on its own.
+      if (Date.now() - startedAt > RUN_TIMEOUT_MS) {
+        stopRun();
+        fail([RUN_TIMEOUT_MESSAGE]);
+        return;
+      }
+
+      const poll = await pollRun(runId);
+      if (cancelled) return;
+
+      if (!poll) {
+        failures += 1;
+        if (failures >= MAX_POLL_FAILURES) {
+          stopRun();
+          fail([POLL_LOST_MESSAGE]);
+          return;
+        }
+        scheduleNext();
+        return;
+      }
+      failures = 0;
+      setProgress(poll.progress);
+
+      if (poll.status === "queued" || poll.status === "running" || poll.status === "cancelling") {
+        scheduleNext();
+        return;
+      }
+      if (poll.status === "cancelled") {
+        // An explicit cancel (this tab or another) finishing server-side.
+        // Nothing to report: the run simply stops, same as the old
+        // abort-and-forget did.
+        stopRun();
+        return;
+      }
+
+      // "succeeded" or "failed": terminal either way.
+      const outcome = await outcomeForFinishedRun(poll);
+      if (cancelled) return;
+      stopRun();
+      finishOutcome(outcome);
+    };
+
+    void tick();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [runId, runStartedAt, stopRun, fail, finishOutcome]);
+
   const onChange = useCallback(
     (next: FormValues) => {
       if (errors.length > 0) clearMessages();
@@ -349,69 +582,41 @@ export function ContentIdeasApp() {
       return;
     }
 
-    const abort = new AbortController();
-    controller.current = abort;
     setRunning(true);
     setProgress(["Starting…"]);
     // The scroll to the progress panel lives in the effect above, because the
     // panel does not exist yet at this point in the handler.
 
-    const outcome = await runReport(
-      {
-        query: values.query.trim(),
-        profile: values.profile.trim(),
-        days: values.days,
-        ...(values.subreddits.trim() ? { subreddits: values.subreddits.trim() } : {}),
-        relevance_filter: values.relevance,
-        ...(values.contentTypes.length > 0
-          ? { content_types: values.contentTypes }
-          : {}),
-        ...(values.channels.length > 0 ? { channels: values.channels } : {}),
-      },
-      {
-        signal: abort.signal,
-        onProgress: (message) => setProgress((current) => [...current, message]),
-      },
-    );
+    const outcome = await createRun({
+      query: values.query.trim(),
+      profile: values.profile.trim(),
+      days: values.days,
+      ...(values.subreddits.trim() ? { subreddits: values.subreddits.trim() } : {}),
+      relevance_filter: values.relevance,
+      ...(values.contentTypes.length > 0 ? { content_types: values.contentTypes } : {}),
+      ...(values.channels.length > 0 ? { channels: values.channels } : {}),
+    });
 
-    controller.current = null;
+    if (outcome.kind === "started") {
+      // Persisted before the state update: a reload one tick later must
+      // never see `runId` set with nothing in storage to recover it from.
+      saveActiveRun(outcome.runId);
+      setRunId(outcome.runId);
+      setRunStartedAt(Date.now());
+      return;
+    }
+
     setRunning(false);
     setProgress([]);
-
-    if (outcome.kind === "aborted") return;
-    if (outcome.kind === "report") {
-      show(outcome.bundle, true);
-      // A saved run gets the link to the report itself; one the server could
-      // not store keeps the settings URL, which is all it can honestly offer.
-      if (outcome.bundle.report_id) {
-        writeSavedReportPath(outcome.bundle.report_id);
-      } else {
-        writeQueryParams(urlStateFor(outcome.bundle, values));
-      }
-      scrollTo(reportRef.current);
-      return;
-    }
-    if (outcome.kind === "invalid") {
-      fail(
-        outcome.errors.length > 0
-          ? outcome.errors
-          : ["That search could not be used. Please adjust it and try again."],
-      );
-      return;
-    }
-    // A failed run must never destroy the report already on screen.
-    fail([
-      report
-        ? `${outcome.message} Your previous report is still shown below.`
-        : outcome.message,
-    ]);
-  }, [values, clearMessages, fail, scrollTo, show, report]);
+    finishOutcome(outcome);
+  }, [values, clearMessages, fail, finishOutcome]);
 
   const onCancel = useCallback(() => {
-    controller.current?.abort();
-    controller.current = null;
-    setRunning(false);
-    setProgress([]);
+    // Fire-and-forget: the poll loop is what observes the run actually
+    // winding down (via "cancelling" then "cancelled"), so the local view
+    // does not wait on this request before clearing itself.
+    if (runId) void cancelRun(runId);
+    stopRun();
     clearMessages();
     // Losing the progress panel makes the document shorter, and on a page that
     // was scrolled near its old bottom the browser paints one frame with the
@@ -425,7 +630,7 @@ export function ContentIdeasApp() {
       );
       if (window.scrollY > bottom) window.scrollTo({ top: bottom });
     });
-  }, [clearMessages]);
+  }, [runId, stopRun, clearMessages]);
 
   /**
    * The only way to see a finished report without writing a brief and waiting.
@@ -462,21 +667,28 @@ export function ContentIdeasApp() {
         // than as whatever the last copy of this header happened to carry.
         pad="roomy"
         action={
-          <button
-            type="button"
-            onClick={() => {
-              clearMessages();
-              setHistoryOpen(true);
-            }}
-            className="flex h-8 items-center gap-2 rounded-lg border border-transparent px-3 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground"
-          >
-            Recent reports
-            {history.length > 0 ? (
-              <span className="num inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--brand-soft)] px-1.5 text-[0.6875rem] font-semibold text-[var(--brand-ink)]">
-                {history.length}
-              </span>
-            ) : null}
-          </button>
+          /* Two quiet controls sharing the header's right-hand slot. The account
+             affordance sits after the history button and behind a hairline, so
+             the primary action in the header stays the one about reports. */
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                clearMessages();
+                setHistoryOpen(true);
+              }}
+              className="flex h-8 items-center gap-2 rounded-lg border border-transparent px-3 text-sm font-medium text-muted-foreground transition-colors hover:border-border hover:bg-card hover:text-foreground"
+            >
+              Recent reports
+              {history.length > 0 ? (
+                <span className="num inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--brand-soft)] px-1.5 text-[0.6875rem] font-semibold text-[var(--brand-ink)]">
+                  {history.length}
+                </span>
+              ) : null}
+            </button>
+            <span aria-hidden="true" className="rule h-5 w-px bg-border" />
+            <AccountMenu />
+          </div>
         }
       >
         {/* AppShell's <main> is a plain block, so the gap between the search

@@ -15,7 +15,9 @@ import json
 import logging
 import time
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
 import api.index as api_index
@@ -44,283 +46,175 @@ VALID_BODY = {
 }
 
 
-def _lines(response):
-    return [json.loads(line) for line in response.text.strip().split("\n") if line]
+class TestReportCreateHappyPath:
+    """POST /api/report no longer runs anything: it validates, queues one run, and
+    returns its id. The work happens later, in the worker (TestTheWorkerRoute and
+    TestExecuteRun), driven by an external minute-cron. A closed tab is now a no-op
+    server-side, not a cancel signal."""
 
-
-class TestReportStreamHappyPath:
-    def test_valid_input_streams_progress_then_a_terminal_report_line(self, monkeypatch):
-        captured = {}
-
-        def fake_run_report(query, profile, progress=None, **advanced):
-            captured["args"] = (query, profile)
-            captured["advanced"] = advanced
-            progress("Finding communities talking about this...")
-            progress("Found r/testsub - fetching posts...")
-            return {"bundle_version": 4, "inputs": {"query": query}, "sample": {}}
-
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-
+    def test_valid_input_returns_202_with_a_run_id(self, fake_db):
         response = client.post("/api/report", json=VALID_BODY)
+        assert response.status_code == 202
+        run_id = response.json()["run_id"]
+        assert api_index.REPORT_ID_PATTERN.match(run_id)
 
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("application/x-ndjson")
-
-        lines = _lines(response)
-        assert lines[0] == {"type": "progress", "message": "Finding communities talking about this..."}
-        assert lines[1] == {"type": "progress", "message": "Found r/testsub - fetching posts..."}
-        assert len(lines) == 3
-        assert lines[2]["type"] == "report"
-        assert lines[2]["bundle"] == {
-            "bundle_version": 4, "inputs": {"query": VALID_BODY["query"]}, "sample": {}
+    def test_the_run_is_queued_for_the_caller_with_the_validated_inputs(self, fake_db):
+        run_id = client.post("/api/report", json=VALID_BODY).json()["run_id"]
+        row = fake_db.runs[run_id]
+        assert row["status"] == "queued"
+        # Queued as the fixed signed-in user, with the run's own cleaned query.
+        assert row["user_id"] == "test-user"
+        assert row["query"] == VALID_BODY["query"]
+        assert row["profile"] == ""
+        # The whole run request is frozen onto the row for the worker to replay.
+        assert set(row["inputs"]) >= {
+            "days", "subreddits", "relevance_filter", "content_types", "phrases", "channels"
         }
-        assert captured["args"] == (VALID_BODY["query"], VALID_BODY["profile"])
 
-    def test_only_the_last_line_carries_the_bundle(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None, **advanced):
-            for message in ("one", "two", "three"):
-                progress(message)
-            return {"bundle_version": 4}
+    def test_two_runs_get_different_ids(self, fake_db):
+        first = client.post("/api/report", json=VALID_BODY).json()["run_id"]
+        second = client.post("/api/report", json=VALID_BODY).json()["run_id"]
+        assert first != second
 
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
-        assert [line["type"] for line in lines] == ["progress", "progress", "progress", "report"]
+    def test_the_engine_is_not_touched_at_create_time(self, monkeypatch, fake_db):
+        # Creating a run must not run it: a run_report that raises when called
+        # proves the create path never reaches the engine.
+        def exploding(*args, **kwargs):
+            raise AssertionError("run_report must not be called when creating a run")
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", exploding)
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
 
 
-class TestReportStreamValidation:
-    def test_invalid_input_streams_a_single_invalid_line_using_real_validate_inputs(self):
+class TestReportCreateValidation:
+    """Validation still short-circuits before anything is queued, and returns the
+    same {"type": "invalid", "errors": [...]} body the old stream's first line
+    carried, now as plain JSON rather than one NDJSON line."""
+
+    @staticmethod
+    def _invalid(response):
+        assert response.status_code == 200
+        body = response.json()
+        assert body["type"] == "invalid"
+        return body["errors"]
+
+    def test_invalid_input_returns_a_single_invalid_body_using_real_validate_inputs(self):
         # No monkeypatch: pipeline.validate_inputs runs for real, so this also proves
         # the API is wired to the actual validation rules, not a stand-in for them.
-        response = client.post(
-            "/api/report",
-            json={"query": "short", "profile": ""},
-        )
-        assert response.status_code == 200
-        lines = _lines(response)
-        assert len(lines) == 1
-        assert lines[0]["type"] == "invalid"
-        assert len(lines[0]["errors"]) == 1  # too-short query
-        assert all(message[0].isupper() and message.endswith(".") for message in lines[0]["errors"])
+        errors = self._invalid(client.post("/api/report", json={"query": "short", "profile": ""}))
+        assert len(errors) == 1  # too-short query
+        assert all(message[0].isupper() and message.endswith(".") for message in errors)
 
-    def test_unknown_fields_from_an_old_client_are_ignored(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None, **advanced):
-            return {"bundle_version": 4}
+    def test_invalid_input_queues_no_run(self, fake_db):
+        client.post("/api/report", json={"query": "short", "profile": ""})
+        assert fake_db.create_run_calls == []
 
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json={**VALID_BODY, "platform": "linkedin"}))
-        assert lines[-1]["type"] == "report"
+    def test_unknown_fields_from_an_old_client_are_ignored(self, fake_db):
+        response = client.post("/api/report", json={**VALID_BODY, "platform": "linkedin"})
+        assert response.status_code == 202
 
     def test_a_bad_time_range_is_invalid(self):
-        lines = _lines(client.post("/api/report", json={**VALID_BODY, "days": 3}))
-        assert lines[0]["type"] == "invalid"
-        assert any("time range" in message for message in lines[0]["errors"])
+        errors = self._invalid(client.post("/api/report", json={**VALID_BODY, "days": 3}))
+        assert any("time range" in message for message in errors)
 
     def test_bad_subreddit_input_is_invalid(self):
-        lines = _lines(
+        self._invalid(
             client.post(
                 "/api/report",
                 json={**VALID_BODY, "subreddits": "one,two,three,four,five,six,seven,eight,nine"},
             )
         )
-        assert lines[0]["type"] == "invalid"
 
     def test_empty_query_is_invalid(self):
-        lines = _lines(client.post("/api/report", json={**VALID_BODY, "query": ""}))
-        assert lines[0]["type"] == "invalid"
+        self._invalid(client.post("/api/report", json={**VALID_BODY, "query": ""}))
 
     def test_garbage_body_is_reported_as_invalid_not_a_500(self):
         response = client.post(
             "/api/report", content="not json at all", headers={"content-type": "application/json"}
         )
-        assert response.status_code == 200
-        lines = _lines(response)
-        assert lines[0]["type"] == "invalid"
+        self._invalid(response)
 
     def test_non_object_json_body_is_reported_as_invalid(self):
-        lines = _lines(client.post("/api/report", json=[1, 2, 3]))
-        assert lines[0]["type"] == "invalid"
+        self._invalid(client.post("/api/report", json=[1, 2, 3]))
 
     def test_missing_body_fields_are_reported_as_invalid(self):
-        lines = _lines(client.post("/api/report", json={}))
-        assert lines[0]["type"] == "invalid"
-        assert lines[0]["errors"]
+        assert self._invalid(client.post("/api/report", json={}))
 
 
-class TestContentTypesPassThrough:
-    """The advanced setting takes several formats, and old clients send one."""
+class TestReportInputsPassThrough:
+    """The advanced settings are frozen onto the queued row for the worker to
+    replay; old clients send one content_type and it lands as a one-item list."""
 
     @staticmethod
-    def _capture(monkeypatch):
-        captured = {}
+    def _inputs(fake_db):
+        assert len(fake_db.create_run_calls) == 1
+        # create_run(run_id, user_id, query, profile, inputs)
+        return fake_db.create_run_calls[0][4]
 
-        def fake_run_report(query, profile, progress=None, **advanced):
-            captured.update(advanced)
-            return {"bundle_version": 4}
+    def test_a_list_of_content_types_is_stored(self, fake_db):
+        response = client.post("/api/report", json={**VALID_BODY, "content_types": ["poll", "text"]})
+        assert response.status_code == 202
+        assert self._inputs(fake_db)["content_types"] == ["poll", "text"]
 
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        return captured
-
-    def test_a_list_of_content_types_reaches_the_engine(self, monkeypatch):
-        captured = self._capture(monkeypatch)
-        lines = _lines(
-            client.post(
-                "/api/report", json={**VALID_BODY, "content_types": ["poll", "text"]}
-            )
-        )
-        assert lines[-1]["type"] == "report"
-        assert captured["content_types"] == ["poll", "text"]
-
-    def test_the_legacy_single_field_still_reaches_the_engine_as_a_list(self, monkeypatch):
+    def test_the_legacy_single_field_is_stored_as_a_list(self, fake_db):
         # A shared link or a replayed history entry from before the setting took
         # several values must not quietly lose the format it asked for.
-        captured = self._capture(monkeypatch)
-        lines = _lines(
-            client.post("/api/report", json={**VALID_BODY, "content_type": "carousel"})
-        )
-        assert lines[-1]["type"] == "report"
-        assert captured["content_types"] == ["carousel"]
+        response = client.post("/api/report", json={**VALID_BODY, "content_type": "carousel"})
+        assert response.status_code == 202
+        assert self._inputs(fake_db)["content_types"] == ["carousel"]
 
-    def test_no_content_types_reaches_the_engine_as_an_empty_list(self, monkeypatch):
-        captured = self._capture(monkeypatch)
-        _lines(client.post("/api/report", json=VALID_BODY))
-        assert captured["content_types"] == []
+    def test_no_content_types_is_stored_as_an_empty_list(self, fake_db):
+        client.post("/api/report", json=VALID_BODY)
+        assert self._inputs(fake_db)["content_types"] == []
 
-    def test_an_unknown_content_type_is_invalid_before_anything_runs(self):
-        lines = _lines(
-            client.post("/api/report", json={**VALID_BODY, "content_types": ["reel"]})
-        )
-        assert lines[0]["type"] == "invalid"
-        assert '"reel"' in lines[0]["errors"][0]
+    def test_an_unknown_content_type_is_invalid_before_anything_is_queued(self, fake_db):
+        response = client.post("/api/report", json={**VALID_BODY, "content_types": ["reel"]})
+        body = response.json()
+        assert body["type"] == "invalid"
+        assert '"reel"' in body["errors"][0]
+        assert fake_db.create_run_calls == []
 
-    def test_a_list_of_channels_reaches_the_engine(self, monkeypatch):
-        captured = self._capture(monkeypatch)
-        lines = _lines(
-            client.post(
-                "/api/report", json={**VALID_BODY, "channels": ["tiktok", "instagram"]}
-            )
-        )
-        assert lines[-1]["type"] == "report"
-        assert captured["channels"] == ["instagram", "tiktok"]
+    def test_a_list_of_channels_is_stored(self, fake_db):
+        response = client.post("/api/report", json={**VALID_BODY, "channels": ["tiktok", "instagram"]})
+        assert response.status_code == 202
+        assert self._inputs(fake_db)["channels"] == ["instagram", "tiktok"]
 
-    def test_no_channels_reaches_the_engine_as_an_empty_list(self, monkeypatch):
-        captured = self._capture(monkeypatch)
-        _lines(client.post("/api/report", json=VALID_BODY))
-        assert captured["channels"] == []
+    def test_no_channels_is_stored_as_an_empty_list(self, fake_db):
+        client.post("/api/report", json=VALID_BODY)
+        assert self._inputs(fake_db)["channels"] == []
 
-    def test_an_unknown_channel_is_invalid_before_anything_runs(self):
-        lines = _lines(
-            client.post("/api/report", json={**VALID_BODY, "channels": ["myspace"]})
-        )
-        assert lines[0]["type"] == "invalid"
-        assert '"myspace"' in lines[0]["errors"][0]
+    def test_an_unknown_channel_is_invalid_before_anything_is_queued(self, fake_db):
+        response = client.post("/api/report", json={**VALID_BODY, "channels": ["myspace"]})
+        body = response.json()
+        assert body["type"] == "invalid"
+        assert '"myspace"' in body["errors"][0]
+        assert fake_db.create_run_calls == []
 
     def test_channels_that_are_not_a_list_are_invalid(self):
-        lines = _lines(client.post("/api/report", json={**VALID_BODY, "channels": 7}))
-        assert lines[0]["type"] == "invalid"
+        assert client.post("/api/report", json={**VALID_BODY, "channels": 7}).json()["type"] == "invalid"
 
     def test_content_types_that_are_not_a_list_are_invalid(self):
-        lines = _lines(
-            client.post("/api/report", json={**VALID_BODY, "content_types": 7})
-        )
-        assert lines[0]["type"] == "invalid"
+        assert client.post("/api/report", json={**VALID_BODY, "content_types": 7}).json()["type"] == "invalid"
 
 
-class TestReportStreamErrors:
-    def test_run_error_streams_progress_then_a_terminal_error_line(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None, **advanced):
-            progress("Finding communities talking about this...")
-            raise pipeline.RunError("We could not read anything usable from r/testsub.")
+class TestReportCreateStorage:
+    """Unlike a saved report (best-effort persistence on top of a run that already
+    happened), a run cannot exist without its durable row: no queue, no run. So a
+    storage failure at create time is a clean 503 the frontend can surface, not a
+    swallowed warning."""
 
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
-        assert lines[0]["type"] == "progress"
-        assert lines[-1] == {
-            "type": "error", "message": "We could not read anything usable from r/testsub."
-        }
-        assert len(lines) == 2
+    def test_storage_unavailable_is_a_503(self, fake_db):
+        fake_db.unavailable.add("create_run")
+        response = client.post("/api/report", json=VALID_BODY)
+        assert response.status_code == 503
+        assert response.json()["message"] == db_module.UNAVAILABLE_MESSAGE
 
-    def test_value_error_from_the_engine_passes_its_message_through_verbatim(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None, **advanced):
-            raise ValueError("The analysis service has reached its rate limit.")
-
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
-        assert lines == [{"type": "error", "message": "The analysis service has reached its rate limit."}]
-
-    def test_unexpected_exception_becomes_the_generic_message_not_a_leaked_traceback(self, monkeypatch):
-        def fake_run_report(query, profile, progress=None, **advanced):
-            raise RuntimeError("some internal detail nobody outside should see")
-
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
-        assert lines == [{"type": "error", "message": api_index.GENERIC_ERROR_MESSAGE}]
-        assert "internal detail" not in json.dumps(lines)
-
-
-class TestClientCancellation:
-    """A user pressing Cancel is the system working, not a failure.
-
-    pipeline.RunCancelled is deliberately not a RunError, and before this was
-    handled it fell through to the last-resort `except Exception`, which logged
-    "unhandled error while building a report" with a full traceback and pushed
-    the generic failure message at a client that had already gone.
-    """
-
-    @staticmethod
-    def _drain_one(monkeypatch, exception):
-        """Start the generator, take the one line it can produce, close it.
-
-        The stream is driven by hand rather than through TestClient because a
-        cancelled run pushes nothing at all, so a client reading to the end
-        would sit through the heartbeat loop until the hard stop. The heartbeat
-        is shortened to keep the wait to a moment.
-        """
-
-        def fake_run_report(query, profile, progress=None, **advanced):
-            raise exception
-
-        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        monkeypatch.setattr(api_index, "HEARTBEAT_SECONDS", 0.05)
-
-        generator = api_index._run_report_lines("q", "", 30, [], True)
-        try:
-            return json.loads(next(generator))
-        finally:
-            generator.close()
-
-    @staticmethod
-    def _wait_for(caplog, message, seconds=2.0):
-        """The worker logs from its own thread, so give it a moment to land."""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if any(record.getMessage() == message for record in caplog.records):
-                return True
-            time.sleep(0.01)
-        return False
-
-    def test_cancellation_logs_at_info_and_pushes_no_error_line(self, monkeypatch, caplog):
-        with caplog.at_level(logging.INFO, logger=api_index.logger.name):
-            line = self._drain_one(monkeypatch, pipeline.RunCancelled("selecting"))
-            assert self._wait_for(caplog, "run cancelled by client")
-
-        # Nothing went on the queue, so the only line the stream can produce is
-        # the idle heartbeat. An "error" line here would be the old behaviour.
-        assert line["type"] == "progress"
-
-        cancelled = [r for r in caplog.records if r.getMessage() == "run cancelled by client"]
-        assert [r.levelno for r in cancelled] == [logging.INFO]
-        # No traceback anywhere: a cancelled run is not an incident.
-        assert not any(record.exc_info for record in caplog.records)
-        assert not any("unhandled error" in r.getMessage() for r in caplog.records)
-
-    def test_a_real_failure_still_logs_a_traceback(self, monkeypatch, caplog):
-        """The guard above must not have swallowed the genuine last resort."""
-        with caplog.at_level(logging.INFO, logger=api_index.logger.name):
-            line = self._drain_one(monkeypatch, RuntimeError("boom"))
-            assert self._wait_for(caplog, "unhandled error while building a report")
-
-        assert line == {"type": "error", "message": api_index.GENERIC_ERROR_MESSAGE}
-        assert any(record.exc_info for record in caplog.records)
+    def test_an_unexpected_storage_failure_leaks_nothing(self, fake_db):
+        fake_db.boom.add("create_run")
+        response = client.post("/api/report", json=VALID_BODY)
+        assert response.status_code == 503
+        assert "hunter2" not in response.text
+        assert response.json() == {"message": db_module.UNAVAILABLE_MESSAGE}
 
 
 class TestSampleEndpoint:
@@ -740,7 +634,12 @@ class TestDraftEndpoint:
 
 
 def _fake_run(monkeypatch, bundle=None):
-    """A run that succeeds instantly, so a test can be about what happens after."""
+    """Stub the engine with a run that succeeds instantly.
+
+    Used two ways now: by the rate-limit and quota tests, which only need
+    /api/report to accept a body (the engine is never reached at create time), and
+    by the worker tests, where _execute_run does call it. Harmless in the first
+    case, load-bearing in the second."""
 
     def fake_run_report(query, profile, progress=None, **advanced):
         return bundle if bundle is not None else {"bundle_version": 4, "inputs": {"query": query}}
@@ -748,72 +647,477 @@ def _fake_run(monkeypatch, bundle=None):
     monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
 
 
-class TestReportPersistence:
-    """A finished run is saved server-side, and its id rides on the terminal line.
+# A run id shaped like a real one (REPORT_ID_PATTERN), for tests that seed a row
+# directly rather than through POST /api/report.
+SEEDED_RUN_ID = "seededRun_-01"
+WORKER_SECRET = "cron-secret-under-test"
 
-    The id sits next to the bundle rather than inside it, so the stored bundle
-    is byte-for-byte what the engine produced and the line stays readable by a
-    client that knows nothing about saved reports.
-    """
 
-    def test_terminal_line_carries_the_report_id_when_the_save_succeeds(
-        self, monkeypatch, fake_db
-    ):
-        _fake_run(monkeypatch)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
+def _default_inputs():
+    return {
+        "days": 7,
+        "subreddits": None,
+        "relevance_filter": True,
+        "content_types": [],
+        "phrases": [],
+        "channels": [],
+    }
 
-        terminal = lines[-1]
-        assert terminal["type"] == "report"
-        report_id = terminal["report_id"]
+
+def _seed_run(fake_db, run_id=SEEDED_RUN_ID, user_id="test-user", inputs=None):
+    """Put one queued run on the fake and hand back the row shape claim_next_run
+    would return, so a test can drive _execute_run directly."""
+    fake_db.create_run(run_id, user_id, VALID_BODY["query"], "", inputs or _default_inputs())
+    return fake_db.get_run(run_id)
+
+
+class TestExecuteRun:
+    """_execute_run takes one claimed row to a terminal state. This is where the
+    engine actually runs now, so the success/cancel/error mapping and the
+    server-side save that used to ride the stream's terminal line live here."""
+
+    def test_success_saves_the_report_and_marks_succeeded(self, monkeypatch, fake_db):
+        _fake_run(monkeypatch, bundle={"bundle_version": 4, "inputs": {"query": "x"}})
+        run = _seed_run(fake_db)
+
+        api_index._execute_run(run)
+
+        row = fake_db.runs[SEEDED_RUN_ID]
+        assert row["status"] == "succeeded"
+        report_id = row["report_id"]
         assert api_index.REPORT_ID_PATTERN.match(report_id)
-        # Saved with the run's own inputs, not with whatever the client claimed.
+        # Saved with the run's own inputs and owner, not a client's claim, and the
+        # id sits next to the bundle in the row, never inside the stored bundle.
         saved_id, query, profile, bundle = fake_db.saved_report_calls[0]
         assert saved_id == report_id
         assert query == VALID_BODY["query"]
-        assert profile == ""
-        assert bundle == terminal["bundle"]
-        assert "report_id" not in terminal["bundle"]
+        assert fake_db.saved_report_users == ["test-user"]
+        assert "report_id" not in bundle
 
-    def test_two_runs_get_different_ids(self, monkeypatch):
-        _fake_run(monkeypatch)
-        first = _lines(client.post("/api/report", json=VALID_BODY))[-1]["report_id"]
-        second = _lines(client.post("/api/report", json=VALID_BODY))[-1]["report_id"]
-        assert first != second
-
-    def test_report_id_is_omitted_when_storage_is_unavailable(self, monkeypatch, fake_db):
-        # The whole point: a database that is down or simply not configured
-        # costs the reader a share link, never the report itself.
+    def test_a_storage_miss_on_save_still_succeeds_without_a_report_id(self, monkeypatch, fake_db):
+        # A database that cannot store the bundle costs the reader a share link,
+        # never the run: the run still lands `succeeded`, just with no report_id.
         fake_db.unavailable.add("save_report")
         _fake_run(monkeypatch)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
+        run = _seed_run(fake_db)
 
-        assert lines[-1]["type"] == "report"
-        assert "report_id" not in lines[-1]
-        assert lines[-1]["bundle"]["bundle_version"] == 4
+        api_index._execute_run(run)
 
-    def test_an_unexpected_storage_failure_also_leaves_the_run_intact(
-        self, monkeypatch, fake_db, caplog
-    ):
-        fake_db.boom.add("save_report")
-        _fake_run(monkeypatch)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        assert row["status"] == "succeeded"
+        assert row["report_id"] is None
+
+    def test_run_cancelled_marks_cancelled_and_saves_nothing(self, monkeypatch, fake_db, caplog):
+        def fake_run_report(query, profile, progress=None, **advanced):
+            raise pipeline.RunCancelled("selecting")
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        run = _seed_run(fake_db)
+
         with caplog.at_level(logging.INFO, logger=api_index.logger.name):
-            lines = _lines(client.post("/api/report", json=VALID_BODY))
+            api_index._execute_run(run)
 
-        assert lines[-1]["type"] == "report"
-        assert "report_id" not in lines[-1]
-        # The connection string in the raised exception must never reach the
-        # response, only the log.
-        assert "hunter2" not in json.dumps(lines)
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "cancelled"
+        assert fake_db.set_result_calls[-1] == (SEEDED_RUN_ID, "cancelled", None, None)
+        assert fake_db.saved_report_calls == []
+        # A cancel is the system working: info, no traceback.
+        assert not any(record.exc_info for record in caplog.records)
 
-    def test_a_failed_run_saves_nothing(self, monkeypatch, fake_db):
+    def test_run_error_marks_failed_with_the_verbatim_message(self, monkeypatch, fake_db):
         def fake_run_report(query, profile, progress=None, **advanced):
             raise pipeline.RunError("We could not read anything usable from r/testsub.")
 
         monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
-        lines = _lines(client.post("/api/report", json=VALID_BODY))
+        run = _seed_run(fake_db)
 
-        assert lines[-1]["type"] == "error"
+        api_index._execute_run(run)
+
+        row = fake_db.runs[SEEDED_RUN_ID]
+        assert row["status"] == "failed"
+        assert row["error"] == "We could not read anything usable from r/testsub."
         assert fake_db.saved_report_calls == []
+
+    def test_value_error_marks_failed_with_its_message(self, monkeypatch, fake_db):
+        def fake_run_report(query, profile, progress=None, **advanced):
+            raise ValueError("The analysis service has reached its rate limit.")
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        run = _seed_run(fake_db)
+
+        api_index._execute_run(run)
+        assert fake_db.runs[SEEDED_RUN_ID]["error"] == "The analysis service has reached its rate limit."
+
+    def test_an_unexpected_exception_is_the_generic_message_and_still_logs_a_traceback(
+        self, monkeypatch, fake_db, caplog
+    ):
+        def fake_run_report(query, profile, progress=None, **advanced):
+            raise RuntimeError("some internal detail nobody outside should see")
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        run = _seed_run(fake_db)
+
+        with caplog.at_level(logging.INFO, logger=api_index.logger.name):
+            api_index._execute_run(run)
+
+        row = fake_db.runs[SEEDED_RUN_ID]
+        assert row["status"] == "failed"
+        assert row["error"] == api_index.GENERIC_ERROR_MESSAGE
+        assert "internal detail" not in row["error"]
+        # The genuine last resort still logs a traceback, as the old stream did.
+        assert any(record.exc_info for record in caplog.records)
+
+    def test_progress_is_coalesced_onto_the_row(self, monkeypatch, fake_db):
+        def fake_run_report(query, profile, progress=None, **advanced):
+            progress("Finding communities...")
+            progress("Fetching posts...")
+            progress("Synthesising...")
+            return {"bundle_version": 4}
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        run = _seed_run(fake_db)
+
+        api_index._execute_run(run)
+
+        # The terminal flush always lands the full accumulated log, in order.
+        assert fake_db.runs[SEEDED_RUN_ID]["progress"] == [
+            "Finding communities...", "Fetching posts...", "Synthesising...",
+        ]
+        assert fake_db.progress_calls  # at least one flush happened
+
+    def test_the_inputs_are_replayed_into_run_report(self, monkeypatch, fake_db):
+        captured = {}
+
+        def fake_run_report(query, profile, progress=None, **advanced):
+            captured["args"] = (query, profile)
+            captured["advanced"] = advanced
+            return {"bundle_version": 4}
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+        inputs = {**_default_inputs(), "content_types": ["poll"], "channels": ["tiktok"], "days": 30}
+        run = _seed_run(fake_db, inputs=inputs)
+
+        api_index._execute_run(run)
+
+        assert captured["args"] == (VALID_BODY["query"], "")
+        assert captured["advanced"]["content_types"] == ["poll"]
+        assert captured["advanced"]["channels"] == ["tiktok"]
+        assert captured["advanced"]["days"] == 30
+
+    def test_the_owner_pressing_cancel_stops_the_run(self, monkeypatch, fake_db):
+        # End to end through the real poller: the owner marks the run cancelling,
+        # the daemon poller sees is_cancelling and sets the event, and run_report
+        # (which honours it at a stage boundary) raises RunCancelled.
+        monkeypatch.setattr(api_index, "CANCEL_POLL_SECONDS", 0.01)
+        run = _seed_run(fake_db)
+        assert fake_db.mark_run_cancelling(SEEDED_RUN_ID, "test-user") is True
+
+        def fake_run_report(query, profile, progress=None, cancel=None, deadline=None, **advanced):
+            deadline_at = time.monotonic() + 2.0
+            while time.monotonic() < deadline_at:
+                if cancel is not None and cancel.is_set():
+                    raise pipeline.RunCancelled("stage boundary")
+                time.sleep(0.01)
+            return {"bundle_version": 4}
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", fake_run_report)
+
+        api_index._execute_run(run)
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "cancelled"
+
+    def test_a_transient_blip_on_the_terminal_write_is_retried_then_lands(
+        self, monkeypatch, fake_db
+    ):
+        # The pipeline finished, so the one write that records `succeeded` must
+        # not be lost to a momentary StorageUnavailable: a lost terminal write
+        # leaves the row `running` for the reaper to re-execute. The first
+        # set_run_result raises, the retry lands, and the run ends `succeeded`.
+        monkeypatch.setattr(api_index, "TERMINAL_WRITE_RETRY_SECONDS", 0)
+        _fake_run(monkeypatch)
+        run = _seed_run(fake_db)
+        fake_db.transient_failures["set_run_result"] = 1
+
+        api_index._execute_run(run)
+
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "succeeded"
+        # One rejected attempt plus the one that landed.
+        set_result_names = [call[0] for call in fake_db.set_result_calls]
+        assert set_result_names.count(SEEDED_RUN_ID) == 2
+
+    def test_a_terminal_write_that_never_lands_is_logged_and_not_raised(
+        self, monkeypatch, fake_db, caplog
+    ):
+        # Every retry fails. _execute_run must not raise (that would 500 the
+        # worker route and read as "retry this finished run"); it logs loudly and
+        # returns, leaving the row as the reaper's residual case, now bounded by
+        # the attempts cap.
+        monkeypatch.setattr(api_index, "TERMINAL_WRITE_RETRY_SECONDS", 0)
+        _fake_run(monkeypatch)
+        run = _seed_run(fake_db)
+        fake_db.unavailable.add("set_run_result")
+
+        with caplog.at_level(logging.ERROR, logger=api_index.logger.name):
+            api_index._execute_run(run)  # must not raise
+
+        assert "terminal status" in caplog.text
+        # It tried the full budget before giving up.
+        assert len(fake_db.set_result_calls) == api_index.TERMINAL_WRITE_ATTEMPTS
+
+
+class TestTheWorkerRoute:
+    """POST /api/run-worker: the cron/pg_net entrypoint. Not require_user; gated on
+    a shared CRON_SECRET, and reachable server-to-server (no Sec-Fetch-Site, no
+    session), so it is deliberately exempt from _reject_cross_origin."""
+
+    @staticmethod
+    def _call(secret=WORKER_SECRET):
+        return client.post("/api/run-worker", headers={"Authorization": "Bearer {}".format(secret)})
+
+    def test_no_cron_secret_configured_fails_closed(self, monkeypatch, caplog):
+        monkeypatch.delenv("CRON_SECRET", raising=False)
+        with caplog.at_level(logging.ERROR, logger=api_index.logger.name):
+            response = self._call("anything")
+        assert response.status_code == 401
+        assert "CRON_SECRET" in caplog.text
+
+    def test_a_missing_bearer_is_401(self, monkeypatch):
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        assert client.post("/api/run-worker").status_code == 401
+
+    def test_a_wrong_secret_is_401(self, monkeypatch):
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        assert self._call("not-the-secret").status_code == 401
+
+    def test_the_right_secret_with_an_empty_queue_is_a_noop(self, monkeypatch, fake_db):
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        response = self._call()
+        assert response.status_code == 200
+        assert response.json() == {"ran": None}
+
+    def test_the_right_secret_runs_one_claimed_run(self, monkeypatch, fake_db):
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        _fake_run(monkeypatch)
+        _seed_run(fake_db)
+
+        response = self._call()
+        assert response.status_code == 200
+        assert response.json() == {"ran": SEEDED_RUN_ID}
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "succeeded"
+
+    def test_it_is_not_blocked_by_reject_cross_origin(self, monkeypatch, fake_db):
+        # pg_net sends no Sec-Fetch-Site and does not carry a browser origin; the
+        # worker is exempt from _reject_cross_origin entirely (CRON_SECRET is its
+        # only gate), so a call with none of those headers still reaches the claim.
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        response = self._call()
+        assert response.status_code == 200  # not 403 or 415
+
+    def test_a_stale_running_run_is_reclaimed(self, monkeypatch, fake_db):
+        # A worker that died mid-run leaves a `running` row with an old heartbeat;
+        # the reaper inside claim_next_run picks it up on the next tick.
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        _fake_run(monkeypatch)
+        _seed_run(fake_db)
+        fake_db.runs[SEEDED_RUN_ID]["status"] = "running"
+        fake_db.runs[SEEDED_RUN_ID]["heartbeat_at"] = time.time() - (
+            fake_db.STALE_HEARTBEAT_SECONDS + 10
+        )
+
+        response = self._call()
+        assert response.json() == {"ran": SEEDED_RUN_ID}
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "succeeded"
+
+    def test_a_healthy_running_run_is_not_reclaimed(self, monkeypatch, fake_db):
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        _fake_run(monkeypatch)
+        _seed_run(fake_db)
+        fake_db.runs[SEEDED_RUN_ID]["status"] = "running"
+        fake_db.runs[SEEDED_RUN_ID]["heartbeat_at"] = time.time()
+
+        assert self._call().json() == {"ran": None}
+
+    def test_the_route_sweeps_an_exhausted_run_to_failed(self, monkeypatch, fake_db):
+        # A `running` row retried up to the cap with a dead heartbeat is ended by
+        # the sweep the route runs before it claims, not reclaimed a further time.
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        _seed_run(fake_db)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        row["status"] = "running"
+        row["attempts"] = fake_db.MAX_RUN_ATTEMPTS
+        row["heartbeat_at"] = time.time() - (fake_db.STALE_HEARTBEAT_SECONDS + 10)
+
+        assert self._call().json() == {"ran": None}
+        assert row["status"] == "failed"
+        assert row["error"] == db_module.RUN_EXHAUSTED_MESSAGE
+
+    def test_the_route_sweeps_a_queued_run_past_the_ttl_to_failed(self, monkeypatch, fake_db):
+        # A run no worker ever claimed (the trigger path is down) is not left
+        # queued forever for the browser to poll; the sweep fails it.
+        monkeypatch.setenv("CRON_SECRET", WORKER_SECRET)
+        _seed_run(fake_db)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        row["created_at"] = time.time() - (fake_db.QUEUED_TTL_SECONDS + 10)
+
+        assert self._call().json() == {"ran": None}
+        assert row["status"] == "failed"
+        assert row["error"] == db_module.RUN_NOT_STARTED_MESSAGE
+
+
+class TestTheRetryCapAndSweep:
+    """The attempts cap and the stalled-run sweep, exercised through FakeDb the
+    same way db.py enforces them: a run is claimed at most MAX_RUN_ATTEMPTS times,
+    a healthy run is never reaped whatever its attempts, and both give-up cases
+    (exhaustion, never-started) end in a `failed` row carrying the right
+    sentence."""
+
+    def test_a_run_is_claimed_at_most_max_attempts_times(self, fake_db):
+        _seed_run(fake_db)
+        # Each claim is one attempt; the worker then dies mid-run, leaving the row
+        # `running` with a heartbeat old enough for the reaper to consider it.
+        for _ in range(fake_db.MAX_RUN_ATTEMPTS):
+            claimed = fake_db.claim_next_run()
+            assert claimed is not None
+            fake_db.runs[SEEDED_RUN_ID]["heartbeat_at"] = time.time() - (
+                fake_db.STALE_HEARTBEAT_SECONDS + 10
+            )
+        assert fake_db.runs[SEEDED_RUN_ID]["attempts"] == fake_db.MAX_RUN_ATTEMPTS
+        # The cap is reached: the reaper refuses to claim it a further time.
+        assert fake_db.claim_next_run() is None
+
+    def test_exhaustion_moves_the_run_to_failed_with_the_message(self, fake_db):
+        _seed_run(fake_db)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        row["status"] = "running"
+        row["attempts"] = fake_db.MAX_RUN_ATTEMPTS
+        row["heartbeat_at"] = time.time() - (fake_db.STALE_HEARTBEAT_SECONDS + 10)
+
+        assert fake_db.fail_stalled_runs() == 1
+        assert row["status"] == "failed"
+        assert row["error"] == db_module.RUN_EXHAUSTED_MESSAGE
+
+    def test_a_healthy_run_is_never_reaped_regardless_of_attempts(self, fake_db):
+        _seed_run(fake_db)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        row["status"] = "running"
+        row["attempts"] = fake_db.MAX_RUN_ATTEMPTS  # even sitting at the cap
+        row["heartbeat_at"] = time.time()  # a fresh heartbeat means it is alive
+
+        # Neither the reaper nor the exhaustion sweep touches a live run.
+        assert fake_db.claim_next_run() is None
+        assert fake_db.fail_stalled_runs() == 0
+        assert row["status"] == "running"
+
+    def test_a_queued_run_past_the_ttl_is_failed_with_the_not_started_message(self, fake_db):
+        _seed_run(fake_db)
+        row = fake_db.runs[SEEDED_RUN_ID]
+        row["created_at"] = time.time() - (fake_db.QUEUED_TTL_SECONDS + 10)
+
+        assert fake_db.fail_stalled_runs() == 1
+        assert row["status"] == "failed"
+        assert row["error"] == db_module.RUN_NOT_STARTED_MESSAGE
+
+    def test_a_fresh_queued_run_is_left_alone(self, fake_db):
+        _seed_run(fake_db)  # created just now, well within QUEUED_TTL
+        assert fake_db.fail_stalled_runs() == 0
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "queued"
+
+
+class TestRunStatusEndpoint:
+    """GET /api/runs/{run_id}: the browser's poll. Private to its owner (a 404 for
+    anyone else), shape-checked, and never cached."""
+
+    def test_the_owner_sees_status_progress_report_id_and_error(self, fake_db):
+        _seed_run(fake_db)
+        fake_db.runs[SEEDED_RUN_ID]["status"] = "running"
+        fake_db.runs[SEEDED_RUN_ID]["progress"] = ["Finding communities..."]
+
+        response = client.get("/api/runs/{}".format(SEEDED_RUN_ID))
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "running",
+            "progress": ["Finding communities..."],
+            "report_id": None,
+            "error": None,
+        }
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_a_run_owned_by_someone_else_is_a_404(self, fake_db):
+        _seed_run(fake_db, user_id="someone-else")
+        response = client.get("/api/runs/{}".format(SEEDED_RUN_ID))
+        assert response.status_code == 404
+        assert response.json() == {"message": api_index.RUN_NOT_FOUND_MESSAGE}
+
+    def test_an_unknown_run_is_a_404(self, fake_db):
+        response = client.get("/api/runs/doesNotExist01")
+        assert response.status_code == 404
+        assert response.json() == {"message": api_index.RUN_NOT_FOUND_MESSAGE}
+
+    @pytest.mark.parametrize("bad_id", ["short", "plus+sign", "a" * 65, "dots.are.out"])
+    def test_a_malformed_id_is_refused_before_the_database_is_touched(self, bad_id, fake_db):
+        response = client.get("/api/runs/{}".format(bad_id))
+        assert response.status_code == 404
+        assert fake_db.get_run_calls == []
+
+    def test_storage_being_down_is_a_503(self, fake_db):
+        fake_db.unavailable.add("get_run")
+        response = client.get("/api/runs/{}".format(SEEDED_RUN_ID))
+        assert response.status_code == 503
+        assert response.json()["message"] == db_module.UNAVAILABLE_MESSAGE
+
+
+class TestRunListEndpoint:
+    """GET /api/runs: the caller's own runs, and only theirs."""
+
+    def test_it_lists_only_the_callers_runs_newest_first(self, fake_db, fake_auth):
+        fake_auth.user = api_index.AuthenticatedUser("owner-42", "")
+        fake_db.create_run("mineOldest01", "owner-42", "first", "", _default_inputs())
+        fake_db.create_run("mineNewest02", "owner-42", "second", "", _default_inputs())
+        fake_db.create_run("theirsRun_003", "someone-else", "third", "", _default_inputs())
+
+        response = client.get("/api/runs")
+        assert response.status_code == 200
+        ids = [row["id"] for row in response.json()["runs"]]
+        assert ids == ["mineNewest02", "mineOldest01"]
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_storage_being_down_is_a_503(self, fake_db):
+        fake_db.unavailable.add("list_runs")
+        response = client.get("/api/runs")
+        assert response.status_code == 503
+        assert response.json()["message"] == db_module.UNAVAILABLE_MESSAGE
+
+
+class TestCancelEndpoint:
+    """POST /api/runs/{run_id}/cancel: owner-checked, and the flip a worker observes."""
+
+    def test_the_owner_can_flip_a_queued_run_to_cancelling(self, fake_db):
+        _seed_run(fake_db)
+        response = client.post("/api/runs/{}/cancel".format(SEEDED_RUN_ID))
+        assert response.status_code == 200
+        assert response.json() == {"status": "cancelling"}
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "cancelling"
+
+    def test_a_run_owned_by_someone_else_cannot_be_cancelled(self, fake_db):
+        _seed_run(fake_db, user_id="someone-else")
+        response = client.post("/api/runs/{}/cancel".format(SEEDED_RUN_ID))
+        assert response.status_code == 404
+        assert response.json() == {"message": api_index.RUN_NOT_FOUND_MESSAGE}
+        assert fake_db.runs[SEEDED_RUN_ID]["status"] == "queued"
+
+    def test_an_unknown_run_is_a_404(self, fake_db):
+        response = client.post("/api/runs/doesNotExist01/cancel")
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("bad_id", ["short", "plus+sign", "a" * 65])
+    def test_a_malformed_id_is_a_404(self, bad_id):
+        assert client.post("/api/runs/{}/cancel".format(bad_id)).status_code == 404
+
+    def test_a_worker_observes_the_flag_after_the_cancel(self, monkeypatch, fake_db):
+        # The endpoint flips the row; is_cancelling then reads True, which is what
+        # the worker's poller watches for.
+        _seed_run(fake_db)
+        assert fake_db.is_cancelling(SEEDED_RUN_ID) is False
+        client.post("/api/runs/{}/cancel".format(SEEDED_RUN_ID))
+        assert fake_db.is_cancelling(SEEDED_RUN_ID) is True
 
 
 class TestGetSavedReport:
@@ -993,3 +1297,804 @@ class TestGeneratedDraftsArePersisted:
         )
         assert response.status_code == 200
         assert response.json() == {"post": "A generated post."}
+
+
+# ── Authentication ──────────────────────────────────────────────────────────────
+# Everything above this line runs as the fixed signed-in user conftest.py's
+# `fake_auth` fixture stands in. These tests are the ones that take it away, so
+# they exercise api/index.py's real token verification: the fixture hands the
+# request back to the genuine implementation when `enabled` is False.
+
+TEST_ISSUER_URL = "https://project-under-test.supabase.co"
+
+# The app verifies only asymmetric tokens (ES256), against a public key it fetches
+# from the project's JWKS. A test cannot reach the real JWKS, so it generates its
+# own EC keypair, signs tokens with the private half, and stubs the JWKS client to
+# hand back the public half. This is the only branch the live path has now that
+# the HS256 shared-secret path is gone, so it is the branch every auth test below
+# exercises through the `real_auth` fixture.
+_TEST_EC_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_TEST_EC_PUBLIC_KEY = _TEST_EC_PRIVATE_KEY.public_key()
+
+
+class _StubSigningKey:
+    key = _TEST_EC_PUBLIC_KEY
+
+
+class _StubJwkClient:
+    """Stands in for jwt.PyJWKClient: returns the test public key, no network."""
+
+    def get_signing_key_from_jwt(self, token):
+        return _StubSigningKey()
+
+# Every route this API exposes, as (method, path, kwargs). Written out rather
+# than read off app.routes so that adding a route without a session check fails
+# here loudly instead of quietly inheriting an empty list.
+ALL_ROUTES = [
+    ("post", "/api/report", {"json": VALID_BODY}),
+    ("get", "/api/reports/abc123XYZ_-def", {}),
+    ("get", "/api/sample", {}),
+    ("get", "/api/sample/available", {}),
+    ("post", "/api/draft", {"json": {"idea": {"title": "t"}, "evidence": []}}),
+    ("post", "/api/drafts", {"json": {"report_id": "abc123XYZ_-def", "idea_index": 0, "post": "p"}}),
+    ("post", "/api/export/markdown", {"json": {"bundle": {"bundle_version": 4}}}),
+    ("get", "/api/runs", {}),
+    ("get", "/api/runs/abc123XYZ_-def", {}),
+    ("post", "/api/runs/abc123XYZ_-def/cancel", {}),
+]
+ROUTE_IDS = ["{} {}".format(method.upper(), path) for method, path, _ in ALL_ROUTES]
+
+
+def _signed_token(**overrides):
+    """One ES256 access token shaped like the ones a Supabase Google session
+    carries: an `authenticated` role, a `google` provider, and a real `sub`.
+
+    Signed with the test EC private key so the stubbed JWKS client (which returns
+    the matching public key) verifies it. Any claim can be overridden, and a
+    passed value of None drops that claim entirely, which is how the tests build a
+    token that is missing `exp`, `sub`, or a provider.
+    """
+    claims = {
+        "sub": "11111111-2222-3333-4444-555555555555",
+        "aud": "authenticated",
+        "iss": TEST_ISSUER_URL + "/auth/v1",
+        "email": "reader@example.com",
+        "role": "authenticated",
+        "app_metadata": {"provider": "google", "providers": ["google"]},
+        "is_anonymous": False,
+        "exp": int(time.time()) + 3600,
+    }
+    claims.update(overrides)
+    claims = {name: value for name, value in claims.items() if value is not None}
+    return jwt.encode(claims, _TEST_EC_PRIVATE_KEY, algorithm="ES256")
+
+
+@pytest.fixture
+def real_auth(fake_auth, monkeypatch):
+    """Turn the fake user off and verify against the test EC keypair.
+
+    Points SUPABASE_URL at the test project and stubs the JWKS client so the
+    asymmetric branch resolves to the test public key instead of a network fetch.
+    """
+    monkeypatch.setenv("SUPABASE_URL", TEST_ISSUER_URL)
+    monkeypatch.setattr(api_index, "_jwks_client_for", lambda base_url: _StubJwkClient())
+    fake_auth.enabled = False
+    return fake_auth
+
+
+def _bearer(token):
+    return {"Authorization": "Bearer {}".format(token)}
+
+
+# The API routes that are allowed to be reachable without a session. The worker
+# entrypoint is the one: pg_net cannot hold a Supabase session, so it carries a
+# CRON_SECRET instead of require_user, and it is listed here so that exemption is
+# deliberate. A route that should be public is added here on purpose, which is the
+# point: the introspective test below fails for any /api/* route that carries
+# neither the auth dependency nor a place here.
+PUBLIC_API_ROUTES: set = {"/api/run-worker"}
+
+
+class TestEveryApiRouteCarriesTheAuthDependency:
+    """Introspective rather than hand-maintained: it reads app.routes and asserts
+    every /api/* route (bar an explicit public set) carries `require_user`, so a
+    new route added without the dependency fails CI instead of shipping open."""
+
+    def test_no_api_route_is_unguarded(self):
+        from api.index import app as real_app
+        from api.index import require_user
+
+        unguarded = []
+        for route in real_app.routes:
+            path = getattr(route, "path", "")
+            if not path.startswith("/api/") or path in PUBLIC_API_ROUTES:
+                continue
+            dependant = getattr(route, "dependant", None)
+            calls = [dep.call for dep in dependant.dependencies] if dependant else []
+            if require_user not in calls:
+                unguarded.append(path)
+        assert unguarded == [], "unguarded /api routes: {}".format(unguarded)
+
+    def test_the_hand_written_route_list_covers_every_api_route(self):
+        # ALL_ROUTES (used by the negative-auth parametrized tests) is maintained
+        # by hand with example paths, so it cannot be compared to the templated
+        # routes by string; counting keeps it honest that a newly added route was
+        # given a negative-auth case too.
+        from api.index import app as real_app
+
+        actual = {
+            getattr(route, "path", "")
+            for route in real_app.routes
+            if getattr(route, "path", "").startswith("/api/")
+            and getattr(route, "path", "") not in PUBLIC_API_ROUTES
+        }
+        assert len(ALL_ROUTES) == len(actual)
+
+
+class TestEveryRouteRequiresASession:
+    @pytest.mark.parametrize("method,path,kwargs", ALL_ROUTES, ids=ROUTE_IDS)
+    def test_no_token_is_a_401(self, real_auth, method, path, kwargs):
+        response = getattr(client, method)(path, **kwargs)
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("method,path,kwargs", ALL_ROUTES, ids=ROUTE_IDS)
+    def test_a_garbage_token_is_a_401(self, real_auth, method, path, kwargs):
+        response = getattr(client, method)(path, headers=_bearer("not-a-jwt"), **kwargs)
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("method,path,kwargs", ALL_ROUTES, ids=ROUTE_IDS)
+    def test_an_expired_token_is_a_401(self, real_auth, method, path, kwargs):
+        expired = _signed_token(exp=int(time.time()) - 60)
+        response = getattr(client, method)(path, headers=_bearer(expired), **kwargs)
+        assert response.status_code == 401
+
+    def test_a_run_is_refused_before_the_engine_is_ever_called(self, real_auth, monkeypatch):
+        # The check happens in the dependency, before the handler queues anything,
+        # so an unauthenticated request never even creates a run to be worked.
+        def exploding_run_report(*args, **kwargs):
+            raise AssertionError("the engine must not run for an unauthenticated request")
+
+        monkeypatch.setattr(api_index.pipeline, "run_report", exploding_run_report)
+        response = client.post("/api/report", json=VALID_BODY)
+        assert response.status_code == 401
+
+    def test_a_run_is_refused_before_anything_is_saved(self, real_auth, fake_db):
+        client.post("/api/report", json=VALID_BODY)
+        assert fake_db.saved_report_calls == []
+
+    def test_a_saved_report_is_never_read_for_an_unauthenticated_caller(self, real_auth, fake_db):
+        client.get("/api/reports/abc123XYZ_-def")
+        assert fake_db.get_report_calls == []
+
+
+class TestTheShapeOfA401:
+    def test_it_is_a_message_not_a_detail(self, real_auth):
+        # Every other error this API produces says "message", and the frontend
+        # reads that one key. FastAPI's own HTTPException would say "detail".
+        response = client.get("/api/sample")
+        assert response.status_code == 401
+        assert response.json() == {"message": api_index.AUTH_REQUIRED_MESSAGE}
+
+    def test_it_advertises_bearer_and_is_never_cached(self, real_auth):
+        response = client.get("/api/sample")
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_the_sentence_says_nothing_about_why(self, real_auth, monkeypatch):
+        # "expired", "wrong key" and "not a JWT" are one answer on purpose, and so
+        # is a server-side misconfiguration: a caller must not be able to tell a
+        # broken deployment apart from a stale token by reading the sentence.
+        wrong_key = ec.generate_private_key(ec.SECP256R1())
+        forged = _signed_token()  # a good token...
+        forged = jwt.encode(
+            jwt.decode(forged, options={"verify_signature": False}),
+            wrong_key,
+            algorithm="ES256",
+        )  # ...re-signed with a key this project does not publish.
+        reasons = [
+            "not-a-jwt",
+            _signed_token(exp=int(time.time()) - 60),
+            forged,
+        ]
+        messages = {
+            client.get("/api/sample", headers=_bearer(token)).json()["message"]
+            for token in reasons
+        }
+        # And with SUPABASE_URL gone, the server-side failure answers the same way.
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("NEXT_PUBLIC_SUPABASE_URL", raising=False)
+        messages.add(client.get("/api/sample", headers=_bearer("anything")).json()["message"])
+        assert messages == {api_index.AUTH_REQUIRED_MESSAGE}
+
+
+class TestAVerifiedTokenIsHonoured:
+    def test_a_valid_token_reaches_the_route(self, real_auth):
+        response = client.get("/api/sample/available", headers=_bearer(_signed_token()))
+        assert response.status_code == 200
+        assert response.json() == {"available": True}
+
+    def test_the_sub_and_email_come_off_the_claims(self, real_auth):
+        user = api_index.verify_bearer_token(_signed_token())
+        assert user.user_id == "11111111-2222-3333-4444-555555555555"
+        assert user.email == "reader@example.com"
+
+    def test_a_token_with_no_email_claim_is_still_valid(self, real_auth):
+        user = api_index.verify_bearer_token(_signed_token(sub="abc", email=None))
+        assert user == api_index.AuthenticatedUser("abc", "")
+
+    def test_the_email_falls_back_to_user_metadata(self, real_auth):
+        token = _signed_token(email=None, user_metadata={"email": "nested@example.com"})
+        assert api_index.verify_bearer_token(token).email == "nested@example.com"
+
+    def test_a_scheme_other_than_bearer_is_refused(self, real_auth):
+        response = client.get(
+            "/api/sample", headers={"Authorization": "Basic {}".format(_signed_token())}
+        )
+        assert response.status_code == 401
+
+    def test_the_scheme_is_matched_case_insensitively(self, real_auth):
+        response = client.get(
+            "/api/sample/available",
+            headers={"Authorization": "bearer {}".format(_signed_token())},
+        )
+        assert response.status_code == 200
+
+
+class TestWhatVerificationRefuses:
+    def test_a_token_for_a_different_project_is_refused(self, real_auth):
+        other = _signed_token(iss="https://someone-elses-project.supabase.co/auth/v1")
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(other)
+
+    def test_a_token_for_the_wrong_audience_is_refused(self, real_auth):
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(_signed_token(aud="anon"))
+
+    def test_a_token_signed_with_the_wrong_key_is_refused(self, real_auth):
+        # Correctly shaped and ES256, but signed with an EC key this project does
+        # not publish, so the signature check against the JWKS public key fails.
+        wrong_key = ec.generate_private_key(ec.SECP256R1())
+        forged = jwt.encode(
+            {
+                "sub": "abc",
+                "aud": "authenticated",
+                "iss": TEST_ISSUER_URL + "/auth/v1",
+                "role": "authenticated",
+                "exp": int(time.time()) + 60,
+            },
+            wrong_key,
+            algorithm="ES256",
+        )
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(forged)
+
+    def test_an_unsigned_token_is_refused(self, real_auth):
+        # `alg: none` is the classic one. Only asymmetric algorithms are ever
+        # tried, so this never reaches a decode that could accept it.
+        unsigned = jwt.encode(
+            {"sub": "abc", "aud": "authenticated", "exp": int(time.time()) + 60},
+            key="",
+            algorithm="none",
+        )
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(unsigned)
+
+    def test_a_token_with_no_expiry_is_refused(self, real_auth):
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(_signed_token(exp=None))
+
+    def test_a_token_with_no_subject_is_refused(self, real_auth):
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(_signed_token(sub=None))
+
+
+class TestHs256IsNoLongerAccepted:
+    """The legacy HS256 shared-secret path is gone: a validly HS256-signed token,
+    however well-formed, is refused because HS256 is not an accepted algorithm."""
+
+    def test_an_hs256_token_is_refused_over_the_wire(self, real_auth):
+        token = jwt.encode(
+            {
+                "sub": "abc",
+                "aud": "authenticated",
+                "iss": TEST_ISSUER_URL + "/auth/v1",
+                "role": "authenticated",
+                "app_metadata": {"provider": "google"},
+                "exp": int(time.time()) + 60,
+            },
+            "any-secret-at-all",
+            algorithm="HS256",
+        )
+        response = client.get("/api/sample", headers=_bearer(token))
+        assert response.status_code == 401
+
+    def test_verify_bearer_token_refuses_hs256_directly(self, real_auth):
+        token = jwt.encode({"sub": "abc", "exp": int(time.time()) + 60}, "s", algorithm="HS256")
+        with pytest.raises(api_index.Unauthorized):
+            api_index.verify_bearer_token(token)
+
+
+class TestTheAuthorizationRule:
+    """`authorization_reason` is pure: it takes claims and the configured
+    allowlists and returns None (permitted) or a short reason (403). The env
+    wrapper is exercised over the wire in the classes below."""
+
+    GOOGLE = frozenset({"google"})
+    NONE = frozenset()
+
+    @staticmethod
+    def _claims(**overrides):
+        claims = {
+            "role": "authenticated",
+            "app_metadata": {"provider": "google", "providers": ["google"]},
+            "email": "reader@example.com",
+        }
+        claims.update(overrides)
+        return claims
+
+    def _reason(self, claims, *, providers=GOOGLE, emails=NONE, domains=NONE):
+        return api_index.authorization_reason(
+            claims, allowed_providers=providers, allowed_emails=emails, allowed_domains=domains
+        )
+
+    def test_a_permitted_google_user_passes(self):
+        assert self._reason(self._claims()) is None
+
+    def test_an_anonymous_token_is_refused(self):
+        assert self._reason(self._claims(is_anonymous=True)) == "anonymous"
+
+    def test_a_non_authenticated_role_is_refused(self):
+        assert self._reason(self._claims(role="anon")) == "role"
+
+    def test_a_provider_off_the_list_is_refused(self):
+        claims = self._claims(app_metadata={"provider": "email", "providers": ["email"]})
+        assert self._reason(claims) == "provider"
+
+    def test_widening_the_provider_set_admits_another_provider(self):
+        claims = self._claims(app_metadata={"provider": "azure", "providers": ["azure"]})
+        assert self._reason(claims, providers=frozenset({"google", "azure"})) is None
+
+    def test_an_allowed_exact_email_passes(self):
+        assert self._reason(self._claims(), emails=frozenset({"reader@example.com"})) is None
+
+    def test_a_disallowed_email_is_refused(self):
+        claims = self._claims(email="stranger@example.com")
+        assert self._reason(claims, emails=frozenset({"reader@example.com"})) == "email"
+
+    def test_an_allowed_domain_passes(self):
+        assert self._reason(self._claims(), domains=frozenset({"example.com"})) is None
+
+    def test_a_disallowed_domain_is_refused(self):
+        claims = self._claims(email="reader@evil.example")
+        assert self._reason(claims, domains=frozenset({"example.com"})) == "email"
+
+    def test_with_neither_list_set_any_authenticated_email_is_allowed(self):
+        # The shipped default: provider gate only, no email restriction.
+        assert self._reason(self._claims(email="anyone@anywhere.example")) is None
+
+    def test_the_email_claim_is_read_case_insensitively(self):
+        claims = self._claims(email="Reader@Example.com")
+        assert self._reason(claims, emails=frozenset({"reader@example.com"})) is None
+
+
+class TestAuthorizationOverTheWire:
+    """The env-driven wrapper: a validly signed but not-permitted token is a 403,
+    distinct from the 401 an unverifiable token gets."""
+
+    def test_an_anonymous_session_is_forbidden(self, real_auth):
+        response = client.get("/api/sample", headers=_bearer(_signed_token(is_anonymous=True)))
+        assert response.status_code == 403
+        assert response.json() == {"message": api_index.NOT_PERMITTED_MESSAGE}
+
+    def test_an_email_password_session_is_forbidden_by_default(self, real_auth):
+        token = _signed_token(app_metadata={"provider": "email", "providers": ["email"]})
+        response = client.get("/api/sample", headers=_bearer(token))
+        assert response.status_code == 403
+        assert response.json() == {"message": api_index.NOT_PERMITTED_MESSAGE}
+
+    def test_a_403_omits_the_challenge_and_is_not_cached(self, real_auth):
+        response = client.get("/api/sample", headers=_bearer(_signed_token(is_anonymous=True)))
+        assert response.status_code == 403
+        assert "www-authenticate" not in {k.lower() for k in response.headers}
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_widening_the_provider_env_lets_another_provider_in(self, real_auth, monkeypatch):
+        monkeypatch.setenv("AUTH_ALLOWED_PROVIDERS", "google,azure")
+        token = _signed_token(app_metadata={"provider": "azure", "providers": ["azure"]})
+        response = client.get("/api/sample/available", headers=_bearer(token))
+        assert response.status_code == 200
+
+    def test_an_email_off_the_env_allowlist_is_forbidden(self, real_auth, monkeypatch):
+        monkeypatch.setenv("AUTH_ALLOWED_EMAILS", "allowed@example.com")
+        # Provider is google (fine), but the email is not on the list.
+        response = client.get("/api/sample", headers=_bearer(_signed_token(email="reader@example.com")))
+        assert response.status_code == 403
+
+    def test_an_email_on_the_env_allowlist_passes(self, real_auth, monkeypatch):
+        monkeypatch.setenv("AUTH_ALLOWED_EMAILS", "reader@example.com")
+        response = client.get("/api/sample/available", headers=_bearer(_signed_token()))
+        assert response.status_code == 200
+
+
+class TestAMisconfiguredDeployment:
+    """A missing project URL or an unreachable JWKS is a server-side problem, and
+    it must not resolve into "everyone is signed in". The caller sees the one
+    ordinary 401 sentence (config state stays off the wire); the real reason goes
+    to the log."""
+
+    def test_no_project_url_refuses_every_token(self, fake_auth, monkeypatch, caplog):
+        fake_auth.enabled = False
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("NEXT_PUBLIC_SUPABASE_URL", raising=False)
+        with caplog.at_level(logging.ERROR, logger=api_index.logger.name):
+            response = client.get("/api/sample", headers=_bearer(_signed_token()))
+        assert response.status_code == 401
+        # The same sentence a stale token gets, so the misconfiguration does not
+        # announce itself to the caller (L1).
+        assert response.json() == {"message": api_index.AUTH_REQUIRED_MESSAGE}
+        assert "SUPABASE_URL" in caplog.text
+
+    def test_an_unreachable_jwks_refuses_with_the_same_sentence(
+        self, fake_auth, monkeypatch, caplog
+    ):
+        fake_auth.enabled = False
+        monkeypatch.setenv("SUPABASE_URL", TEST_ISSUER_URL)
+
+        def boom(base_url):
+            raise RuntimeError("the JWKS endpoint is unreachable")
+
+        monkeypatch.setattr(api_index, "_jwks_client_for", boom)
+        with caplog.at_level(logging.ERROR, logger=api_index.logger.name):
+            response = client.get("/api/sample", headers=_bearer(_signed_token()))
+        assert response.status_code == 401
+        assert response.json() == {"message": api_index.AUTH_REQUIRED_MESSAGE}
+        assert "JWKS" in caplog.text
+
+
+class TestTheJwksClientIsCached:
+    def test_one_client_is_reused_for_the_same_project(self, monkeypatch):
+        built = []
+
+        class FakeJwkClient:
+            def __init__(self, uri, **options):
+                built.append(uri)
+
+        monkeypatch.setattr(api_index, "_jwks_client", None)
+        monkeypatch.setattr(api_index.jwt, "PyJWKClient", FakeJwkClient)
+
+        first = api_index._jwks_client_for(TEST_ISSUER_URL)
+        second = api_index._jwks_client_for(TEST_ISSUER_URL)
+
+        assert first is second
+        assert built == [TEST_ISSUER_URL + api_index.JWKS_PATH]
+
+    def test_a_different_project_url_gets_its_own_client(self, monkeypatch):
+        class FakeJwkClient:
+            def __init__(self, uri, **options):
+                self.uri = uri
+
+        monkeypatch.setattr(api_index, "_jwks_client", None)
+        monkeypatch.setattr(api_index.jwt, "PyJWKClient", FakeJwkClient)
+
+        first = api_index._jwks_client_for(TEST_ISSUER_URL)
+        second = api_index._jwks_client_for("https://another.supabase.co")
+        assert first is not second
+
+
+class TestTheAsymmetricBranchVerifiesAgainstTheJwks:
+    """The one code path production actually uses: an ES256 token checked against
+    a public key fetched from the project's JWKS. `real_auth` stubs
+    `_jwks_client_for`, so this test goes one level lower and stubs the
+    `jwt.PyJWKClient` it builds, exercising the real `_jwks_client_for` and the
+    real asymmetric branch end to end with a generated EC keypair."""
+
+    def test_a_real_es256_token_is_verified_through_a_stub_pyjwkclient(
+        self, fake_auth, monkeypatch
+    ):
+        fake_auth.enabled = False
+        monkeypatch.setenv("SUPABASE_URL", TEST_ISSUER_URL)
+        monkeypatch.setattr(api_index, "_jwks_client", None)
+
+        class FakePyJwkClient:
+            def __init__(self, uri, **options):
+                self.uri = uri
+
+            def get_signing_key_from_jwt(self, token):
+                return _StubSigningKey()
+
+        monkeypatch.setattr(api_index.jwt, "PyJWKClient", FakePyJwkClient)
+
+        user = api_index.verify_bearer_token(_signed_token(sub="ec-user"))
+        assert user.user_id == "ec-user"
+        assert user.email == "reader@example.com"
+
+
+class TestRateLimitsFollowTheUser:
+    @staticmethod
+    def _request(headers=None, client_host="10.0.0.1"):
+        raw = [(name.lower().encode(), value.encode()) for name, value in (headers or {}).items()]
+        return api_index.Request(
+            {"type": "http", "method": "GET", "path": "/", "headers": raw, "client": (client_host, 1)}
+        )
+
+    def test_the_signed_in_user_is_the_bucket(self):
+        user = api_index.AuthenticatedUser("user-abc", "a@example.com")
+        assert api_index._rate_limit_identity(self._request(), user) == "user:user-abc"
+
+    def test_two_users_behind_one_address_do_not_share_a_bucket(self):
+        one = api_index.AuthenticatedUser("user-one", "")
+        two = api_index.AuthenticatedUser("user-two", "")
+        request = self._request(headers={"x-forwarded-for": "1.1.1.1"})
+        assert api_index._rate_limit_identity(request, one) != api_index._rate_limit_identity(
+            request, two
+        )
+
+    def test_one_user_on_two_addresses_shares_a_bucket(self):
+        user = api_index.AuthenticatedUser("user-one", "")
+        first = self._request(headers={"x-forwarded-for": "1.1.1.1"})
+        second = self._request(headers={"x-forwarded-for": "2.2.2.2"})
+        assert api_index._rate_limit_identity(first, user) == api_index._rate_limit_identity(
+            second, user
+        )
+
+    def test_the_address_is_the_floor_when_there_is_no_user(self):
+        # The RIGHTMOST forwarded entry, which on Vercel is the platform-provided
+        # client IP; the leftmost is caller-supplied and spoofable.
+        request = self._request(headers={"x-forwarded-for": "9.9.9.9, 10.0.0.1"})
+        assert api_index._rate_limit_identity(request, None) == "ip:10.0.0.1"
+
+    def test_one_user_still_runs_out_of_report_budget(self, monkeypatch):
+        monkeypatch.setattr(api_index, "REPORTS_PER_HOUR", 1)
+        _fake_run(monkeypatch)
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+        limited = client.post("/api/report", json=VALID_BODY)
+        assert limited.status_code == 429
+        assert "account" in limited.json()["message"]
+
+    def test_a_second_user_has_their_own_report_budget(self, monkeypatch, fake_auth):
+        monkeypatch.setattr(api_index, "REPORTS_PER_HOUR", 1)
+        _fake_run(monkeypatch)
+        fake_auth.user = api_index.AuthenticatedUser("user-one", "")
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+        assert client.post("/api/report", json=VALID_BODY).status_code == 429
+        fake_auth.user = api_index.AuthenticatedUser("user-two", "")
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+
+    def test_the_draft_bucket_is_per_user_too(self, monkeypatch, fake_auth):
+        monkeypatch.setattr(api_index, "DRAFTS_PER_HOUR", 1)
+        monkeypatch.setattr(
+            api_index.analysis, "draft_post", lambda idea, evidence, query, profile: {"post": "p"}
+        )
+        body = {"idea": {"title": "t"}, "evidence": [], "query": "q", "profile": ""}
+        fake_auth.user = api_index.AuthenticatedUser("user-one", "")
+        assert client.post("/api/draft", json=body).status_code == 200
+        assert client.post("/api/draft", json=body).status_code == 429
+        fake_auth.user = api_index.AuthenticatedUser("user-two", "")
+        assert client.post("/api/draft", json=body).status_code == 200
+
+
+class TestTheClientAddressIsTheVercelProvidedOne:
+    """On Vercel, X-Forwarded-For is overwritten by the platform with the real
+    client IP; the trustworthy value is the rightmost (platform-appended) one, not
+    the leftmost, which a caller can set to anything."""
+
+    @staticmethod
+    def _request(headers=None, client_host="10.0.0.1"):
+        raw = [(name.lower().encode(), value.encode()) for name, value in (headers or {}).items()]
+        return api_index.Request(
+            {"type": "http", "method": "GET", "path": "/", "headers": raw, "client": (client_host, 1)}
+        )
+
+    def test_the_rightmost_forwarded_entry_wins(self):
+        request = self._request(headers={"x-forwarded-for": "1.1.1.1, 2.2.2.2, 3.3.3.3"})
+        assert api_index._client_ip(request) == "3.3.3.3"
+
+    def test_a_spoofed_leftmost_entry_is_ignored(self):
+        # A caller prepends a fake address; the platform-appended real one is last.
+        request = self._request(headers={"x-forwarded-for": "evil-spoof, 203.0.113.7"})
+        assert api_index._client_ip(request) == "203.0.113.7"
+
+    def test_x_real_ip_is_the_fallback(self):
+        request = self._request(headers={"x-real-ip": "198.51.100.9"})
+        assert api_index._client_ip(request) == "198.51.100.9"
+
+    def test_the_socket_peer_is_the_last_resort(self):
+        assert api_index._client_ip(self._request(client_host="192.0.2.5")) == "192.0.2.5"
+
+
+class TestThePerIpCeiling:
+    """Per-user budgets follow the person; a per-IP ceiling stops N accounts
+    behind one address from multiplying cost without bound."""
+
+    def test_accounts_behind_one_address_share_a_ceiling(self, monkeypatch, fake_auth):
+        # Low per-user limit and a small multiple, so the ceiling is 1 * 2 = 2:
+        # each of three fresh accounts is under its own budget, but the address
+        # they share is not.
+        monkeypatch.setattr(api_index, "REPORTS_PER_HOUR", 1)
+        monkeypatch.setattr(api_index, "RATE_LIMIT_IP_CEILING_MULTIPLIER", 2)
+        _fake_run(monkeypatch)
+
+        fake_auth.user = api_index.AuthenticatedUser("user-one", "")
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+        fake_auth.user = api_index.AuthenticatedUser("user-two", "")
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+        # Third distinct account, its own budget untouched, but the address has
+        # now spent the shared ceiling (2), so it is refused.
+        fake_auth.user = api_index.AuthenticatedUser("user-three", "")
+        blocked = client.post("/api/report", json=VALID_BODY)
+        assert blocked.status_code == 429
+
+    def test_the_ceiling_is_a_multiple_of_the_per_user_limit(self, monkeypatch):
+        monkeypatch.setattr(api_index, "RATE_LIMIT_IP_CEILING_MULTIPLIER", 5)
+        assert api_index._ip_ceiling(6) == 30
+        # Never below the per-user limit, whatever the multiplier.
+        monkeypatch.setattr(api_index, "RATE_LIMIT_IP_CEILING_MULTIPLIER", 0)
+        assert api_index._ip_ceiling(6) == 6
+
+    def test_one_user_alone_never_trips_the_ceiling_before_their_own_budget(
+        self, monkeypatch, fake_auth
+    ):
+        # A single account uses its own budget, and the ceiling (a multiple of it)
+        # is always the looser of the two for one person.
+        monkeypatch.setattr(api_index, "REPORTS_PER_HOUR", 1)
+        monkeypatch.setattr(api_index, "RATE_LIMIT_IP_CEILING_MULTIPLIER", 5)
+        _fake_run(monkeypatch)
+        fake_auth.user = api_index.AuthenticatedUser("solo", "")
+        assert client.post("/api/report", json=VALID_BODY).status_code == 202
+        limited = client.post("/api/report", json=VALID_BODY)
+        assert limited.status_code == 429
+        # Refused by the per-user budget, whose message names the account.
+        assert "account" in limited.json()["message"]
+
+
+class TestASavedReportRecordsWhoRanIt:
+    """The save now happens in the worker (_execute_run), with the run's own owner,
+    but the guarantees are unchanged: attribution is a column, never part of the
+    bundle, and a share link is readable by anyone signed in."""
+
+    def test_the_user_id_is_stored_with_the_report(self, monkeypatch, fake_db):
+        _fake_run(monkeypatch)
+        run = _seed_run(fake_db, user_id="owner-42")
+        api_index._execute_run(run)
+        assert fake_db.saved_report_users == ["owner-42"]
+
+    def test_the_owner_is_never_written_into_the_stored_bundle(self, monkeypatch, fake_db):
+        # Attribution is a column, not part of the report: a share link must not
+        # tell whoever opens it who ran the report.
+        _fake_run(monkeypatch, bundle={"bundle_version": 4})
+        run = _seed_run(fake_db, user_id="owner-42")
+        api_index._execute_run(run)
+        _, _, _, bundle = fake_db.saved_report_calls[0]
+        assert "user_id" not in bundle
+
+    def test_anyone_signed_in_may_open_someone_elses_report(self, monkeypatch, fake_db, fake_auth):
+        # The product decision behind share links: the id is the credential, and
+        # a session is the only other requirement.
+        _fake_run(monkeypatch, bundle={"bundle_version": 4})
+        run = _seed_run(fake_db, user_id="owner-42")
+        api_index._execute_run(run)
+        report_id = fake_db.runs[SEEDED_RUN_ID]["report_id"]
+
+        fake_auth.user = api_index.AuthenticatedUser("someone-else", "")
+        response = client.get("/api/reports/{}".format(report_id))
+        assert response.status_code == 200
+        assert response.json()["bundle"]["bundle_version"] == 4
+
+
+class TestTheAuthMigrationScript:
+    """scripts/migrate_auth.py, without a database.
+
+    The SQL is asserted as text on purpose: this script runs once, by hand,
+    against the one production database, and there is no safe place to rehearse
+    it. What can be checked here is that the statements are the shape they claim
+    to be and that the claim is parameterised rather than interpolated.
+    """
+
+    @staticmethod
+    def _script():
+        import importlib.util
+        import pathlib
+
+        path = pathlib.Path(api_index._REPO_ROOT) / "scripts" / "migrate_auth.py"
+        spec = importlib.util.spec_from_file_location("migrate_auth_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    class RecordingCursor:
+        def __init__(self, rowcount=0, regclass="public.reports"):
+            self.executed = []
+            self.rowcount = rowcount
+            # What `select to_regclass(...)` returns: a name when the table
+            # exists, None when it does not.
+            self._regclass = regclass
+
+        def execute(self, sql, args=None):
+            self.executed.append((sql, args))
+
+        def fetchone(self):
+            return (self._regclass,)
+
+    def test_the_column_is_added_idempotently(self):
+        script = self._script()
+        cursor = self.RecordingCursor()
+        script.add_column(cursor)
+
+        sql, args = cursor.executed[0]
+        normalised = " ".join(sql.split()).lower()
+        assert normalised == "alter table public.reports add column if not exists user_id text"
+        assert args is None
+
+    def test_the_claim_only_touches_unowned_rows(self):
+        script = self._script()
+        cursor = self.RecordingCursor(rowcount=18)
+        claimed = script.claim_unowned(cursor, "owner-42")
+
+        sql, args = cursor.executed[0]
+        normalised = " ".join(sql.split()).lower()
+        assert normalised == "update public.reports set user_id = %s where user_id is null"
+        # Parameterised, never interpolated: this runs against production once.
+        assert args == ("owner-42",)
+        assert "owner-42" not in sql
+        assert claimed == 18
+
+    def test_it_targets_both_app_tables(self):
+        script = self._script()
+        assert set(script.REVOKE_TABLES) == {"public.reports", "public.drafts"}
+
+    def test_revoke_closes_the_browser_facing_roles(self):
+        script = self._script()
+        cursor = self.RecordingCursor(regclass="public.reports")
+        touched = script.revoke_browser_role_grants(cursor)
+
+        assert touched == ["public.reports", "public.drafts"]
+        revokes = [
+            " ".join(sql.split()).lower()
+            for sql, _ in cursor.executed
+            if sql.strip().lower().startswith("revoke")
+        ]
+        assert "revoke all privileges on table public.reports from anon, authenticated" in revokes
+        assert "revoke all privileges on table public.drafts from anon, authenticated" in revokes
+
+    def test_revoke_skips_a_table_that_is_not_present(self):
+        script = self._script()
+        cursor = self.RecordingCursor(regclass=None)
+        touched = script.revoke_browser_role_grants(cursor)
+
+        assert touched == []
+        assert not any(sql.strip().lower().startswith("revoke") for sql, _ in cursor.executed)
+
+    def test_revoke_leaves_rls_enablement_alone(self):
+        # The pass revokes grants; it must not touch row-level security itself.
+        script = self._script()
+        cursor = self.RecordingCursor(regclass="public.reports")
+        script.revoke_browser_role_grants(cursor)
+        assert not any("row level security" in sql.lower() for sql, _ in cursor.executed)
+
+    def test_the_column_is_nullable_so_existing_reports_survive_the_migration(self):
+        script = self._script()
+        assert "not null" not in " ".join(script.ADD_COLUMN_SQL.split()).lower()
+
+    def test_it_refuses_to_run_without_a_database_url(self, monkeypatch, capsys):
+        script = self._script()
+        monkeypatch.setattr(script.db, "is_configured", lambda: False)
+        monkeypatch.setattr(script.sys, "argv", ["migrate_auth.py"])
+        assert script.main() == 1
+        assert "POSTGRES_URL" in capsys.readouterr().err
+
+    def test_an_empty_claim_is_refused_rather_than_claiming_nothing(self, monkeypatch, capsys):
+        script = self._script()
+        monkeypatch.setattr(script.sys, "argv", ["migrate_auth.py", "--claim", "  "])
+        assert script.main() == 2
+        assert "--claim" in capsys.readouterr().err
+
+    def test_it_reuses_the_dsn_handling_db_already_has(self, monkeypatch):
+        # Not its own copy of the `supa=` stripping and the sslmode default: the
+        # one place that knows how to read POSTGRES_URL is db.py.
+        script = self._script()
+        monkeypatch.setenv(
+            "POSTGRES_URL", "postgres://u:p@db.example.com:6543/postgres?supa=base-pooler.x"
+        )
+        dsn = script.db._dsn()
+        assert "supa=" not in dsn
+        assert dsn.endswith("sslmode=require")

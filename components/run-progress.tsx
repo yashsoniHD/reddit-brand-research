@@ -1,7 +1,7 @@
 "use client";
 
 import { Check } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * Staged progress, fed by the real NDJSON progress lines.
@@ -16,14 +16,56 @@ import { useEffect, useRef } from "react";
  * comments…" arrives after selection has been announced, and an unmatched line
  * such as "Starting…" scores zero), so reading only the last line made the
  * stepper walk backwards mid-run.
+ *
+ * Every pattern below is matched against a real `say(...)` call in
+ * pipeline.py's `run_report`. Retrieval has two modes, scrape and search, and
+ * both have to land on the "read" stage: a search-mode run emits "Searching
+ * r/x for y…", "Reading the replies to the n strongest threads…", and the two
+ * "Too little matched/mentioning…" widen-and-retry lines instead of
+ * "Fetching…", and none of those matched here before, so a search-mode run
+ * (the default path) sat on "Finding communities" for the whole 76-200s
+ * retrieval phase.
  */
 
 const STAGES = [
-  { id: "discover", label: "Finding communities", match: /^(finding communities|found )/i },
-  { id: "read", label: "Reading posts and comments", match: /^fetching /i },
-  { id: "select", label: "Selecting the sample", match: /^selecting /i },
-  { id: "classify", label: "Classifying the sample", match: /^classif/i },
-  { id: "write", label: "Writing your content ideas", match: /^writing /i },
+  {
+    id: "discover",
+    label: "Finding communities",
+    // "Finding communities talking about this…", "Found r/a, r/b… Fetching
+    // posts…", "Checking the communities you chose…" (the manual-subreddits
+    // path, which skips discovery's model call but still announces itself).
+    match: /^(finding communities|found |checking the communities)/i,
+  },
+  {
+    id: "read",
+    label: "Reading posts and comments",
+    // Scrape mode: "Fetching posts from r/x…", "Fetching posts from r/x…
+    // (n so far)", "Fetching comments from r/x…". Search mode: "Searching
+    // r/x for y…", "Searching r/x for y… (n found)", "Reading the replies to
+    // the n strongest threads…", and the two retry lines emitted when a
+    // search or a phrase filter came back too thin: "Too little matched
+    // those searches. Reading those communities…" and "Too little
+    // mentioning {phrase}. Reading those communities again…".
+    match: /^(fetching |searching r\/|reading the replies|too little (matched|mentioning))/i,
+  },
+  {
+    id: "select",
+    label: "Selecting the sample",
+    // "Selecting the most relevant items…" or "Selecting items…" depending
+    // on whether the relevance filter is on.
+    match: /^selecting /i,
+  },
+  {
+    id: "classify",
+    label: "Classifying the sample",
+    // "Classifying the sample…" then "Classified n posts and m comments…".
+    match: /^classif/i,
+  },
+  {
+    id: "write",
+    label: "Writing your content ideas",
+    match: /^writing /i,
+  },
 ] as const;
 
 function stageIndexFor(message: string): number {
@@ -52,6 +94,40 @@ function highestStage(messages: string[]): number {
  */
 const FOUND = /^found\s+(r\/[\w-]+(?:\s*,\s*r\/[\w-]+)*)/i;
 
+/**
+ * Minutes and seconds since this component mounted, ticking every second.
+ *
+ * A search-mode run can sit on the same heartbeat line for ten seconds at a
+ * time (the API resends the last message so a proxy does not treat the
+ * connection as idle), and a repeated line with nothing else moving reads as
+ * stuck. The clock is the tell that the run is still alive between lines.
+ */
+function useElapsedLabel(): string {
+  const startedAt = useRef<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Reading the clock is a side effect, so it happens here rather than as a
+  // render-time useRef initialiser: an effect is the documented place for an
+  // impure call like Date.now() to live.
+  useEffect(() => {
+    startedAt.current = Date.now();
+    const id = setInterval(() => {
+      // Clamped at zero: Date.now() is a wall clock, not a monotonic one, and can
+      // step backward (an NTP correction, a manual clock change). Without the
+      // clamp that renders as a negative elapsed time, which prints as something
+      // like "-1:-5" and reads as far more broken than a clock that briefly
+      // stalls at 0:00 instead.
+      const rawElapsed = Date.now() - (startedAt.current ?? Date.now());
+      setElapsedSeconds(Math.max(0, Math.round(rawElapsed / 1000)));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 function communitiesFrom(messages: string[]): string[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const hit = FOUND.exec(messages[index]);
@@ -69,6 +145,7 @@ export function RunProgress({ messages }: { messages: string[] }) {
   const latest = messages[messages.length - 1] ?? "Starting…";
   const current = highestStage(messages);
   const communities = communitiesFrom(messages);
+  const elapsed = useElapsedLabel();
   const logRef = useRef<HTMLUListElement>(null);
 
   // The log is a tail, so it should behave like one: the newest line sits at the
@@ -93,16 +170,15 @@ export function RunProgress({ messages }: { messages: string[] }) {
             </span>
             Researching your topic
           </span>
-          {/* The run is a streamed fetch owned by this page, aborted when the
-              component unmounts, so closing the tab or navigating away really
-              does throw the whole thing out. Up to three minutes is too much to
-              lose to a rule nobody was told. */}
+          {/* The run now executes server-side and is polled from this page, so
+              closing the tab no longer throws it away. It keeps going and shows
+              up here again when you come back. */}
           <span className="text-xs leading-relaxed text-muted-foreground">
-            Keep this tab open. Leaving it cancels the run.
+            You can close this tab. The run keeps going and will be here when you return.
           </span>
         </span>
         <span className="num text-xs text-muted-foreground">
-          Step {current + 1} of {STAGES.length}
+          Step {current + 1} of {STAGES.length} · {elapsed}
         </span>
       </div>
 

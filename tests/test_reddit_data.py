@@ -8,6 +8,15 @@ import discovery
 import reddit_data
 
 
+@pytest.fixture(autouse=True)
+def _clear_lookup_cache():
+    """`lookup_subreddit` now caches; without this, one test's fake response for
+    "productivity" would leak into the next test that looks up the same name."""
+    reddit_data._lookup_cache.clear()
+    yield
+    reddit_data._lookup_cache.clear()
+
+
 class TestNormalizeSubreddit:
     @pytest.mark.parametrize(
         "raw,expected",
@@ -165,6 +174,180 @@ class TestLookupSubreddit:
     def test_negative_or_malformed_subscriber_count_is_clamped(self, monkeypatch):
         self._router(monkeypatch, exact=[{"display_name": "productivity", "subscribers": "bogus"}])
         assert reddit_data.lookup_subreddit("productivity")["subscribers"] == 0
+
+
+class TestLookupSubredditCache:
+    """`lookup_subreddit` is pure metadata, so a short TTL cache in front of it is
+    safe. These pin down hit, miss, expiry and the "never cache a failure" rule."""
+
+    def test_repeated_lookup_within_ttl_does_not_hit_the_network_again(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_request(url, params, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse({"data": [
+                {"display_name": "productivity", "subscribers": 100, "over18": False,
+                 "subreddit_type": "public"}
+            ]})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        first = reddit_data.lookup_subreddit("productivity")
+        second = reddit_data.lookup_subreddit("productivity")
+        assert first == second
+        assert calls["n"] == 1
+
+    def test_cache_key_is_case_insensitive(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_request(url, params, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse({"data": [
+                {"display_name": "Productivity", "subscribers": 1, "over18": False,
+                 "subreddit_type": "public"}
+            ]})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        reddit_data.lookup_subreddit("Productivity")
+        reddit_data.lookup_subreddit("PRODUCTIVITY")
+        assert calls["n"] == 1
+
+    def test_a_not_found_result_is_cached_too(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_request(url, params, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse({"data": []})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        assert reddit_data.lookup_subreddit("nosuchsubredditxyz") is None
+        assert reddit_data.lookup_subreddit("nosuchsubredditxyz") is None
+        assert calls["n"] == 1
+
+    def test_expiry_after_the_ttl_triggers_a_fresh_lookup(self, monkeypatch):
+        calls = {"n": 0}
+        clock = {"now": reddit_data.time.monotonic()}
+
+        def fake_request(url, params, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse({"data": [
+                {"display_name": "productivity", "subscribers": calls["n"], "over18": False,
+                 "subreddit_type": "public"}
+            ]})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        monkeypatch.setattr(reddit_data.time, "monotonic", lambda: clock["now"])
+
+        first = reddit_data.lookup_subreddit("productivity")
+        clock["now"] += reddit_data.LOOKUP_CACHE_TTL_SECONDS + 1
+        second = reddit_data.lookup_subreddit("productivity")
+
+        assert calls["n"] == 2
+        assert first["subscribers"] == 1
+        assert second["subscribers"] == 2
+
+    def test_just_under_the_ttl_still_hits_the_cache(self, monkeypatch):
+        calls = {"n": 0}
+        clock = {"now": reddit_data.time.monotonic()}
+
+        def fake_request(url, params, **kwargs):
+            calls["n"] += 1
+            return _FakeResponse({"data": [
+                {"display_name": "productivity", "subscribers": 1, "over18": False,
+                 "subreddit_type": "public"}
+            ]})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        monkeypatch.setattr(reddit_data.time, "monotonic", lambda: clock["now"])
+
+        reddit_data.lookup_subreddit("productivity")
+        clock["now"] += reddit_data.LOOKUP_CACHE_TTL_SECONDS - 1
+        reddit_data.lookup_subreddit("productivity")
+
+        assert calls["n"] == 1
+
+    def test_a_service_failure_is_never_cached(self, monkeypatch):
+        calls = {"n": 0}
+
+        def explode(*args, **kwargs):
+            calls["n"] += 1
+            raise reddit_data.requests.ConnectionError("down")
+
+        monkeypatch.setattr(reddit_data, "_request_page", explode)
+        with pytest.raises(RuntimeError):
+            reddit_data.lookup_subreddit("productivity")
+        with pytest.raises(RuntimeError):
+            reddit_data.lookup_subreddit("productivity")
+        assert calls["n"] == 2
+
+    def test_deadline_is_passed_all_the_way_down_to_request_page(self, monkeypatch):
+        """A lookup issued near the end of a run's time budget must be able to cut
+        its own retries short (see `_request_page`'s deadline check), which only
+        works if the deadline actually reaches it rather than stopping at
+        `_search_subreddits`."""
+        captured = {}
+
+        def fake_request(url, params, timeout=None, deadline=None):
+            captured["deadline"] = deadline
+            return _FakeResponse({"data": []})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        deadline = reddit_data.time.monotonic() + 5
+        reddit_data.lookup_subreddit("productivity", deadline=deadline)
+        assert captured["deadline"] == deadline
+
+    def test_returned_dict_is_a_copy_a_caller_cannot_poison_the_cache_with(self, monkeypatch):
+        def fake_request(url, params, **kwargs):
+            return _FakeResponse({"data": [
+                {"display_name": "productivity", "subscribers": 100, "over18": False,
+                 "subreddit_type": "public"}
+            ]})
+
+        monkeypatch.setattr(reddit_data, "_request_page", fake_request)
+        first = reddit_data.lookup_subreddit("productivity")
+        first["subscribers"] = 999999
+        first["name"] = "tampered"
+
+        second = reddit_data.lookup_subreddit("productivity")
+        assert second["subscribers"] == 100
+        assert second["name"] == "productivity"
+
+    def test_expired_entries_are_purged_on_the_next_write_not_left_forever(self, monkeypatch):
+        clock = {"now": reddit_data.time.monotonic()}
+        monkeypatch.setattr(reddit_data.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(
+            reddit_data, "_request_page",
+            lambda *a, **k: _FakeResponse({"data": [{"display_name": "subaaa"}]}),
+        )
+
+        reddit_data.lookup_subreddit("subaaa")
+        assert "subaaa" in reddit_data._lookup_cache
+
+        clock["now"] += reddit_data.LOOKUP_CACHE_TTL_SECONDS + 1
+        # A second, different name's lookup is the write that should sweep the
+        # now-expired "subaaa" entry out of the dict entirely, not just make it
+        # unreachable through _cache_get.
+        reddit_data.lookup_subreddit("subbbb")
+        assert "subaaa" not in reddit_data._lookup_cache
+
+    def test_cache_size_is_capped_oldest_entries_evicted_first(self, monkeypatch):
+        clock = {"now": reddit_data.time.monotonic()}
+        monkeypatch.setattr(reddit_data.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(
+            reddit_data, "_request_page",
+            lambda *a, **k: _FakeResponse({"data": []}),
+        )
+
+        total = reddit_data.LOOKUP_CACHE_MAX_ENTRIES + 5
+        for i in range(total):
+            reddit_data.lookup_subreddit("sub{:04d}".format(i))
+            clock["now"] += 1  # each write strictly newer than the last
+
+        assert len(reddit_data._lookup_cache) <= reddit_data.LOOKUP_CACHE_MAX_ENTRIES
+        # The five oldest (first inserted) should be the ones gone, not an
+        # arbitrary five: "sub0000".."sub0004" were written first.
+        for i in range(5):
+            assert "sub{:04d}".format(i) not in reddit_data._lookup_cache
+        assert "sub{:04d}".format(total - 1) in reddit_data._lookup_cache
 
 
 class TestFetchPosts:
@@ -339,13 +522,13 @@ class TestFetchPostsNoPhrases:
 
 
 class TestFetchPostsPhrases:
-    def test_query_param_carries_the_phrase_and_not_the_comments_param(self, monkeypatch):
+    def test_query_param_carries_the_phrase_and_not_a_body_param(self, monkeypatch):
         router = _CapturingRouter([_FakeResponse({"data": [_post_row("a", 1700000000)]})])
         monkeypatch.setattr(reddit_data, "_request_page", router)
         reddit_data.fetch_posts("x", 7, phrases=["meta ads"])
         params = router.calls[0]["params"]
         assert params.get(reddit_data.POSTS_TEXT_PARAM) == "meta ads"
-        assert reddit_data.COMMENTS_TEXT_PARAM not in params
+        assert "body" not in params
 
     def test_two_phrases_produce_one_prefilter_string_with_all_words(self, monkeypatch):
         router = _CapturingRouter([_FakeResponse({"data": [_post_row("a", 1700000000)]})])
@@ -464,20 +647,67 @@ class TestFetchPostsMetadata:
 
 
 class TestFetchCommentsPhrases:
-    def test_body_param_carries_the_phrase_and_not_the_posts_param(self, monkeypatch):
+    def test_never_sends_a_body_param_even_with_phrases_active(self, monkeypatch):
+        # Comment search rejects `body=` at subreddit scope with a 422 on
+        # effectively every attempt (docs/ARCTIC_SHIFT_API.md), so sending it
+        # only bought MAX_ATTEMPTS wasted requests and their backoff for a page
+        # that always came back unfiltered anyway. It is never sent now.
         router = _CapturingRouter([_FakeResponse({"data": [_comment_row("c1", 1700000000)]})])
         monkeypatch.setattr(reddit_data, "_request_page", router)
         reddit_data.fetch_comments("x", 7, phrases=["meta ads"])
         params = router.calls[0]["params"]
-        assert params.get(reddit_data.COMMENTS_TEXT_PARAM) == "meta ads"
+        assert "body" not in params
         assert reddit_data.POSTS_TEXT_PARAM not in params
+        assert set(params.keys()) == {"subreddit", "limit", "after", "sort"}
 
-    def test_page_ceiling_is_the_lower_phrase_ceiling(self, monkeypatch):
+    def test_phrase_match_is_still_stamped_without_the_prefilter(self, monkeypatch):
+        rows = [
+            _comment_row("c1", 1700000000, body="meta ads works great"),
+            _comment_row("c2", 1700000001, body="something unrelated"),
+        ]
+        router = _CapturingRouter([_FakeResponse({"data": rows})])
+        monkeypatch.setattr(reddit_data, "_request_page", router)
+        comments = reddit_data.fetch_comments("x", 7, phrases=["meta ads"])
+        by_id = {c["id"]: c["phrase_match"] for c in comments}
+        assert by_id == {"c1": True, "c2": False}
+
+    def test_no_more_422_retries_because_body_is_never_sent(self, monkeypatch):
+        """Regression test for the bug this fixed: with `body=` sent, the archive
+        422s deterministically at subreddit scope (docs/ARCTIC_SHIFT_API.md), 422
+        sits in RETRYABLE_STATUS_CODES, so `_request_page` retried up to
+        MAX_ATTEMPTS times with real sleeps and then raised, and fetch_comments
+        came back with zero comments. This exercises the real `_request_page`
+        (only `requests.get` is faked) so it proves the fix end to end rather
+        than just the outgoing params.
+        """
+        sleeps = []
+        monkeypatch.setattr(reddit_data.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+        def fake_get(url, params=None, timeout=None):
+            if "body" in params:
+                return _FakeResponse({"error": "Timeout. Maybe slow down a bit"}, status_code=422)
+            return _FakeResponse({"data": [_comment_row("c1", 1700000000)]})
+
+        monkeypatch.setattr(reddit_data.requests, "get", fake_get)
+        comments = reddit_data.fetch_comments("x", 7, phrases=["meta ads"])
+
+        assert sleeps == []  # no retry backoff was ever needed
+        assert [c["id"] for c in comments] == ["c1"]
+
+    def test_phrase_mode_page_ceiling_matches_the_unfiltered_ceiling(self, monkeypatch):
+        """Regression test for the bug this fixed: phrase mode used to fetch fewer
+        pages than unfiltered mode (PHRASE_MAX_COMMENT_PAGES < MAX_COMMENT_PAGES),
+        backwards for the mode that has to sift every comment client-side rather
+        than rely on an archive-side prefilter. The two ceilings are now equal
+        (see PHRASE_MAX_COMMENT_PAGES's definition); this pins down that equality
+        rather than a specific page count, so it stays true if both move together.
+        """
         full_page = {
             "data": [_comment_row("c{}".format(i), 1700000000 + i) for i in range(reddit_data.PAGE_SIZE)]
         }
         router = _CapturingRouter([_FakeResponse(full_page)])
         monkeypatch.setattr(reddit_data, "_request_page", router)
+        assert reddit_data.PHRASE_MAX_COMMENT_PAGES == reddit_data.MAX_COMMENT_PAGES
         reddit_data.fetch_comments("x", 7, limit=100000, phrases=["meta ads"])
         assert len(router.calls) == reddit_data.PHRASE_MAX_COMMENT_PAGES
 

@@ -190,14 +190,22 @@ fetch **without** `body` succeeds in ~1s.
 The docs explain why: post keyword search is a simple fast index, comment search
 is PostgreSQL FTS via `websearch_to_tsquery` and is slow.
 
-Our `COMMENTS_TEXT_PARAM = "body"` prefilter (`reddit_data.py:63`) therefore
-burns `MAX_ATTEMPTS` requests plus `RETRY_DELAYS_SECONDS` on nearly every phrase
-run before the 400-retry path drops the param and we fall back to unfiltered
-pages. Correctness is fine - `keywords.matches_all` re-checks everything - but the
-cost is ~3 wasted requests and ~3s per comment page.
+Our old `COMMENTS_TEXT_PARAM = "body"` prefilter burned `MAX_ATTEMPTS` requests
+plus `RETRY_DELAYS_SECONDS` on nearly every phrase run, and worse than the
+previous version of this note claimed: 422 sits in `RETRYABLE_STATUS_CODES`,
+not 400, so `_request_page` retried it, exhausted its attempts and raised - it
+never reached the 400-retry path that strips the param, because that path only
+fires on a literal 400. `fetch_comments` caught the raise and returned on the
+spot, so a phrase-filtered run got zero comments, not a same-request fallback
+to an unfiltered page, at a cost of roughly 3 wasted requests and 3s of backoff
+per comment page (measured up to ~48s across a run's communities).
 
-**The fix is `link_id`.** Fetch posts (where `query=` works), then fetch each
-matching thread's comments by `link_id` with no text param:
+Fixed by never sending `body=` for a subreddit-scoped comment fetch in the
+first place: `fetch_comments` now always requests unfiltered pages, and
+`keywords.matches_all` re-checks every phrase against every returned comment
+client-side, so correctness is unaffected. `link_id` remains the fix for the
+other comment-fetching path, the one that already knows which posts it wants
+replies to:
 
 ```
 /comments/search?link_id=1v984ek&limit=100   -> 200, 32 comments, 1.58s

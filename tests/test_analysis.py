@@ -5,6 +5,7 @@ where ints belong, indices that point nowhere, and markdown lifted out of a Redd
 post body. None of it may reach the UI.
 """
 
+import threading
 import time
 
 import pytest
@@ -1129,9 +1130,10 @@ class TestSynthesizePublicCall:
     def test_forwards_query_into_the_prompt_and_sanitises_the_result(self, monkeypatch):
         captured = {}
 
-        def fake_chat_json(prompt, max_tokens, label):
+        def fake_chat_json(prompt, max_tokens, label, thinking_budget=None):
             captured["prompt"] = prompt
             captured["label"] = label
+            captured["thinking_budget"] = thinking_budget
             return (
                 {"content_ideas": [{"title": "A", "hook": "Stop scrolling"}]},
                 "test-model",
@@ -1142,6 +1144,7 @@ class TestSynthesizePublicCall:
 
         assert result["model"] == "test-model"
         assert captured["label"] == "synthesis"
+        assert captured["thinking_budget"] == analysis.SYNTHESIS_THINKING_BUDGET
         assert "skincare routines" in captured["prompt"]
         assert result["content_ideas"][0]["hook"] == "Stop scrolling"
         assert "platform" not in result["content_ideas"][0]
@@ -1149,7 +1152,7 @@ class TestSynthesizePublicCall:
     def test_the_profile_reaches_the_sanitiser_so_the_echo_guard_is_live(self, monkeypatch):
         """The guard is worthless if the real call path never hands it a profile."""
 
-        def fake_chat_json(prompt, max_tokens, label):
+        def fake_chat_json(prompt, max_tokens, label, thinking_budget=None):
             return (
                 {"content_ideas": [
                     {"title": "Echo", "hook": "I run a Notion template shop for designers."},
@@ -1187,12 +1190,15 @@ class _FakeModels:
         self.last_prompt = None
         self.last_config = None
         self.configs = []
+        # Which model each call went to, so a test can assert a stage's tier.
+        self.models_used = []
 
     def generate_content(self, model, contents, config):
         self.calls += 1
         self.last_prompt = contents
         self.last_config = config
         self.configs.append(config)
+        self.models_used.append(model)
         body = self.bodies[min(self.calls - 1, len(self.bodies) - 1)]
         return _FakeResponse(body)
 
@@ -1360,6 +1366,187 @@ class TestDraftPost:
         result = analysis.draft_post(dict(self.IDEA, format="Text post"), self.EVIDENCE, "q", "")
 
         assert result["post"].count("Option:") == 6
+
+
+class TestPerStageModelSelection:
+    """Which model each stage runs on, and how a deployment moves one of them.
+
+    The label a call already passes to `_chat_json` is the whole seam: high volume
+    labelling (triage, classification) runs on the lite tier, everything that writes
+    prose or recalls the world stays on the primary model, and anything unrecognised
+    gets the primary model rather than being silently downgraded.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+
+    def test_the_high_volume_labelling_stages_default_to_the_lite_tier(self):
+        assert analysis.model_for_stage("relevance-triage") == analysis.LITE_MODEL
+        assert analysis.model_for_stage("classification") == analysis.LITE_MODEL
+
+    def test_the_lite_tier_is_a_real_vertex_model_id(self):
+        assert analysis.LITE_MODEL == "gemini-2.5-flash-lite"
+        assert analysis.LITE_MODEL in analysis.MODEL_DISPLAY_NAMES
+
+    def test_everything_that_writes_or_recalls_keeps_the_primary_model(self):
+        for label in ("discovery", "brief-decomposition", "synthesis", "draft"):
+            assert analysis.model_for_stage(label) == analysis.PRIMARY_MODEL
+
+    def test_an_unknown_label_gets_the_primary_model(self):
+        assert analysis.model_for_stage("demo") == analysis.PRIMARY_MODEL
+        assert analysis.model_for_stage("") == analysis.PRIMARY_MODEL
+
+    def test_the_tier_table_covers_every_label_the_engine_actually_sends(self):
+        # Discovery's label lives in discovery.py, so the table has to be checked
+        # against both modules or a renamed stage quietly falls back to primary.
+        assert set(analysis.STAGE_TIERS) == {
+            "relevance-triage",
+            "classification",
+            "brief-decomposition",
+            "discovery",
+            "synthesis",
+            "draft",
+        }
+
+    def test_the_env_var_name_is_derived_from_the_label(self):
+        assert analysis._stage_env_var("relevance-triage") == "GEMINI_MODEL_RELEVANCE_TRIAGE"
+        assert analysis._stage_env_var("synthesis") == "GEMINI_MODEL_SYNTHESIS"
+
+    def test_a_per_stage_env_override_wins_over_the_tier(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_MODEL_RELEVANCE_TRIAGE", "gemini-experimental")
+        monkeypatch.setenv("GEMINI_MODEL_SYNTHESIS", " gemini-other ")
+        assert analysis.model_for_stage("relevance-triage") == "gemini-experimental"
+        # Whitespace is trimmed, because an env var pasted into a dashboard
+        # collects it and a padded model id is a 404 deep inside the SDK.
+        assert analysis.model_for_stage("synthesis") == "gemini-other"
+        # An untouched stage is unaffected.
+        assert analysis.model_for_stage("classification") == analysis.LITE_MODEL
+
+    def test_an_empty_env_override_is_ignored_rather_than_sent(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_MODEL_CLASSIFICATION", "   ")
+        assert analysis.model_for_stage("classification") == analysis.LITE_MODEL
+
+    def test_moving_the_globals_moves_every_stage_that_follows_them(self, monkeypatch):
+        # Resolution is per call, not captured at import, which is what lets one
+        # constant change re-point a whole tier.
+        monkeypatch.setattr(analysis, "LITE_MODEL", "lite-next")
+        monkeypatch.setattr(analysis, "PRIMARY_MODEL", "primary-next")
+        assert analysis.model_for_stage("classification") == "lite-next"
+        assert analysis.model_for_stage("synthesis") == "primary-next"
+
+    def test_the_stage_model_is_what_reaches_the_client(self, monkeypatch):
+        client = _FakeClient(['{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        analysis.chat_json("prompt", 100, "classification", thinking=False)
+        analysis.chat_json("prompt", 100, "synthesis")
+
+        assert client.models.models_used == [analysis.LITE_MODEL, analysis.PRIMARY_MODEL]
+
+    def test_a_stage_already_on_the_lite_tier_falls_up_to_the_primary_model(self, monkeypatch):
+        class _ModelMissingOnce:
+            def __init__(self):
+                self.models_used = []
+
+            def generate_content(self, model, contents, config):
+                self.models_used.append(model)
+                if len(self.models_used) == 1:
+                    raise Exception("404 NOT_FOUND: publisher model was not found")
+                return _FakeResponse('{"ok": 1}')
+
+        client = type("C", (), {"models": _ModelMissingOnce()})()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "classification", thinking=False)
+
+        assert parsed == {"ok": 1}
+        assert model == analysis.PRIMARY_MODEL
+        assert client.models.models_used == [analysis.LITE_MODEL, analysis.PRIMARY_MODEL]
+
+    def test_a_primary_stage_still_falls_down_to_the_lite_tier(self):
+        assert analysis._fallback_model(analysis.PRIMARY_MODEL) == analysis.LITE_MODEL
+        assert analysis._fallback_model(analysis.LITE_MODEL) == analysis.PRIMARY_MODEL
+
+    def test_one_model_configured_everywhere_leaves_nowhere_to_fall_back_to(self, monkeypatch):
+        monkeypatch.setattr(analysis, "PRIMARY_MODEL", "only-model")
+        monkeypatch.setattr(analysis, "LITE_MODEL", "only-model")
+        assert analysis._fallback_model("only-model") is None
+
+    def test_moving_the_lite_model_moves_what_a_lite_stage_falls_up_from(self, monkeypatch):
+        # The fallback is resolved against the current LITE_MODEL, not a copy taken
+        # at import: with a stale copy in play, a lite stage whose model had moved
+        # fell sideways onto the id LITE_MODEL used to hold, which is not a model
+        # this deployment was told to use and not a step up either.
+        monkeypatch.setattr(analysis, "LITE_MODEL", "lite-next")
+        assert analysis._fallback_model("lite-next") == analysis.PRIMARY_MODEL
+        assert analysis._fallback_model(analysis.PRIMARY_MODEL) == "lite-next"
+        # The id it used to hold is now just another unavailable model.
+        assert analysis._fallback_model("gemini-2.5-flash-lite") == "lite-next"
+
+    def test_a_moved_lite_model_still_falls_up_to_primary_on_a_real_call(self, monkeypatch):
+        class _ModelMissingOnce:
+            def __init__(self):
+                self.models_used = []
+
+            def generate_content(self, model, contents, config):
+                self.models_used.append(model)
+                if len(self.models_used) == 1:
+                    raise Exception("404 NOT_FOUND: publisher model was not found")
+                return _FakeResponse('{"ok": 1}')
+
+        monkeypatch.setattr(analysis, "LITE_MODEL", "lite-next")
+        client = type("C", (), {"models": _ModelMissingOnce()})()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        parsed, model = analysis.chat_json("prompt", 100, "classification", thinking=False)
+
+        assert parsed == {"ok": 1}
+        assert model == analysis.PRIMARY_MODEL
+        assert client.models.models_used == ["lite-next", analysis.PRIMARY_MODEL]
+
+
+class TestSynthesisThinkingBudget:
+    """Synthesis is the one call that thinks, so its reasoning is capped explicitly."""
+
+    def test_the_budget_is_modest_and_leaves_the_answer_its_room(self):
+        assert 2048 <= analysis.SYNTHESIS_THINKING_BUDGET <= 4096
+        assert analysis.SYNTHESIS_THINKING_BUDGET < analysis.SYNTHESIS_MAX_TOKENS // 4
+
+    def test_a_thinking_call_with_no_budget_leaves_the_decision_to_gemini(self):
+        assert "thinking_config" not in analysis._generation_config(100, thinking=True)
+
+    def test_a_budget_is_sent_as_the_thinking_config(self):
+        config = analysis._generation_config(100, thinking=True, thinking_budget=3072)
+        assert config["thinking_config"] == {"thinking_budget": 3072}
+
+    def test_thinking_switched_off_beats_any_budget(self):
+        config = analysis._generation_config(100, thinking=False, thinking_budget=3072)
+        assert config["thinking_config"] == {"thinking_budget": 0}
+
+    def test_a_negative_budget_cannot_reach_the_api(self):
+        config = analysis._generation_config(100, thinking=True, thinking_budget=-5)
+        assert config["thinking_config"] == {"thinking_budget": 0}
+
+    def test_the_real_synthesis_call_caps_its_reasoning(self, monkeypatch):
+        client = _FakeClient(['{"content_ideas": [{"title": "A", "hook": "H"}]}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        analysis.synthesize([], [], "a query", "", ["s"])
+
+        assert client.models.last_config["thinking_config"] == {
+            "thinking_budget": analysis.SYNTHESIS_THINKING_BUDGET
+        }
+
+    def test_a_truncation_downgrade_still_reaches_a_zero_budget(self, monkeypatch):
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+        client = _FakeClient(["not json", '{"ok": 1}'])
+        monkeypatch.setattr(analysis, "_client", client)
+
+        analysis.chat_json("prompt", 100, "synthesis", thinking_budget=3072)
+
+        assert client.models.configs[0]["thinking_config"] == {"thinking_budget": 3072}
+        assert client.models.configs[1]["thinking_config"] == {"thinking_budget": 0}
 
 
 class TestChatJsonRetriesMalformedPayloads:
@@ -1784,10 +1971,186 @@ class TestErrorMapping:
             response = type("R", (), {"headers": {"retry-after": "600"}})()
 
         wait = analysis._retry_wait_seconds(WithHeaders("busy"), 0)
-        assert wait == analysis.MAX_RATE_LIMIT_WAIT_SECONDS
+        # The cap binds; the jitter above it is bounded by its own share, so the
+        # worst case is still seconds rather than the ten minutes that was asked for.
+        cap = analysis.MAX_RATE_LIMIT_WAIT_SECONDS
+        assert cap <= wait <= cap * (1 + analysis.RETRY_JITTER_SHARE)
 
     def test_retry_wait_falls_back_to_the_default_ladder(self):
-        assert analysis._retry_wait_seconds(Exception("no headers"), 0) == analysis.RETRY_DELAYS_SECONDS[0]
+        first = analysis.RETRY_DELAYS_SECONDS[0]
+        wait = analysis._retry_wait_seconds(Exception("no headers"), 0)
+        assert first <= wait <= first * (1 + analysis.RETRY_JITTER_SHARE)
+
+
+class TestRetryWaitsAreJittered:
+    """Several triage calls are in flight at once, so identical waits are a problem.
+
+    A rate limit hits the whole wave, every worker reads the same reset hint, and
+    without jitter all of them sleep the same number of seconds and hit Vertex again
+    in lockstep, which turns one 429 into a cycle of them.
+    """
+
+    class _Busy(Exception):
+        response = type("R", (), {"headers": {"retry-after": "20"}})()
+
+    def test_two_workers_on_the_same_failure_do_not_wake_together(self):
+        waits = {analysis._retry_wait_seconds(self._Busy("busy"), 0) for _ in range(20)}
+        # A single repeated value here is the bug: it means every worker in a wave
+        # was handed the same wait.
+        assert len(waits) > 1
+
+    def test_the_jitter_only_ever_adds_and_stays_inside_its_share(self):
+        base = min(20 + 0.5, analysis.MAX_RATE_LIMIT_WAIT_SECONDS)
+        for _ in range(50):
+            wait = analysis._retry_wait_seconds(self._Busy("busy"), 0)
+            # Never below the provider's own hint: undercutting it would retry into
+            # a limit that has not reset yet.
+            assert base <= wait <= base * (1 + analysis.RETRY_JITTER_SHARE)
+
+    def test_the_share_is_modest_enough_to_stay_inside_a_stage(self):
+        assert 0 < analysis.RETRY_JITTER_SHARE <= 0.5
+
+
+class TestRetriesStopAtTheirDeadline:
+    """MAX_ATTEMPTS - 1 waits of MAX_RATE_LIMIT_WAIT_SECONDS outlast a whole stage.
+
+    The call in flight cannot be interrupted, but the sleep before the next attempt
+    can be skipped, and a batch that keeps retrying past the triage's window spends
+    time the classification call is counting on to produce any report at all.
+    """
+
+    def _busy_client(self):
+        class _AlwaysBusy:
+            def __init__(self):
+                self.calls = 0
+
+            def generate_content(self, model, contents, config):
+                self.calls += 1
+                raise Exception("429 RESOURCE_EXHAUSTED: quota exceeded, retry later")
+
+        return type("C", (), {"models": _AlwaysBusy()})()
+
+    def test_a_rate_limited_call_stops_once_the_wait_would_overrun(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: slept.append(seconds))
+        client = self._busy_client()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError):
+            analysis.chat_json(
+                "prompt", 100, "relevance-triage", thinking=False,
+                deadline=analysis.time.monotonic() + 0.01,
+            )
+
+        # One attempt, no sleep: the remaining attempts belonged to a window that
+        # had already closed.
+        assert client.models.calls == 1
+        assert slept == []
+
+    def test_no_deadline_spends_every_attempt_exactly_as_before(self, monkeypatch):
+        slept = []
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: slept.append(seconds))
+        client = self._busy_client()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError):
+            analysis.chat_json("prompt", 100, "relevance-triage", thinking=False)
+
+        assert client.models.calls == analysis.MAX_ATTEMPTS
+        assert len(slept) == analysis.MAX_ATTEMPTS - 1
+
+    def test_a_generous_deadline_leaves_the_retries_alone(self, monkeypatch):
+        monkeypatch.setattr(analysis.time, "sleep", lambda seconds: None)
+        client = self._busy_client()
+        monkeypatch.setattr(analysis, "_client", client)
+
+        with pytest.raises(ValueError):
+            analysis.chat_json(
+                "prompt", 100, "relevance-triage", thinking=False,
+                deadline=analysis.time.monotonic() + 3600,
+            )
+
+        assert client.models.calls == analysis.MAX_ATTEMPTS
+
+    def test_the_triage_hands_its_own_deadline_to_the_call(self):
+        seen = {}
+        items = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "title": "t", "body": "b",
+             "score": 1, "created_utc": 1}
+        ]
+        soft_deadline = time.monotonic() + 3600
+
+        def fake_chat(prompt, max_tokens, label, thinking=True, deadline=None):
+            seen["deadline"] = deadline
+            return {"ratings": []}, "m"
+
+        analysis.rate_relevance(items, "q", "p", chat=fake_chat, soft_deadline=soft_deadline)
+        assert seen["deadline"] == soft_deadline
+
+    def test_the_brief_decomposition_is_bounded_by_the_same_window(self):
+        # It shares TRIAGE_ALLOWANCE_SECONDS with the triage it informs, so a rate
+        # limited decomposition that slept out its attempts would leave the triage
+        # nothing to run in.
+        seen = {}
+
+        def fake_chat(prompt, max_tokens, label, thinking=True, deadline=None):
+            seen[label] = deadline
+            return {"topic": "t", "requirements": []}, "m"
+
+        analysis.decompose_brief("a brief", "", chat=fake_chat, soft_deadline=1234.5)
+        assert seen["brief-decomposition"] == 1234.5
+
+    def test_the_selection_hands_the_decomposition_its_deadline(self, monkeypatch):
+        seen = {}
+
+        def fake_decompose(query, profile="", chat=None, soft_deadline=None):
+            seen["soft_deadline"] = soft_deadline
+            return analysis.Brief(query, ())
+
+        monkeypatch.setattr(analysis, "decompose_brief", fake_decompose)
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: {})
+        posts = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "score": 1, "comments": 0,
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "created_utc": 1700000000}
+        ]
+        soft_deadline = time.monotonic() + 3600
+        analysis._select_sample(posts, [], "a query", "", soft_deadline)
+        assert seen["soft_deadline"] == soft_deadline
+
+    def test_a_decomposition_fake_that_predates_the_deadline_still_works(self, monkeypatch):
+        monkeypatch.setattr(
+            analysis, "decompose_brief", lambda query, profile="": analysis.Brief(query, ())
+        )
+        monkeypatch.setattr(analysis, "rate_relevance", lambda *a, **k: {})
+        posts = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "score": 1, "comments": 0,
+             "title": "A title long enough to carry the whole idea on its own",
+             "body": "A body with plenty of real text in it, past the substance bar.",
+             "created_utc": 1700000000}
+        ]
+        _, _, selection = analysis._select_sample(
+            posts, [], "a query", "", time.monotonic() + 3600
+        )
+        assert selection["method"] == "relevance+engagement"
+
+    def test_a_chat_fake_that_predates_the_keyword_is_still_called(self):
+        # The injected-callable contract: an older fake simply does not receive it.
+        calls = []
+
+        def old_chat(prompt, max_tokens, label, thinking=True):
+            calls.append(label)
+            return {"ratings": []}, "m"
+
+        items = [
+            {"kind": "post", "id": "p1", "subreddit": "s", "title": "t", "body": "b",
+             "score": 1, "created_utc": 1}
+        ]
+        analysis.rate_relevance(
+            items, "q", "p", chat=old_chat, soft_deadline=time.monotonic() + 3600
+        )
+        assert calls == ["relevance-triage"]
 
 
 class TestSelectAndFormatItems:
@@ -2277,6 +2640,294 @@ class TestRateRelevance:
         size = analysis._triage_batch_size("q", "p")
         analysis.rate_relevance(self._items(size + 1), "q", "p", chat=fake_chat)
         assert len(prompts) == 2
+
+
+class TestTriageRunsBatchesInParallel:
+    """The batches are independent, so they go out together and merge by union.
+
+    Independence is the whole licence for this: indices are global, the merge is a
+    dict update, and a failure costs only its own batch's items. What these tests
+    pin down is that the parallelism is real, that the merge does not depend on
+    which call lands first, and that a failure inside one worker still degrades to
+    the untriaged tier instead of taking the run with it.
+    """
+
+    def _items(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    @pytest.fixture(autouse=True)
+    def _small_batches(self, monkeypatch):
+        """Two items per batch, so a handful of items is a handful of batches."""
+        monkeypatch.setattr(analysis, "_triage_batch_size", lambda *args, **kwargs: 2)
+
+    def test_the_batches_are_genuinely_in_flight_at_the_same_time(self):
+        # A barrier is the only honest test of concurrency: sequential calls can
+        # never all reach it, so the wait times out and breaks the barrier.
+        barrier = threading.Barrier(3, timeout=10)
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            barrier.wait()
+            return {"ratings": []}, "m"
+
+        ratings = analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat)
+        assert set(ratings) == set(range(1, 7))
+
+    def test_the_worker_count_is_capped_and_never_exceeds_the_batch_count(self):
+        live = {"now": 0, "peak": 0}
+        lock = threading.Lock()
+        release = threading.Event()
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            with lock:
+                live["now"] += 1
+                live["peak"] = max(live["peak"], live["now"])
+            # Every worker holds its slot until the last one that can start has,
+            # so `peak` is the real ceiling rather than a scheduling accident.
+            release.wait(timeout=10)
+            with lock:
+                live["now"] -= 1
+            return {"ratings": []}, "m"
+
+        items = self._items(2 * (analysis.TRIAGE_MAX_WORKERS + 3))
+
+        def unblock():
+            while live["peak"] < analysis.TRIAGE_MAX_WORKERS:
+                time.sleep(0.01)
+            release.set()
+
+        watcher = threading.Thread(target=unblock)
+        watcher.start()
+        try:
+            analysis.rate_relevance(items, "q", "p", chat=fake_chat)
+        finally:
+            release.set()
+            watcher.join()
+
+        assert live["peak"] == analysis.TRIAGE_MAX_WORKERS
+
+    def test_results_merge_by_union_whatever_order_they_land_in(self):
+        # The last batch answers first and the first answers last, which is exactly
+        # the ordering a real fan-out produces and the one a positional merge would
+        # get wrong.
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            first = int(prompt.split("[post]")[0].strip().split("\n")[-1].rstrip("."))
+            if first == 1:
+                time.sleep(0.05)
+            return {"ratings": [{"i": first, "r": 2}, {"i": first + 1, "r": 0}]}, "m"
+
+        ratings = analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat)
+        assert ratings == {
+            1: analysis.Verdict(2, ""), 2: analysis.Verdict(0, ""),
+            3: analysis.Verdict(2, ""), 4: analysis.Verdict(0, ""),
+            5: analysis.Verdict(2, ""), 6: analysis.Verdict(0, ""),
+        }
+
+    def test_one_failed_batch_costs_only_its_own_items(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            if "[post] title 2" in prompt:
+                raise ValueError("boom")
+            return {"ratings": [{"i": 1, "r": 2}, {"i": 2, "r": 2},
+                                {"i": 5, "r": 2}, {"i": 6, "r": 2}]}, "m"
+
+        ratings = analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat)
+        # The failed batch (items 3 and 4) contributes nothing at all, so those two
+        # fall to the untriaged tier in rank_items rather than being rated 1 here.
+        assert set(ratings) == {1, 2, 5, 6}
+        assert set(ratings.values()) == {analysis.Verdict(2, "")}
+
+    def test_a_payload_rejection_inside_a_worker_is_survived_like_any_failure(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            if "[post] title 0" in prompt:
+                raise analysis.PayloadTooLarge("too big")
+            return {"ratings": []}, "m"
+
+        ratings = analysis.rate_relevance(self._items(4), "q", "p", chat=fake_chat)
+        assert set(ratings) == {3, 4}
+
+    def test_every_batch_failing_still_returns_none_for_the_deterministic_fallback(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            raise ValueError("boom")
+
+        assert analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat) is None
+
+    def test_an_unexpected_exception_still_reaches_the_caller(self):
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            raise RuntimeError("not a model failure at all")
+
+        with pytest.raises(RuntimeError):
+            analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat)
+
+    def test_an_aborting_run_stops_paying_for_the_batches_behind_it(self, monkeypatch):
+        # `pool.map` submits every batch up front, so a run on its way out used to
+        # issue all of them and throw the answers away. The workers check an abort
+        # flag instead, which is the only thing that still bites once there is
+        # nothing left to cancel.
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_WORKERS", 2)
+        calls = []
+        lock = threading.Lock()
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            if "[post] title 0" in prompt:
+                raise RuntimeError("not a model failure at all")
+            with lock:
+                calls.append(prompt)
+            # Slower than the raise above, so the flag is set while this is in
+            # flight and the batches behind it never start.
+            time.sleep(0.02)
+            return {"ratings": []}, "m"
+
+        with pytest.raises(RuntimeError):
+            analysis.rate_relevance(self._items(24), "q", "p", chat=fake_chat)
+
+        # 12 batches, of which one raised and at most the wave it was in got issued.
+        assert len(calls) <= 3
+
+    def test_a_batch_dropped_by_a_model_failure_aborts_nothing(self):
+        # The contract the abort flag must not disturb: a ValueError is this
+        # function's own business, so every other batch still goes out.
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            if "[post] title 0" in prompt:
+                raise ValueError("the model failed this batch")
+            return {"ratings": []}, "m"
+
+        ratings = analysis.rate_relevance(self._items(6), "q", "p", chat=fake_chat)
+        assert set(ratings) == {3, 4, 5, 6}
+
+    def test_every_batch_is_issued_exactly_once(self):
+        seen = []
+        lock = threading.Lock()
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            with lock:
+                seen.append(prompt)
+            return {"ratings": []}, "m"
+
+        analysis.rate_relevance(self._items(9), "q", "p", chat=fake_chat)
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    def test_a_single_batch_needs_no_pool_at_all(self, monkeypatch):
+        threads = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            threads.append(threading.current_thread().name)
+            return {"ratings": []}, "m"
+
+        analysis.rate_relevance(self._items(2), "q", "p", chat=fake_chat)
+        assert threads == [threading.current_thread().name]
+
+
+class TestTriageStopsSubmittingWhenOutOfTime:
+    """The deadline is checked inside each worker, right before its own call.
+
+    A batch that was queued while there was time can sit behind the wave in front
+    of it for longer than the run has left, so checking only at submission time
+    would let the last wave overrun the reserve the analysis calls depend on.
+    """
+
+    def _items(self, count):
+        return [
+            {"kind": "post", "id": "p{}".format(i), "subreddit": "s",
+             "title": "title {}".format(i), "body": "body", "score": i, "created_utc": 1}
+            for i in range(count)
+        ]
+
+    @pytest.fixture(autouse=True)
+    def _small_batches(self, monkeypatch):
+        monkeypatch.setattr(analysis, "_triage_batch_size", lambda *args, **kwargs: 2)
+
+    def _fake_clock(self, monkeypatch):
+        """A monotonic clock the test moves by hand, shared across the workers."""
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(analysis.time, "monotonic", lambda: clock["now"])
+        return clock
+
+    def test_a_batch_queued_in_time_is_skipped_once_the_clock_runs_out(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        # One worker, so the batches run in order and the clock can be spent
+        # between two of them exactly as a slow first wave would spend it.
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_WORKERS", 1)
+        calls = []
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            calls.append(prompt)
+            clock["now"] += 40
+            start = 2 * len(calls) - 1
+            return {"ratings": [{"i": start, "r": 2}, {"i": start + 1, "r": 2}]}, "m"
+
+        ratings = analysis.rate_relevance(
+            self._items(8), "q", "p", chat=fake_chat, soft_deadline=clock["now"] + 50,
+        )
+
+        # Two batches fitted; the rest were skipped rather than issued.
+        assert len(calls) == 2
+        assert set(ratings) == {1, 2, 3, 4}
+
+    def test_a_skipped_batch_is_not_a_failed_batch(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_WORKERS", 1)
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            clock["now"] += 100
+            return {"ratings": [{"i": 1, "r": 2}, {"i": 2, "r": 1}]}, "m"
+
+        ratings = analysis.rate_relevance(
+            self._items(8), "q", "p", chat=fake_chat, soft_deadline=clock["now"] + 50,
+        )
+        # One batch came back and the other three never went out. That is a degraded
+        # ranking, not the None that means "triage failed, select deterministically".
+        assert ratings == {1: analysis.Verdict(2, ""), 2: analysis.Verdict(1, "")}
+
+    def test_the_untriaged_count_is_reported_once_with_the_batches_that_landed(
+        self, monkeypatch, caplog
+    ):
+        clock = self._fake_clock(monkeypatch)
+        monkeypatch.setattr(analysis, "TRIAGE_MAX_WORKERS", 1)
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            clock["now"] += 100
+            return {"ratings": []}, "m"
+
+        with caplog.at_level("WARNING", logger="analysis"):
+            analysis.rate_relevance(
+                self._items(7), "q", "p", chat=fake_chat,
+                soft_deadline=clock["now"] + 50,
+            )
+
+        messages = [record.getMessage() for record in caplog.records]
+        # 4 batches (2, 2, 2, 1), one of which landed, so 5 items stay untriaged.
+        assert any("1 of 4 triage batch(es) came back" in message for message in messages)
+        assert any("5 items stay untriaged" in message for message in messages)
+
+    def test_a_deadline_already_past_issues_nothing_and_fails_nothing(self, monkeypatch):
+        def explode(*args, **kwargs):
+            raise AssertionError("no batch may be issued past the deadline")
+
+        ratings = analysis.rate_relevance(
+            self._items(8), "q", "p", chat=explode,
+            soft_deadline=time.monotonic() - 1,
+        )
+        assert ratings == {}
+
+    def test_a_generous_deadline_reads_the_whole_pool(self):
+        seen = []
+        lock = threading.Lock()
+
+        def fake_chat(prompt, max_tokens, label, thinking=True):
+            with lock:
+                seen.append(prompt)
+            return {"ratings": []}, "m"
+
+        ratings = analysis.rate_relevance(
+            self._items(8), "q", "p", chat=fake_chat,
+            soft_deadline=time.monotonic() + 3600,
+        )
+        assert len(seen) == 4
+        assert set(ratings) == set(range(1, 9))
 
 
 class TestSelectSample:
@@ -3474,3 +4125,69 @@ class TestSelectionDisclosure:
         })
         assert ranked_posts[0]["qualifier_tier"] == "confirmed"
         assert ranked_posts[-1]["qualifier_tier"] == "violated"
+
+
+class TestGetClient:
+    """`_get_client` is the one place a real `genai.Client` gets built. Every other
+    test in this file bypasses it entirely (`monkeypatch.setattr(analysis, "_client",
+    fake)`), which is why a real per-request timeout needs its own coverage here:
+    without it, a hung `generate_content` call has nothing to interrupt it, since the
+    pipeline's stage-boundary deadline check only ever runs between stages, never
+    inside one already in flight."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_client_singleton(self, monkeypatch):
+        # `_get_client` memoises into the module-level `_client` global, so a run
+        # started earlier in the suite would otherwise make this test observe a
+        # client nothing here built. Save and restore rather than just clearing,
+        # since a real client built earlier must still be there for later tests.
+        monkeypatch.setattr(analysis, "_client", None)
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+
+    def test_the_client_is_built_with_a_request_timeout(self, monkeypatch):
+        captured = {}
+
+        def fake_client(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(analysis.genai, "Client", fake_client)
+
+        analysis._get_client()
+
+        http_options = captured["http_options"]
+        assert http_options["timeout"] == analysis._MODEL_CALL_TIMEOUT_MS
+        # Milliseconds, not seconds: google-genai's own HttpOptions.timeout field is
+        # documented in milliseconds, and a value this large only makes sense as one.
+        assert http_options["timeout"] >= 1000
+        # The backstop has to actually exceed the documented worst-case call (~70s)
+        # or it would fire on ordinary synthesis calls instead of only hung ones.
+        assert http_options["timeout"] > 70_000
+
+    def test_the_existing_single_attempt_retry_option_survives(self, monkeypatch):
+        captured = {}
+
+        def fake_client(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(analysis.genai, "Client", fake_client)
+
+        analysis._get_client()
+
+        assert captured["http_options"]["retry_options"] == {"attempts": 1}
+
+    def test_the_client_is_memoised_across_calls(self, monkeypatch):
+        calls = []
+
+        def fake_client(**kwargs):
+            calls.append(kwargs)
+            return object()
+
+        monkeypatch.setattr(analysis.genai, "Client", fake_client)
+
+        first = analysis._get_client()
+        second = analysis._get_client()
+
+        assert first is second
+        assert len(calls) == 1
