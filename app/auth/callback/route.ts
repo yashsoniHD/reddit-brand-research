@@ -60,13 +60,24 @@ export async function GET(request: Request) {
     try {
       const supabase = await supabaseServer();
       const { error } = await supabase.auth.exchangeCodeForSession(code);
+      const base = redirectOrigin(origin, request.headers.get("x-forwarded-host"));
       if (!error) {
         // `x-forwarded-host` rather than `origin` in production: this function
         // sits behind Vercel's proxy, so the URL it was invoked with names an
         // internal host, and redirecting to that would send the browser nowhere.
         // Validated against known Vercel hosts (see redirectOrigin) so a spoofed
         // header cannot make this an open redirect.
-        const base = redirectOrigin(origin, request.headers.get("x-forwarded-host"));
+        return NextResponse.redirect(`${base}${next}`);
+      }
+      // A single OAuth code is spent exactly once. A duplicate arrival of this
+      // callback (a browser prefetch of the redirect target, a double
+      // navigation, or the visitor refreshing this URL) tries to spend it again,
+      // which Supabase reports as flow_state_already_used. If the first arrival
+      // already established a session, that error is not a failure: send the
+      // now-signed-in visitor on to where they were going instead of bouncing
+      // them back to the sign-in page.
+      const { data } = await supabase.auth.getClaims();
+      if (data?.claims?.sub) {
         return NextResponse.redirect(`${base}${next}`);
       }
     } catch {
