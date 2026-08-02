@@ -114,8 +114,20 @@ MAX_SEARCH_TERMS = 2
 # How many text searches may be in flight, and how far apart any two of them may
 # start. Both numbers come from the probe table above: three workers cleared a
 # full wave with no 429s, and a spacing below a second is what draws them.
+#
+# These are a STARTING POINT, not a fixed budget, because the budget is not a
+# property of this code. It is a property of the address the requests come from,
+# and those numbers were probed from a residential one. Measured on Vercel, whose
+# functions egress from addresses shared with other tenants, the same eight
+# searches drew four 429s and every one of the 25 comment requests that followed
+# was refused, which produced a report built from 3 of 8 communities and no
+# comments at all. So the pacers widen themselves when the archive pushes back
+# and ease off again when it stops (see _StartPacer.penalise / relax): a
+# deployment that has the whole budget keeps the fast path, and one that has a
+# slice of it slows down to fit rather than losing half its material.
 SEARCH_WORKERS = 3
 SEARCH_MIN_SPACING_SECONDS = 1.5
+SEARCH_MAX_SPACING_SECONDS = 10.0
 # Longer than REQUEST_TIMEOUT_SECONDS on purpose: an unbounded text query was
 # measured at up to 17.8s, which a 15 second timeout would abandon just before it
 # answered.
@@ -143,6 +155,25 @@ MAX_COMMENT_POSTS = 25
 # 13.8s, which is what the unpaced burst cost anyway once its retries were paid
 # for. So this buys back the evidence rather than costing wall clock.
 COMMENT_MIN_SPACING_SECONDS = 0.5
+COMMENT_MAX_SPACING_SECONDS = 5.0
+
+# How a pacer reacts to the archive pushing back, and how quickly it forgives.
+# Deliberately asymmetric: widening is what stops a run losing its material, so
+# it happens fast, while narrowing again is a guess about a budget nobody can
+# see, so it happens slowly. A run that draws one 429 should not spend the rest
+# of its life at the maximum, and a run on a busy shared address should not keep
+# rediscovering the limit request after request.
+PACER_PENALTY_FACTOR = 2.0
+PACER_RELAX_FACTOR = 0.9
+
+# The archive reports how long its current window has left, per its own docs
+# (docs/ARCTIC_SHIFT_API.md): `X-RateLimit-Reset` is seconds until the reset and
+# windows are minute-aligned. Waiting that out beats the fixed 1s/2s backoff,
+# which was measured burning all three attempts inside three seconds and
+# reporting the community as empty. Capped, because a full minute of waiting is
+# worse for the run than moving on to the next community.
+RATE_LIMIT_RESET_HEADER = "X-RateLimit-Reset"
+MAX_RATE_LIMIT_WAIT_SECONDS = 20
 
 # ── Subreddit name rules ──────────────────────────────────────────────────────
 # Matches discovery.MAX_COMMUNITIES: a manual pick may not read more communities
@@ -186,12 +217,47 @@ class _StartPacer:
     beyond taking the lock.
     """
 
-    def __init__(self, spacing: float, clock=time.monotonic, sleep=time.sleep):
+    def __init__(
+        self,
+        spacing: float,
+        maximum: Optional[float] = None,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    ):
+        self._base = spacing
         self._spacing = spacing
+        # Never widening past this keeps a pacer that is being refused constantly
+        # from growing without bound and turning a slow run into a stalled one.
+        self._maximum = spacing if maximum is None else max(spacing, maximum)
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.Lock()
         self._next_allowed = 0.0
+
+    @property
+    def spacing(self) -> float:
+        """The gap currently being enforced. Read for logging and tests."""
+        return self._spacing
+
+    def penalise(self) -> None:
+        """The archive refused a request: leave more room between the next ones.
+
+        Called on a 429 rather than on any failure, because a 429 is the one
+        answer that means "you are asking too often". A 422 is load shedding on a
+        single query (see docs/ARCTIC_SHIFT_API.md) and says nothing about rate.
+        """
+        with self._lock:
+            if self._spacing >= self._maximum:
+                return
+            self._spacing = min(self._maximum, self._spacing * PACER_PENALTY_FACTOR)
+            logger.info("archive pushed back; spacing requests %.1fs apart", self._spacing)
+
+    def relax(self) -> None:
+        """A request came back fine: ease back toward the base spacing."""
+        with self._lock:
+            if self._spacing <= self._base:
+                return
+            self._spacing = max(self._base, self._spacing * PACER_RELAX_FACTOR)
 
     def wait(self) -> None:
         # The sleep happens outside the lock, so waiting threads queue on the
@@ -208,12 +274,23 @@ class _StartPacer:
             self._sleep(sleep_for)
 
 
-_search_pacer = _StartPacer(SEARCH_MIN_SPACING_SECONDS)
+_search_pacer = _StartPacer(SEARCH_MIN_SPACING_SECONDS, SEARCH_MAX_SPACING_SECONDS)
 # A separate pacer, not a shared one: these two stages never overlap inside a run
 # (the comment fetch starts once searching is done), and one gate at the search
 # spacing would stretch 25 comment requests to nearly 40 seconds for a limit that
 # tolerates them four times closer together.
-_comment_pacer = _StartPacer(COMMENT_MIN_SPACING_SECONDS)
+#
+# Separate, but not independent: a search wave that gets refused has just told us
+# something true about the address, and the comment burst that follows it is the
+# stage that paid for not knowing (25 of 25 refused, in production). So a penalty
+# on either pacer is applied to both, while easing off stays per-pacer.
+_comment_pacer = _StartPacer(COMMENT_MIN_SPACING_SECONDS, COMMENT_MAX_SPACING_SECONDS)
+
+
+def _penalise_archive_pacing() -> None:
+    """Widen every archive pacer. Called when the archive answers 429."""
+    _search_pacer.penalise()
+    _comment_pacer.penalise()
 
 
 # ── Input normalisation ───────────────────────────────────────────────────────
@@ -298,22 +375,56 @@ def _request_page(
     """
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_ATTEMPTS):
+        wait = RETRY_DELAYS_SECONDS[min(attempt, len(RETRY_DELAYS_SECONDS) - 1)]
         try:
             resp = requests.get(url, params=params, timeout=timeout)
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exc = exc
         else:
             if resp.status_code not in RETRYABLE_STATUS_CODES and resp.status_code < 500:
+                # A request that came back tells the pacers the address is not
+                # currently being throttled, which is how a run that hit one
+                # rough patch works its way back to the fast path.
+                _search_pacer.relax()
+                _comment_pacer.relax()
                 return resp
+            if resp.status_code == 429:
+                # The one status that means "too often". Widen the gap between
+                # every subsequent request, and wait out the window the archive
+                # itself reports rather than the fixed backoff, which was
+                # measured spending all three attempts inside three seconds and
+                # then reporting a healthy community as empty.
+                _penalise_archive_pacing()
+                wait = _rate_limit_wait_seconds(resp, wait)
             last_exc = requests.HTTPError(f"transient status {resp.status_code}")
 
         if attempt < MAX_ATTEMPTS - 1:
-            if _out_of_time(deadline):
+            if _out_of_time(deadline, wait):
                 logger.info("stopping retries: out of time")
                 break
-            time.sleep(RETRY_DELAYS_SECONDS[attempt])
+            time.sleep(wait)
 
     raise last_exc if last_exc else requests.RequestException("request failed")
+
+
+def _rate_limit_wait_seconds(resp: requests.Response, default: float) -> float:
+    """How long to hold off after a 429, from the archive's own reset header.
+
+    Falls back to `default` when the header is missing or unreadable, and is
+    capped at MAX_RATE_LIMIT_WAIT_SECONDS: the windows are minute-aligned, so an
+    honest reset can be most of a minute, and a run has several communities left
+    to get through.
+    """
+    raw = resp.headers.get(RATE_LIMIT_RESET_HEADER)
+    if raw is None:
+        return default
+    try:
+        seconds = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if seconds <= 0:
+        return default
+    return min(seconds, MAX_RATE_LIMIT_WAIT_SECONDS)
 
 
 def _cutoff_timestamp(days: int) -> int:
@@ -638,13 +749,19 @@ def lookup_subreddit(name: str, deadline: Optional[float] = None) -> Optional[di
 
 
 # ── Fetching ──────────────────────────────────────────────────────────────────
-def _out_of_time(deadline: Optional[float]) -> bool:
-    """True once the caller's clock has run out.
+def _out_of_time(deadline: Optional[float], in_seconds: float = 0.0) -> bool:
+    """True once the caller's clock has run out, or will have in `in_seconds`.
 
     The deadline is an absolute time.monotonic() value, the same clock the pipeline
     uses, because a wall clock can step backwards mid-run.
+
+    `in_seconds` is for a caller about to sleep: waiting out a rate-limit window
+    and only then discovering the deadline passed spends the wait for nothing,
+    which matters now that a 429 can ask for up to MAX_RATE_LIMIT_WAIT_SECONDS.
     """
-    return deadline is not None and time.monotonic() >= deadline
+    if deadline is None:
+        return False
+    return time.monotonic() + max(0.0, in_seconds) >= deadline
 
 
 def fetch_posts(
@@ -864,6 +981,7 @@ def search_posts(
     deadline: Optional[float] = None,
     *,
     phrases: Optional[List[str]] = None,
+    outcome: Optional[dict] = None,
 ) -> List[dict]:
     """Posts in r/`subreddit` whose title or body matches any of `terms`.
 
@@ -881,6 +999,13 @@ def search_posts(
     archive will not answer, so a caller can fall back to `fetch_posts` for this
     community; a run-ending failure would throw away the communities that did
     answer.
+
+    `outcome`, when given, is filled in with `{"answered": bool}`: whether the
+    archive actually answered any of this community's terms. It is the difference
+    between "we looked and nothing matched" and "we never got to look", which are
+    the same empty list to the caller and must not be the same sentence to a
+    reader. An out-parameter rather than a richer return type so every existing
+    caller, and every fake in the test suite, keeps working unchanged.
 
     Terms are OR-ed by issuing one request each and merging, not by sending
     "a OR b": the posts index accepts that syntax and does not honour it (probed
@@ -905,6 +1030,11 @@ def search_posts(
 
     posts: List[dict] = []
     seen_ids = set()
+    # Whether any term got a real answer out of the archive. An empty result and
+    # a refused one are the same `[]` to a caller that only counts rows, and
+    # reporting them the same way is what put "Nothing in r/MachineLearning
+    # mentioned ML" in a production report whose every request had been 429'd.
+    answered = False
 
     for index, term in enumerate(usable):
         remaining = own_deadline - time.monotonic()
@@ -956,6 +1086,11 @@ def search_posts(
             logger.warning("search %r returned unreadable JSON for r/%s", term, subreddit)
             continue
 
+        # A 200 that parsed. Zero rows from here really does mean the archive
+        # looked and found nothing, which is the only case a caller may describe
+        # to a reader as "nothing mentioned it".
+        answered = True
+
         for raw in data:
             if not isinstance(raw, dict):
                 continue
@@ -966,8 +1101,12 @@ def search_posts(
             posts.append(item)
 
     posts.sort(key=lambda p: p.get("created_utc", 0), reverse=True)
+    if isinstance(outcome, dict):
+        outcome["answered"] = answered
     logger.info(
-        "searched r/%s for %s: %s posts", subreddit, ", ".join(usable), len(posts)
+        "searched r/%s for %s: %s posts%s",
+        subreddit, ", ".join(usable), len(posts),
+        "" if answered else " (the archive never answered)",
     )
     return posts
 
@@ -978,6 +1117,7 @@ def fetch_comments_for_posts(
     deadline: Optional[float] = None,
     *,
     phrases: Optional[List[str]] = None,
+    outcome: Optional[dict] = None,
 ) -> List[dict]:
     """Replies to the given posts, newest first, deduped, deleted ones dropped.
 
@@ -992,6 +1132,10 @@ def fetch_comments_for_posts(
     COMMENT_MIN_SPACING_SECONDS block). No `body=` filter is ever sent alongside
     `link_id`: that combination reintroduces the timeout that scoping by post
     exists to avoid.
+
+    `outcome`, when given, is filled in with `{"asked": int, "answered": int}`,
+    so a caller can tell "these threads had no replies" from "the archive would
+    not tell us", which are the same empty list from here.
     """
     ids = []
     seen_requested = set()
@@ -1006,6 +1150,12 @@ def fetch_comments_for_posts(
 
     if not ids:
         return []
+
+    # Which posts the archive actually answered for, as opposed to refused. A
+    # run whose every comment request was 429'd used to be indistinguishable
+    # from 25 threads that genuinely had no replies, and shipped a report with
+    # no comments in it and nothing saying so.
+    answered = set()
 
     def one(post_id: str) -> List[dict]:
         if _out_of_time(deadline):
@@ -1030,6 +1180,7 @@ def fetch_comments_for_posts(
             data = resp.json().get("data") or []
         except ValueError:
             return []
+        answered.add(post_id)
         found = []
         for raw in data:
             if not isinstance(raw, dict):
@@ -1052,5 +1203,11 @@ def fetch_comments_for_posts(
                 comments.append(item)
 
     comments.sort(key=lambda c: c.get("created_utc", 0), reverse=True)
-    logger.info("fetched %s comments across %s posts", len(comments), len(ids))
+    if isinstance(outcome, dict):
+        outcome["asked"] = len(ids)
+        outcome["answered"] = len(answered)
+    logger.info(
+        "fetched %s comments across %s of %s posts",
+        len(comments), len(answered), len(ids),
+    )
     return comments

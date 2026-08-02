@@ -1035,6 +1035,11 @@ def run_report(
         searched = issued_terms
         seen_post_ids = set()
         spent = 0
+        # Communities the archive refused outright, and the ones it did answer
+        # for. Tracked as a pair because a community can be refused on its first
+        # term and answered on its second, and only the second is the truth.
+        unanswered: set = set()
+        searched_and_answered: set = set()
 
         # [(community name, terms), ...] per wave, in `communities` order. One
         # request per entry: a community's terms are spread across waves rather
@@ -1066,22 +1071,31 @@ def run_report(
                 say(message)
 
         def search_one(name: str, terms: List[str]):
-            """One (community, term) request: (name, terms, posts, error)."""
+            """One (community, term) request: (name, terms, posts, error, answered).
+
+            `answered` is whether the archive actually replied. An empty `posts`
+            cannot say on its own, and treating the two the same is what put
+            "Nothing in r/MachineLearning mentioned ML" in a report whose every
+            request had been refused. It defaults to True so an injected fake
+            that knows nothing about the out-parameter reads as having answered.
+            """
             announce("Searching r/{} for {}…".format(name, ", ".join(terms)))
+            outcome: dict = {}
             try:
                 found = _call(
                     search_posts, name, terms,
                     deadline=fetch_deadline, phrases=active or None,
+                    outcome=outcome,
                 )
             except (ValueError, RuntimeError) as exc:
-                return name, terms, [], exc
+                return name, terms, [], exc, False
             if found:
                 announce(
                     "Searching r/{} for {}… ({} found)".format(
                         name, ", ".join(terms), len(found)
                     )
                 )
-            return name, terms, list(found), None
+            return name, terms, list(found), None, outcome.get("answered", True)
 
         for wave in waves:
             check("fetch")
@@ -1115,13 +1129,19 @@ def run_report(
             # Assembled in `communities` order whatever order the answers landed
             # in, so the pool, `used` and the notices read the same as they did
             # when this ran one community at a time.
-            for name, terms, found, error in results:
+            for name, terms, found, error, answered in results:
                 searched.setdefault(name, []).extend(terms)
+                if answered:
+                    unanswered.discard(name)
+                elif name not in searched_and_answered:
+                    unanswered.add(name)
                 if error is not None:
                     got_notices.append(
                         "r/{} was skipped: {}".format(name, _lowercase_first(error))
                     )
                     continue
+                if answered:
+                    searched_and_answered.add(name)
                 fresh = [
                     post for post in found
                     if post.get("id") and post["id"] not in seen_post_ids
@@ -1136,13 +1156,42 @@ def run_report(
                     if name not in got_used:
                         got_used.append(name)
 
-        for name, asked in searched.items():
-            if name not in got_used:
-                got_notices.append(
-                    "Nothing in r/{} mentioned {}, so it was left out.".format(
-                        name, ", ".join(asked)
-                    )
+        # One sentence per reason, not one per community. Eight communities that
+        # all came back empty used to be eight separate warnings stacked above
+        # the report, which reads as eight problems rather than one, and buries
+        # the report itself. They are also two different facts, and were being
+        # told as the same one: a community the archive answered for and a
+        # community it refused to answer for.
+        empty = [
+            name for name in searched
+            if name not in got_used and name not in unanswered
+        ]
+        if empty:
+            got_notices.append(
+                "Nothing in {} mentioned {}, so {} left out.".format(
+                    analysis.join_labels(["r/{}".format(name) for name in empty]),
+                    # `analysis.join_labels`, not `_human_list`: that one prefixes
+                    # every entry with "r/", which is right for communities and
+                    # turns a search term into "r/nothing here".
+                    analysis.join_labels(sorted({
+                        term for name in empty for term in searched[name]
+                    })),
+                    "they were" if len(empty) > 1 else "it was",
                 )
+            )
+        refused = [name for name in searched if name in unanswered]
+        if refused:
+            # Deliberately not "nothing matched": we never found out. Reddit's
+            # archive is rate limited per address, and a busy one can refuse a
+            # whole wave, which is a fact about us and not about the community.
+            got_notices.append(
+                "The Reddit archive would not answer for {}, so {} left out of "
+                "this report. Running it again usually picks {} up.".format(
+                    analysis.join_labels(["r/{}".format(name) for name in refused]),
+                    "they were" if len(refused) > 1 else "it was",
+                    "them" if len(refused) > 1 else "it",
+                )
+            )
 
         got_comments: List[dict] = []
         if got_posts and fetching_time_left():
@@ -1156,11 +1205,13 @@ def run_report(
             wanted = analysis.top_items(candidates, reddit_data.MAX_COMMENT_POSTS)
             if wanted:
                 say("Reading the replies to the {} strongest threads…".format(len(wanted)))
+                comment_outcome: dict = {}
                 try:
                     got_comments = _call(
                         fetch_comments_for_posts,
                         [post["id"] for post in wanted],
                         deadline=fetch_deadline, phrases=active or None,
+                        outcome=comment_outcome,
                     )
                 except (ValueError, RuntimeError) as exc:
                     # Comments are supporting evidence, exactly as in `gather`.
@@ -1169,6 +1220,26 @@ def run_report(
                         "We found the threads but could not read their replies, so this "
                         "report is built from the posts alone."
                     )
+                else:
+                    # A raise is not the only way this fails. Every request can
+                    # come back refused, and this returns an ordinary empty list
+                    # when it does: measured in production, all 25 threads were
+                    # 429'd and the report shipped with no comments in it and
+                    # nothing anywhere saying why. `asked` is absent when a fake
+                    # (or an older engine) did not fill the outcome in, and no
+                    # claim is made in that case.
+                    asked = comment_outcome.get("asked")
+                    answered = comment_outcome.get("answered")
+                    if asked and not answered:
+                        got_notices.append(
+                            "The Reddit archive would not return the replies to these "
+                            "threads, so this report is built from the posts alone. "
+                            "Running it again usually gets them."
+                        )
+                    elif asked and answered < asked:
+                        logger.info(
+                            "replies came back for %s of %s threads", answered, asked
+                        )
 
         return got_posts, got_comments, got_used, got_notices
 

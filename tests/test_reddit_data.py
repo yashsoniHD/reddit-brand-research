@@ -800,9 +800,12 @@ class _CapturingRouter:
 
 
 class _FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
         self.status_code = status_code
+        # The archive reports how long its rate-limit window has left, and the
+        # retry path reads it, so a fake response has to be able to carry one.
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -810,6 +813,73 @@ class _FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise reddit_data.requests.HTTPError(str(self.status_code))
+
+
+class TestRateLimitBackoff:
+    """What a 429 costs, and what the archive is allowed to tell us about it.
+
+    The fixed 1s/2s backoff was measured spending all three attempts inside
+    three seconds against a rate limit whose window had far longer to run, and
+    then reporting a healthy community as empty. The archive publishes the
+    window, so the window is what gets waited out.
+    """
+
+    def test_the_reset_header_decides_the_wait(self):
+        resp = _FakeResponse({}, 429, {"X-RateLimit-Reset": "7"})
+        assert reddit_data._rate_limit_wait_seconds(resp, 1) == 7
+
+    def test_a_long_window_is_capped(self):
+        # Windows are minute-aligned, and a run has other communities to reach.
+        resp = _FakeResponse({}, 429, {"X-RateLimit-Reset": "55"})
+        assert reddit_data._rate_limit_wait_seconds(resp, 1) == (
+            reddit_data.MAX_RATE_LIMIT_WAIT_SECONDS
+        )
+
+    def test_a_missing_or_unreadable_header_falls_back(self):
+        for headers in ({}, {"X-RateLimit-Reset": ""}, {"X-RateLimit-Reset": "soon"},
+                        {"X-RateLimit-Reset": "-3"}):
+            resp = _FakeResponse({}, 429, headers)
+            assert reddit_data._rate_limit_wait_seconds(resp, 2) == 2
+
+    def test_a_429_widens_the_pacers_and_a_success_eases_them(self, monkeypatch):
+        # The pacers are shared state, so this drives the real ones and puts
+        # them back; the autouse fixture hands out zero-spacing stand-ins.
+        search = reddit_data._StartPacer(1.0, 8.0)
+        comments = reddit_data._StartPacer(0.5, 4.0)
+        monkeypatch.setattr(reddit_data, "_search_pacer", search)
+        monkeypatch.setattr(reddit_data, "_comment_pacer", comments)
+        monkeypatch.setattr(reddit_data.time, "sleep", lambda _seconds: None)
+
+        answers = iter([
+            _FakeResponse({}, 429, {"X-RateLimit-Reset": "1"}),
+            _FakeResponse({"data": []}),
+        ])
+        monkeypatch.setattr(
+            reddit_data.requests, "get", lambda *a, **k: next(answers)
+        )
+
+        reddit_data._request_page("https://example.test", {})
+        # Widened by the refusal, then eased once by the answer that followed.
+        assert search.spacing > 1.0
+        # A comment pacer that never issued the request still learns from it:
+        # the limit belongs to the address, not to the endpoint.
+        assert comments.spacing > 0.5
+
+    def test_a_wait_that_would_outlast_the_deadline_is_not_taken(self, monkeypatch):
+        # Waiting out a 20 second window and only then noticing the run is over
+        # spends the wait for nothing.
+        slept = []
+        monkeypatch.setattr(reddit_data.time, "sleep", lambda s: slept.append(s))
+        monkeypatch.setattr(
+            reddit_data.requests,
+            "get",
+            lambda *a, **k: _FakeResponse({}, 429, {"X-RateLimit-Reset": "15"}),
+        )
+        with pytest.raises(reddit_data.requests.RequestException):
+            reddit_data._request_page(
+                "https://example.test", {}, deadline=time.monotonic() + 5
+            )
+        assert slept == []
 
 
 # ── Searching ─────────────────────────────────────────────────────────────────
@@ -909,6 +979,44 @@ class TestTheSearchPacer:
             pacer.wait()
         assert clock.slept == []
 
+    def test_a_refusal_widens_the_gap(self):
+        # The probed spacing is right for the address it was probed from. On
+        # Vercel's shared egress the same wave drew 429s, so the pacer has to
+        # find the limit rather than assume it.
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, 10.0, clock.monotonic, clock.sleep)
+        pacer.penalise()
+        assert pacer.spacing == 3.0
+
+    def test_widening_stops_at_the_maximum(self):
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, 4.0, clock.monotonic, clock.sleep)
+        for _ in range(10):
+            pacer.penalise()
+        assert pacer.spacing == 4.0
+
+    def test_easing_off_never_goes_below_the_base(self):
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, 10.0, clock.monotonic, clock.sleep)
+        for _ in range(50):
+            pacer.relax()
+        assert pacer.spacing == 1.5
+
+    def test_a_pacer_that_cannot_widen_still_relaxes_to_its_base(self):
+        # A pacer built with no maximum is fixed; relax must not drift it under
+        # the base and quietly remove the spacing entirely.
+        clock = self.Clock()
+        pacer = reddit_data._StartPacer(1.5, clock=clock.monotonic, sleep=clock.sleep)
+        pacer.penalise()
+        pacer.relax()
+        assert pacer.spacing == 1.5
+
+    def test_widening_is_faster_than_easing_off(self):
+        # Losing material is worse than being slow, so the recovery is the
+        # cautious direction.
+        assert reddit_data.PACER_PENALTY_FACTOR > 1
+        assert 0 < reddit_data.PACER_RELAX_FACTOR < 1
+
     def test_the_module_pacer_uses_the_probed_spacing(self, unpaced_search):
         # `unpaced_search` hands back the real pacer it displaced for the suite,
         # so this asserts on what production runs with, not on the stand-in.
@@ -964,6 +1072,32 @@ class TestSearchPosts:
         # come back however old they are.
         assert "after" not in calls[0]["params"]
         assert "before" not in calls[0]["params"]
+
+    def test_reports_that_the_archive_answered_even_with_no_rows(self, monkeypatch):
+        # A 200 with an empty list is the ONLY case a caller may describe to a
+        # reader as "nothing mentioned it".
+        self._capture(monkeypatch, [{"data": []}])
+        outcome = {}
+        assert reddit_data.search_posts("x", ["term"], outcome=outcome) == []
+        assert outcome["answered"] is True
+
+    def test_reports_that_the_archive_never_answered(self, monkeypatch):
+        # Every attempt refused. Same empty list, entirely different sentence.
+        self._capture(monkeypatch, [429])
+        outcome = {}
+        assert reddit_data.search_posts("x", ["term"], outcome=outcome) == []
+        assert outcome["answered"] is False
+
+    def test_one_answered_term_counts_as_answered(self, monkeypatch):
+        self._capture(monkeypatch, [429, {"data": []}])
+        outcome = {}
+        reddit_data.search_posts("x", ["one", "two"], outcome=outcome)
+        assert outcome["answered"] is True
+
+    def test_the_outcome_is_optional(self, monkeypatch):
+        # Every existing caller passes nothing, and must keep working.
+        self._capture(monkeypatch, [{"data": []}])
+        assert reddit_data.search_posts("x", ["term"]) == []
 
     def test_uses_the_longer_search_timeout(self, monkeypatch):
         calls = self._capture(monkeypatch, [{"data": []}])
@@ -1071,6 +1205,26 @@ class TestFetchCommentsForPosts:
         self._capture(monkeypatch, {"p1": [], "p2": [], "p3": []})
         reddit_data.fetch_comments_for_posts(["p1", "p2", "p3"])
         assert len(taken) == 3
+
+    def test_reports_how_many_threads_the_archive_answered_for(self, monkeypatch):
+        # 25 refused requests and 25 threads with no replies are the same empty
+        # list; only one of them is worth telling the reader about.
+        self._capture(monkeypatch, {"p1": [_comment_row("c1", 1700000000)], "p2": 429})
+        outcome = {}
+        reddit_data.fetch_comments_for_posts(["p1", "p2"], outcome=outcome)
+        assert outcome == {"asked": 2, "answered": 1}
+
+    def test_reports_a_wholly_refused_fetch(self, monkeypatch):
+        self._capture(monkeypatch, {"p1": 429, "p2": 429})
+        outcome = {}
+        assert reddit_data.fetch_comments_for_posts(["p1", "p2"], outcome=outcome) == []
+        assert outcome["answered"] == 0
+
+    def test_answered_counts_threads_that_simply_had_no_replies(self, monkeypatch):
+        self._capture(monkeypatch, {"p1": [], "p2": []})
+        outcome = {}
+        assert reddit_data.fetch_comments_for_posts(["p1", "p2"], outcome=outcome) == []
+        assert outcome["answered"] == 2
 
     def test_comments_are_paced_more_gently_than_searches(self):
         # One shared gate at the search spacing would stretch 25 comment

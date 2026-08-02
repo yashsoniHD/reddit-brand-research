@@ -324,6 +324,30 @@ The "25 back-to-back requests, no 429" figure above is not contradicted by any o
 this: those were cheap `limit=1` lookups, and the limits are computed from query
 cost. A text search is one of the expensive ones.
 
+### The budget belongs to the address, not to the code (2026-08-02, production)
+
+Every number above was probed from a residential IP. Deployed to Vercel, whose
+functions egress from addresses shared with other tenants, the same paced wave
+behaved very differently: 4 of 8 searches came back 429 (a 5th got a 422), and
+then **all 25 comment requests were refused**, producing a report built from 3 of
+8 communities with no comments at all.
+
+Two consequences, both now in the code:
+
+- **Pacing cannot be a constant.** `_StartPacer` widens on a 429 and eases back
+  on a success, so a deployment with the whole budget keeps the fast path and one
+  with a slice of it slows to fit. A penalty applies to both pacers, because the
+  limit is a property of the address rather than of the endpoint.
+- **429 retries should wait the published window.** `X-RateLimit-Reset` says how
+  long the current window has left; the old fixed 1s/2s backoff spent all three
+  attempts inside three seconds and gave up while the window still had most of a
+  minute to run. Capped at 20s so one community cannot eat the run.
+
+The reporting consequence matters as much: an empty list from `search_posts` or
+`fetch_comments_for_posts` means either "the archive looked and found nothing" or
+"the archive would not answer", and both used to reach the reader as the first
+one. Both functions now take an `outcome` out-parameter saying which happened.
+
 ## Full-text search syntax
 
 Marked out of date in the docs, and subject to change.

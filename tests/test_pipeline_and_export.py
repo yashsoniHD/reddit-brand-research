@@ -2107,6 +2107,131 @@ class TestRetrievalMode:
         assert sorted(name for name, _ in search.calls) == sorted(names)
         assert all(terms == ["one"] for _, terms in search.calls)
 
+    # -- refused is not the same as empty ---------------------------------------
+    # Measured in production: 5 of 8 searches came back 429 and every one of the
+    # 25 comment requests was refused, and the report said "Nothing in
+    # r/MachineLearning mentioned ML" and shipped with no comments and no
+    # explanation. An empty list from the archive has two very different causes
+    # and the reader has to be told which one they got.
+
+    @staticmethod
+    def _refusing_search(refused_subs):
+        """A `search_posts` fake that answers for some communities, not others."""
+
+        def fake(subreddit, terms, limit=100, deadline=None, phrases=None, outcome=None):
+            answered = subreddit not in refused_subs
+            if isinstance(outcome, dict):
+                outcome["answered"] = answered
+            return [] if not answered else fake_posts(subreddit, count=20)
+
+        return fake
+
+    def test_a_community_the_archive_refused_is_not_reported_as_empty(self):
+        bundle = build_bundle(
+            discover=make_discover(["alpha", "beta"], terms={
+                "alpha": ["one"], "beta": ["two"],
+            }),
+            search_posts=self._refusing_search({"beta"}),
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        notices = " ".join(bundle["notices"])
+        assert "would not answer for r/beta" in notices
+        # The false sentence, in the words it used to be written in.
+        assert "Nothing in r/beta" not in notices
+
+    def test_a_community_answered_on_a_later_term_is_not_called_refused(self):
+        # A community can be refused on its first term and answered on its
+        # second; only the answer is the truth about it.
+        seen = {"count": 0}
+
+        def fake(subreddit, terms, limit=100, deadline=None, phrases=None, outcome=None):
+            seen["count"] += 1
+            answered = seen["count"] > 1
+            if isinstance(outcome, dict):
+                outcome["answered"] = answered
+            return fake_posts(subreddit, count=3) if answered else []
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["first", "second"]}),
+            search_posts=fake,
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        assert "would not answer" not in " ".join(bundle["notices"])
+
+    def test_empty_communities_are_one_notice_rather_than_one_each(self):
+        # Five identical warnings stacked above a report read as five problems
+        # and bury the report itself.
+        names = ["alpha", "beta", "gamma", "delta"]
+        bundle = build_bundle(
+            discover=make_discover(
+                names + ["found"],
+                terms={name: ["missing"] for name in names} | {"found": ["hit"]},
+            ),
+            search_posts=make_search(by_sub={
+                **{name: [] for name in names}, "found": 30,
+            }),
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        empties = [n for n in bundle["notices"] if n.startswith("Nothing in")]
+        assert len(empties) == 1
+        for name in names:
+            assert "r/{}".format(name) in empties[0]
+
+    def test_refused_communities_are_one_notice_rather_than_one_each(self):
+        names = ["alpha", "beta", "gamma"]
+        bundle = build_bundle(
+            discover=make_discover(
+                names + ["found"],
+                terms={name: ["term"] for name in names} | {"found": ["hit"]},
+            ),
+            search_posts=self._refusing_search(set(names)),
+            fetch_comments_for_posts=make_comments_for_posts(),
+        )
+        refusals = [n for n in bundle["notices"] if "would not answer" in n]
+        assert len(refusals) == 1
+        for name in names:
+            assert "r/{}".format(name) in refusals[0]
+
+    def test_replies_that_were_all_refused_are_said_out_loud(self):
+        # The failure that shipped silently: every comment request 429s,
+        # fetch_comments_for_posts returns [] without raising, and the report is
+        # built from posts alone with nothing saying so.
+        def no_comments(post_ids, limit_per_post=100, deadline=None, phrases=None,
+                        outcome=None):
+            if isinstance(outcome, dict):
+                outcome["asked"] = len(list(post_ids))
+                outcome["answered"] = 0
+            return []
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["hit"]}),
+            search_posts=make_search(count=30),
+            fetch_comments_for_posts=no_comments,
+        )
+        assert any(
+            "would not return the replies" in notice for notice in bundle["notices"]
+        )
+
+    def test_threads_that_genuinely_have_no_replies_say_nothing(self):
+        # The mirror: the archive answered for every thread and they had no
+        # replies. That is not a failure and must not read like one.
+        def empty_but_answered(post_ids, limit_per_post=100, deadline=None,
+                               phrases=None, outcome=None):
+            ids = list(post_ids)
+            if isinstance(outcome, dict):
+                outcome["asked"] = len(ids)
+                outcome["answered"] = len(ids)
+            return []
+
+        bundle = build_bundle(
+            discover=make_discover(["alpha"], terms={"alpha": ["hit"]}),
+            search_posts=make_search(count=30),
+            fetch_comments_for_posts=empty_but_answered,
+        )
+        assert not any(
+            "would not return the replies" in notice for notice in bundle["notices"]
+        )
+
     def test_the_report_records_only_the_terms_it_actually_searched_for(self):
         # The budget and the enough-material stop mean a community's second term
         # is often never issued. Recording discovery's proposal instead would have
